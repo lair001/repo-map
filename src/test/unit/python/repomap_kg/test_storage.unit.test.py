@@ -1,13 +1,18 @@
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
+from repomap_kg.observations import RawObservation
 from repomap_kg.storage import (
     StorageSchemaError,
     apply_migrations,
+    build_file_ingest_sql,
     default_rdbms_root,
     discover_migrations,
+    file_rows_from_observations,
+    load_file_observations,
 )
 
 
@@ -142,6 +147,107 @@ SELECT 1;
             stderr=-1,
             text=True,
         )
+
+    def test_file_rows_from_observations_preserves_file_metadata(self):
+        observation = RawObservation(
+            kind="file",
+            source_id="src/app.py",
+            path="src/app.py",
+            confidence="manual",
+            extractor="fixture-discovery",
+            extractor_version="0.1.0",
+            metadata={
+                "language": "python",
+                "role": "source",
+                "content_hash": "a" * 64,
+                "generated": False,
+                "executable": False,
+            },
+        )
+        non_file = RawObservation(
+            kind="shell.command",
+            source_id="scripts/build.sh#call:echo",
+            path="scripts/build.sh",
+            confidence="heuristic",
+            extractor="fixture-shell",
+            extractor_version="0.1.0",
+            target="tool:echo",
+        )
+
+        rows = file_rows_from_observations([non_file, observation])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].path, "src/app.py")
+        self.assertEqual(rows[0].content_hash, "a" * 64)
+        self.assertEqual(rows[0].metadata_json["confidence"], "manual")
+        self.assertEqual(rows[0].metadata_json["raw_source_id"], "src/app.py")
+
+    def test_build_file_ingest_sql_quotes_values_and_sets_run(self):
+        rows = file_rows_from_observations(
+            [
+                RawObservation(
+                    kind="file",
+                    source_id="docs/it's.md",
+                    path="docs/it's.md",
+                    confidence="manual",
+                    extractor="fixture-discovery",
+                    extractor_version="0.1.0",
+                    metadata={
+                        "language": "markdown",
+                        "role": "documentation",
+                        "content_hash": None,
+                        "generated": False,
+                        "executable": False,
+                    },
+                )
+            ]
+        )
+
+        sql = build_file_ingest_sql(
+            rows,
+            repository_name="fixture's repo",
+            root_path="/tmp/fixture",
+            git_commit="abc123",
+        )
+
+        self.assertIn("fixture''s repo", sql)
+        self.assertIn("docs/it''s.md", sql)
+        self.assertIn("last_seen_run_id", sql)
+        self.assertIn('"confidence": "manual"', sql)
+
+    def test_load_file_observations_returns_psql_summary(self):
+        observation = RawObservation(
+            kind="file",
+            source_id="README.md",
+            path="README.md",
+            confidence="extracted",
+            extractor="fixture-discovery",
+            extractor_version="0.1.0",
+            metadata={
+                "language": "markdown",
+                "role": "documentation",
+                "content_hash": "0" * 64,
+                "generated": False,
+                "executable": False,
+            },
+        )
+        completed = SimpleNamespace(
+            stdout='{"repository_id": 7, "run_id": 11, "files": 1}\n'
+        )
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+            summary = load_file_observations(
+                ["-d", "postgres"],
+                [observation],
+                repository_name="fixture",
+                root_path="/tmp/fixture",
+                psql_command="/bin/psql",
+            )
+
+        self.assertEqual(summary.repository_id, 7)
+        self.assertEqual(summary.run_id, 11)
+        self.assertEqual(summary.files, 1)
+        self.assertIn("-qAt", run.call_args.args[0])
 
 
 if __name__ == "__main__":

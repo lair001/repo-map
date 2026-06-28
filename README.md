@@ -34,7 +34,7 @@ files, and command-line tools.
 
 RepoMap has an initial Python package skeleton with a minimal CLI identity
 surface, raw observation JSONL validation, first file and entrypoint queries,
-and initial Postgres storage schema scaffolding. The initial specs live under
+and initial Postgres schema-backed file ingestion. The initial specs live under
 `docs/specs/`.
 
 ## Development

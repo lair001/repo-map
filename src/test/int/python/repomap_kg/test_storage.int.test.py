@@ -5,7 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from repomap_kg.storage import apply_migrations, default_rdbms_root
+from repomap_kg.observations import RawObservation
+from repomap_kg.storage import (
+    apply_migrations,
+    default_rdbms_root,
+    load_file_observations,
+)
 
 
 class StorageIntegrationTests(unittest.TestCase):
@@ -88,6 +93,71 @@ SELECT path FROM files WHERE role = 'entrypoint';
             "edges,evidence,files,nodes,repositories,runs",
         )
         self.assertEqual(inserted_path, "bin/tool")
+
+    def test_load_file_observations_inserts_repository_run_and_files(self):
+        require_postgres_binaries()
+        observations = [
+            RawObservation(
+                kind="file",
+                source_id="bin/tool",
+                path="bin/tool",
+                confidence="manual",
+                extractor="fixture-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "shell",
+                    "role": "entrypoint",
+                    "content_hash": "f" * 64,
+                    "generated": False,
+                    "executable": True,
+                },
+            ),
+            RawObservation(
+                kind="shell.command",
+                source_id="bin/tool#call:echo",
+                path="bin/tool",
+                confidence="heuristic",
+                extractor="fixture-shell",
+                extractor_version="0.1.0",
+                target="tool:echo",
+            ),
+        ]
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            summary = load_file_observations(
+                postgres.psql_args,
+                observations,
+                repository_name="fixture",
+                root_path="/tmp/fixture",
+                git_commit="abc123",
+                psql_command=postgres.psql_command,
+            )
+            row = postgres.psql_scalar(
+                """
+SELECT repositories.name
+       || '|'
+       || runs.git_commit
+       || '|'
+       || files.path
+       || '|'
+       || files.role
+       || '|'
+       || files.executable::text
+       || '|'
+       || (files.metadata_json->>'confidence')
+FROM files
+JOIN repositories ON repositories.id = files.repository_id
+JOIN runs ON runs.id = files.last_seen_run_id;
+"""
+            )
+
+        self.assertEqual(summary.files, 1)
+        self.assertEqual(row, "fixture|abc123|bin/tool|entrypoint|true|manual")
 
 
 class PostgresCluster:
@@ -201,16 +271,23 @@ def postgres_bin_dir() -> Path:
 def run(command, input_text=None):
     env = os.environ.copy()
     env["LC_ALL"] = "C"
-    return subprocess.run(
-        command,
-        check=True,
-        env=env,
-        input=input_text,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=30,
-    )
+    try:
+        return subprocess.run(
+            command,
+            check=True,
+            env=env,
+            input=input_text,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.CalledProcessError as error:
+        raise AssertionError(
+            f"command failed: {command}\n"
+            f"stdout:\n{error.stdout}\n"
+            f"stderr:\n{error.stderr}"
+        ) from error
 
 
 if __name__ == "__main__":

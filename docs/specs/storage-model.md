@@ -139,10 +139,11 @@ Migration SQL files should live under folders organized first by year and then
 by month, using Liquibase formatted SQL changesets. This keeps the history
 browsable while avoiding one large flat migration directory.
 
-The initial migration is:
+The initial migrations are:
 
 ```text
 src/main/resources/rdbms/2026/06/28-001-core-create_graph_tables.sql
+src/main/resources/rdbms/2026/06/28-002-core-add_file_run_tracking.sql
 ```
 
 Until the Liquibase CLI is part of the local toolchain, RepoMap includes a
@@ -150,6 +151,10 @@ small local schema loader in `repomap_kg.storage`. It discovers the
 Liquibase-formatted SQL files from `changelog.yaml` and applies them with
 `psql` in disposable Postgres integration tests. This is a test substitute for
 local verification, not a replacement for Liquibase as the migration format.
+
+The first ingestion path loads raw discovery `file` observations into Postgres
+by creating or updating a repository, recording an indexing run, and upserting
+file rows with `last_seen_run_id` pointing back to the run that observed them.
 
 ## Local Development
 

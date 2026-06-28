@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import re
+import json
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+from repomap_kg.observations import RawObservation
 
 
 class StorageSchemaError(ValueError):
@@ -17,6 +21,25 @@ class StorageSchemaError(ValueError):
 class Migration:
     path: Path
     changeset_id: str
+
+
+@dataclass(frozen=True)
+class FileRow:
+    path: str
+    language: str
+    role: str
+    confidence: str
+    content_hash: str | None
+    executable: bool
+    generated: bool
+    metadata_json: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class LoadSummary:
+    repository_id: int
+    run_id: int
+    files: int
 
 
 CHANGESET_PATTERN = re.compile(r"^--changeset\s+(\S+)")
@@ -101,5 +124,163 @@ def apply_migrations(
     return migrations
 
 
+def file_rows_from_observations(
+    observations: Sequence[RawObservation],
+) -> tuple[FileRow, ...]:
+    rows = []
+    for observation in observations:
+        if observation.kind != "file":
+            continue
+        metadata = dict(observation.metadata)
+        rows.append(
+            FileRow(
+                path=observation.path,
+                language=metadata_text(metadata, "language", "unknown"),
+                role=metadata_text(metadata, "role", "unknown"),
+                confidence=observation.confidence,
+                content_hash=optional_text(metadata.get("content_hash")),
+                executable=metadata_bool(metadata, "executable"),
+                generated=metadata_bool(metadata, "generated"),
+                metadata_json={
+                    "raw_source_id": observation.source_id,
+                    "confidence": observation.confidence,
+                    "extractor": observation.extractor,
+                    "extractor_version": observation.extractor_version,
+                    "source_metadata": metadata,
+                },
+            )
+        )
+    return tuple(sorted(rows, key=lambda row: row.path))
+
+
+def load_file_observations(
+    psql_args: Sequence[str],
+    observations: Sequence[RawObservation],
+    *,
+    repository_name: str,
+    root_path: str,
+    git_commit: str | None = None,
+    psql_command: str = "psql",
+) -> LoadSummary:
+    rows = file_rows_from_observations(observations)
+    sql = build_file_ingest_sql(
+        rows,
+        repository_name=repository_name,
+        root_path=root_path,
+        git_commit=git_commit,
+    )
+    result = subprocess.run(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        check=True,
+        input=sql,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    payload = json.loads(last_output_line(result.stdout))
+    return LoadSummary(
+        repository_id=int(payload["repository_id"]),
+        run_id=int(payload["run_id"]),
+        files=int(payload["files"]),
+    )
+
+
+def build_file_ingest_sql(
+    rows: Sequence[FileRow],
+    *,
+    repository_name: str,
+    root_path: str,
+    git_commit: str | None = None,
+) -> str:
+    statements = [
+        "BEGIN;",
+        (
+            "INSERT INTO repositories(name, root_path) "
+            f"VALUES ({sql_literal(repository_name)}, {sql_literal(root_path)}) "
+            "ON CONFLICT (root_path) DO UPDATE SET name = EXCLUDED.name "
+            "RETURNING id"
+        ),
+        "\\gset repo_",
+        (
+            "INSERT INTO runs(repository_id, git_commit, status) "
+            f"VALUES (:repo_id, {sql_literal(git_commit)}, 'complete') "
+            "RETURNING id"
+        ),
+        "\\gset run_",
+    ]
+    statements.extend(file_upsert_sql(row) for row in rows)
+    statements.extend(
+        [
+            "COMMIT;",
+            (
+                "SELECT json_build_object("
+                "'repository_id', :repo_id::bigint, "
+                "'run_id', :run_id::bigint, "
+                f"'files', {len(rows)}"
+                ")::text;"
+            ),
+        ]
+    )
+    return "\n".join(statements) + "\n"
+
+
+def file_upsert_sql(row: FileRow) -> str:
+    return (
+        "INSERT INTO files("
+        "repository_id, last_seen_run_id, path, language, role, content_hash, "
+        "executable, generated, metadata_json"
+        ") VALUES ("
+        ":repo_id, :run_id, "
+        f"{sql_literal(row.path)}, "
+        f"{sql_literal(row.language)}, "
+        f"{sql_literal(row.role)}, "
+        f"{sql_literal(row.content_hash)}, "
+        f"{sql_bool(row.executable)}, "
+        f"{sql_bool(row.generated)}, "
+        f"{sql_literal(json.dumps(row.metadata_json, sort_keys=True))}::jsonb"
+        ") ON CONFLICT (repository_id, path) DO UPDATE SET "
+        "last_seen_run_id = EXCLUDED.last_seen_run_id, "
+        "language = EXCLUDED.language, "
+        "role = EXCLUDED.role, "
+        "content_hash = EXCLUDED.content_hash, "
+        "executable = EXCLUDED.executable, "
+        "generated = EXCLUDED.generated, "
+        "metadata_json = EXCLUDED.metadata_json;"
+    )
+
+
 def clean_yaml_value(value: str) -> str:
     return value.strip().strip("'\"")
+
+
+def metadata_text(metadata: dict[str, Any], key: str, default: str) -> str:
+    value = metadata.get(key, default)
+    if not isinstance(value, str) or not value:
+        return default
+    return value
+
+
+def metadata_bool(metadata: dict[str, Any], key: str) -> bool:
+    value = metadata.get(key, False)
+    return value if isinstance(value, bool) else False
+
+
+def optional_text(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def sql_literal(value: str | None) -> str:
+    if value is None:
+        return "NULL"
+    return "'" + value.replace("'", "''") + "'"
+
+
+def sql_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def last_output_line(stdout: str) -> str:
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    if not lines:
+        raise StorageSchemaError("psql did not return a load summary")
+    return lines[-1]
