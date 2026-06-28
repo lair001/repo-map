@@ -170,11 +170,8 @@ def load_file_observations(
         [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
         input_text=sql,
     )
-    payload = json.loads(last_output_line(result.stdout))
-    return LoadSummary(
-        repository_id=int(payload["repository_id"]),
-        run_id=int(payload["run_id"]),
-        files=int(payload["files"]),
+    return load_summary_from_payload(
+        parse_psql_json(result.stdout, "load summary")
     )
 
 
@@ -188,10 +185,7 @@ def query_file_records(
         [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
         input_text=build_file_query_sql(root_path),
     )
-    try:
-        payload = json.loads(last_output_line(result.stdout))
-    except json.JSONDecodeError as error:
-        raise StorageSchemaError("psql did not return file records as JSON") from error
+    payload = parse_psql_json(result.stdout, "file records")
     if not isinstance(payload, list):
         raise StorageSchemaError("psql did not return file records as a JSON array")
     return tuple(file_record_from_storage_payload(item) for item in payload)
@@ -310,6 +304,26 @@ def file_record_from_storage_payload(payload: Any) -> FileRecord:
         generated=payload_bool(payload, "generated"),
         executable=payload_bool(payload, "executable"),
     )
+
+
+def load_summary_from_payload(payload: Any) -> LoadSummary:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed load summary")
+    try:
+        return LoadSummary(
+            repository_id=int(payload["repository_id"]),
+            run_id=int(payload["run_id"]),
+            files=int(payload["files"]),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise StorageSchemaError("psql returned a malformed load summary") from error
+
+
+def parse_psql_json(stdout: str, label: str) -> Any:
+    try:
+        return json.loads(last_output_line(stdout))
+    except json.JSONDecodeError as error:
+        raise StorageSchemaError(f"psql did not return {label} as JSON") from error
 
 
 def payload_text(payload: dict[str, Any], key: str) -> str:

@@ -355,6 +355,35 @@ JOIN runs ON runs.id = files.last_seen_run_id;
         self.assertEqual(stdout, "")
         self.assertIn("connection refused", stderr)
 
+    def test_storage_load_files_cli_reports_bad_summary_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_jsonl = Path(tmpdir) / "raw-observations.jsonl"
+            raw_jsonl.write_text("")
+            bad_json_psql = Path(tmpdir) / "psql"
+            bad_json_psql.write_text(
+                "#!/bin/sh\n"
+                "echo '{bad json}'\n"
+                "exit 0\n"
+            )
+            bad_json_psql.chmod(0o755)
+
+            exit_code, stdout, stderr = run_repo_map_in_process(
+                "storage",
+                "load-files",
+                str(raw_jsonl),
+                "--repository-name",
+                "fixture",
+                "--root-path",
+                "/tmp/fixture",
+                "--psql-command",
+                str(bad_json_psql),
+                "--json",
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("load summary", stderr)
+
     def test_storage_entrypoints_cli_reads_loaded_entrypoint_rows(self):
         require_postgres_binaries()
         observations = [

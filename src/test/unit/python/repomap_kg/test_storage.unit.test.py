@@ -303,6 +303,30 @@ SELECT 1;
                     root_path="/tmp/fixture",
                 )
 
+    def test_load_file_observations_rejects_invalid_summary_json(self):
+        completed = SimpleNamespace(stdout="{bad json}\n")
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(StorageSchemaError, "load summary"):
+                load_file_observations(
+                    ["-d", "postgres"],
+                    [],
+                    repository_name="fixture",
+                    root_path="/tmp/fixture",
+                )
+
+    def test_load_file_observations_rejects_malformed_summary_json(self):
+        completed = SimpleNamespace(stdout='{"repository_id": 7}\n')
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(StorageSchemaError, "malformed load summary"):
+                load_file_observations(
+                    ["-d", "postgres"],
+                    [],
+                    repository_name="fixture",
+                    root_path="/tmp/fixture",
+                )
+
     def test_query_file_records_returns_file_records(self):
         completed = SimpleNamespace(
             stdout=(
@@ -350,6 +374,13 @@ SELECT 1;
 
         with patch("repomap_kg.storage.subprocess.run", return_value=completed):
             with self.assertRaisesRegex(StorageSchemaError, "file records"):
+                query_file_records(["-d", "postgres"], root_path="/tmp/fixture")
+
+    def test_query_file_records_rejects_invalid_json(self):
+        completed = SimpleNamespace(stdout="{bad json}\n")
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(StorageSchemaError, "file records as JSON"):
                 query_file_records(["-d", "postgres"], root_path="/tmp/fixture")
 
     def test_build_file_query_sql_quotes_root_path(self):
