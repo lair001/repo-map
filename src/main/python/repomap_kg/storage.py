@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from repomap_kg.files import FileRecord
 from repomap_kg.observations import RawObservation
 
 
@@ -185,6 +186,29 @@ def load_file_observations(
     )
 
 
+def query_file_records(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    psql_command: str = "psql",
+) -> tuple[FileRecord, ...]:
+    result = subprocess.run(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        check=True,
+        input=build_file_query_sql(root_path),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        payload = json.loads(last_output_line(result.stdout))
+    except json.JSONDecodeError as error:
+        raise StorageSchemaError("psql did not return file records as JSON") from error
+    if not isinstance(payload, list):
+        raise StorageSchemaError("psql did not return file records as a JSON array")
+    return tuple(file_record_from_storage_payload(item) for item in payload)
+
+
 def build_file_ingest_sql(
     rows: Sequence[FileRow],
     *,
@@ -224,6 +248,22 @@ def build_file_ingest_sql(
     return "\n".join(statements) + "\n"
 
 
+def build_file_query_sql(root_path: str) -> str:
+    return (
+        "SELECT COALESCE(json_agg(json_build_object("
+        "'path', files.path, "
+        "'language', COALESCE(files.language, 'unknown'), "
+        "'role', COALESCE(files.role, 'unknown'), "
+        "'confidence', COALESCE(files.metadata_json->>'confidence', 'unknown'), "
+        "'generated', files.generated, "
+        "'executable', files.executable"
+        ") ORDER BY files.path), '[]'::json)::text "
+        "FROM files "
+        "JOIN repositories ON repositories.id = files.repository_id "
+        f"WHERE repositories.root_path = {sql_literal(root_path)};"
+    )
+
+
 def file_upsert_sql(row: FileRow) -> str:
     return (
         "INSERT INTO files("
@@ -247,6 +287,33 @@ def file_upsert_sql(row: FileRow) -> str:
         "generated = EXCLUDED.generated, "
         "metadata_json = EXCLUDED.metadata_json;"
     )
+
+
+def file_record_from_storage_payload(payload: Any) -> FileRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed file record")
+    return FileRecord(
+        path=payload_text(payload, "path"),
+        language=payload_text(payload, "language"),
+        role=payload_text(payload, "role"),
+        confidence=payload_text(payload, "confidence"),
+        generated=payload_bool(payload, "generated"),
+        executable=payload_bool(payload, "executable"),
+    )
+
+
+def payload_text(payload: dict[str, Any], key: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value:
+        raise StorageSchemaError(f"psql returned a malformed file record: {key}")
+    return value
+
+
+def payload_bool(payload: dict[str, Any], key: str) -> bool:
+    value = payload.get(key)
+    if not isinstance(value, bool):
+        raise StorageSchemaError(f"psql returned a malformed file record: {key}")
+    return value
 
 
 def clean_yaml_value(value: str) -> str:

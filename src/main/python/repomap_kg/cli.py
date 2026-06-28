@@ -27,6 +27,7 @@ from repomap_kg.project_identity import PROJECT_IDENTITY
 from repomap_kg.storage import (
     StorageSchemaError,
     load_file_observations,
+    query_file_records,
 )
 
 
@@ -138,6 +139,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit load summary as JSON",
+    )
+    storage_files = storage_subcommands.add_parser(
+        "files",
+        help="list stored files from Postgres storage",
+    )
+    storage_files.add_argument("--root-path", required=True)
+    storage_files.add_argument("--role", help="include only files with this role")
+    storage_files.add_argument(
+        "--language",
+        help="include only files with this language",
+    )
+    storage_files.add_argument(
+        "--generated",
+        choices=("include", "exclude", "only"),
+        default="include",
+        help="control generated-file rows",
+    )
+    storage_files.add_argument("--pg-host")
+    storage_files.add_argument("--pg-port")
+    storage_files.add_argument("--pg-user")
+    storage_files.add_argument("--pg-database")
+    storage_files.add_argument("--psql-command", default="psql")
+    storage_files.add_argument(
+        "--json",
+        action="store_true",
+        help="emit stored file records as JSON",
     )
 
     return parser
@@ -254,6 +281,28 @@ def main(argv: list[str] | None = None) -> int:
                 f"loaded {summary.files} files into "
                 f"repository {summary.repository_id} run {summary.run_id}"
             )
+        return 0
+
+    if args.command == "storage" and args.storage_command == "files":
+        try:
+            records = query_file_records(
+                psql_args_from_args(args),
+                root_path=args.root_path,
+                psql_command=args.psql_command,
+            )
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        filters = FileFilters(
+            role=args.role,
+            language=args.language,
+            generated=args.generated,
+        )
+        records = filter_file_records(records, filters)
+        if args.json:
+            print(json.dumps(records_to_jsonable(records), sort_keys=True))
+        else:
+            print(format_file_table(records))
         return 0
 
     parser.print_help()

@@ -243,6 +243,94 @@ JOIN runs ON runs.id = files.last_seen_run_id;
         )
         self.assertEqual(stored_path, "README.md")
 
+    def test_storage_files_cli_reads_loaded_file_rows(self):
+        require_postgres_binaries()
+        observations = [
+            RawObservation(
+                kind="file",
+                source_id="generated/report.json",
+                path="generated/report.json",
+                confidence="extracted",
+                extractor="fixture-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "json",
+                    "role": "generated",
+                    "content_hash": "a" * 64,
+                    "generated": True,
+                    "executable": False,
+                },
+            ),
+            RawObservation(
+                kind="file",
+                source_id="src/main/python/app.py",
+                path="src/main/python/app.py",
+                confidence="manual",
+                extractor="fixture-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "python",
+                    "role": "source",
+                    "content_hash": "b" * 64,
+                    "generated": False,
+                    "executable": False,
+                },
+            ),
+        ]
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            load_file_observations(
+                postgres.psql_args,
+                observations,
+                repository_name="fixture",
+                root_path="/tmp/fixture",
+                psql_command=postgres.psql_command,
+            )
+            exit_code, stdout, stderr = run_repo_map_in_process(
+                "storage",
+                "files",
+                "--root-path",
+                "/tmp/fixture",
+                "--role",
+                "source",
+                "--language",
+                "python",
+                "--generated",
+                "exclude",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+                "--json",
+            )
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(
+            payload,
+            [
+                {
+                    "path": "src/main/python/app.py",
+                    "language": "python",
+                    "role": "source",
+                    "confidence": "manual",
+                    "generated": False,
+                    "executable": False,
+                }
+            ],
+        )
+
 
 class PostgresCluster:
     def __init__(self, root: Path):

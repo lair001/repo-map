@@ -9,9 +9,11 @@ from repomap_kg.storage import (
     StorageSchemaError,
     apply_migrations,
     build_file_ingest_sql,
+    build_file_query_sql,
     default_rdbms_root,
     discover_migrations,
     file_rows_from_observations,
+    query_file_records,
     load_file_observations,
 )
 
@@ -248,6 +250,46 @@ SELECT 1;
         self.assertEqual(summary.run_id, 11)
         self.assertEqual(summary.files, 1)
         self.assertIn("-qAt", run.call_args.args[0])
+
+    def test_query_file_records_returns_file_records(self):
+        completed = SimpleNamespace(
+            stdout=(
+                "["
+                '{"path":"README.md","language":"markdown",'
+                '"role":"documentation","confidence":"manual",'
+                '"generated":false,"executable":false},'
+                '{"path":"bin/tool","language":"shell",'
+                '"role":"entrypoint","confidence":"extracted",'
+                '"generated":false,"executable":true}'
+                "]\n"
+            )
+        )
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+            records = query_file_records(
+                ["-d", "postgres"],
+                root_path="/tmp/fixture",
+                psql_command="/bin/psql",
+            )
+
+        self.assertEqual([record.path for record in records], ["README.md", "bin/tool"])
+        self.assertEqual(records[0].role, "documentation")
+        self.assertTrue(records[1].executable)
+        self.assertIn("-qAt", run.call_args.args[0])
+        self.assertIn("repositories.root_path = '/tmp/fixture'", run.call_args.kwargs["input"])
+
+    def test_query_file_records_rejects_non_array_json(self):
+        completed = SimpleNamespace(stdout='{"path": "README.md"}\n')
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(StorageSchemaError, "file records"):
+                query_file_records(["-d", "postgres"], root_path="/tmp/fixture")
+
+    def test_build_file_query_sql_quotes_root_path(self):
+        sql = build_file_query_sql("/tmp/fixture's repo")
+
+        self.assertIn("fixture''s repo", sql)
+        self.assertIn("ORDER BY files.path", sql)
 
 
 if __name__ == "__main__":

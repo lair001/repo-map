@@ -158,6 +158,9 @@ file rows with `last_seen_run_id` pointing back to the run that observed them.
 The CLI exposes this path as `repomap-kg storage load-files`, accepting raw
 observation JSONL plus repository identity fields and optional `psql` connection
 arguments.
+Stored file rows can be read back with `repomap-kg storage files`, using the
+same role, language, generated-file, table, and JSON presentation controls as
+the raw-JSONL `files` command.
 
 ## Local Development
 

@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from repomap_kg import __version__
 from repomap_kg.cli import build_parser, main
+from repomap_kg.files import FileRecord
 from repomap_kg.observations import RawObservation, write_observations_jsonl
 from repomap_kg.storage import LoadSummary, StorageSchemaError
 
@@ -308,6 +309,94 @@ class CliUnitTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertIn("psql did not return", stderr.getvalue())
+
+    def test_storage_files_prints_filtered_json_records(self):
+        records = (
+            FileRecord(
+                path="generated/report.json",
+                language="json",
+                role="generated",
+                confidence="extracted",
+                generated=True,
+                executable=False,
+            ),
+            FileRecord(
+                path="src/main/python/app.py",
+                language="python",
+                role="source",
+                confidence="manual",
+                generated=False,
+                executable=False,
+            ),
+        )
+        stdout = io.StringIO()
+
+        with patch("repomap_kg.cli.query_file_records", return_value=records) as query:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "files",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--role",
+                        "source",
+                        "--language",
+                        "python",
+                        "--generated",
+                        "exclude",
+                        "--pg-host",
+                        "/tmp/socket",
+                        "--pg-port",
+                        "5432",
+                        "--pg-user",
+                        "repo_map_test",
+                        "--pg-database",
+                        "postgres",
+                        "--psql-command",
+                        "/bin/psql",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload[0]["path"], "src/main/python/app.py")
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(
+            query.call_args.args[0],
+            [
+                "-h",
+                "/tmp/socket",
+                "-p",
+                "5432",
+                "-U",
+                "repo_map_test",
+                "-d",
+                "postgres",
+            ],
+        )
+        self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+
+    def test_storage_files_reports_query_errors(self):
+        stderr = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_file_records",
+            side_effect=StorageSchemaError("psql did not return file records"),
+        ):
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "storage",
+                        "files",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("psql did not return file records", stderr.getvalue())
 
     def test_discover_prints_text_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
