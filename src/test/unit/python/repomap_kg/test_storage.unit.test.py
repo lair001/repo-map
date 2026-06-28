@@ -251,6 +251,13 @@ SELECT 1;
         self.assertIn("docs/it''s.md", sql)
         self.assertIn("last_seen_run_id", sql)
         self.assertIn('"confidence": "manual"', sql)
+        self.assertIn("INSERT INTO nodes(", sql)
+        self.assertIn("node:docs/it''s.md:file:docs/it''s.md", sql)
+        self.assertIn("INSERT INTO evidence(", sql)
+        self.assertIn(
+            "evidence:docs/it''s.md:0-0:fixture-discovery:docs/it''s.md",
+            sql,
+        )
 
     def test_load_file_observations_returns_psql_summary(self):
         observation = RawObservation(

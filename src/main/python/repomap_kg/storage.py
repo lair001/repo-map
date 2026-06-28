@@ -215,6 +215,8 @@ def build_file_ingest_sql(
         "\\gset run_",
     ]
     statements.extend(file_upsert_sql(row) for row in rows)
+    statements.extend(file_node_upsert_sql(row) for row in rows)
+    statements.extend(file_evidence_upsert_sql(row) for row in rows)
     statements.extend(
         [
             "COMMIT;",
@@ -291,6 +293,84 @@ def file_upsert_sql(row: FileRow) -> str:
         "generated = EXCLUDED.generated, "
         "metadata_json = EXCLUDED.metadata_json;"
     )
+
+
+def file_node_upsert_sql(row: FileRow) -> str:
+    return (
+        "INSERT INTO nodes("
+        "repository_id, file_id, kind, name, stable_key, "
+        "start_line, end_line, metadata_json"
+        ") SELECT "
+        ":repo_id, files.id, "
+        "'file', "
+        f"{sql_literal(file_source_id(row))}, "
+        f"{sql_literal(file_node_stable_key(row))}, "
+        "NULL, NULL, "
+        f"{sql_literal(json.dumps(file_node_metadata(row), sort_keys=True))}::jsonb "
+        "FROM files "
+        "WHERE files.repository_id = :repo_id "
+        f"AND files.path = {sql_literal(row.path)} "
+        "ON CONFLICT (repository_id, stable_key) DO UPDATE SET "
+        "file_id = EXCLUDED.file_id, "
+        "name = EXCLUDED.name, "
+        "metadata_json = EXCLUDED.metadata_json;"
+    )
+
+
+def file_evidence_upsert_sql(row: FileRow) -> str:
+    metadata_json = {
+        "extractor_version": file_extractor_version(row),
+        "raw_source_id": file_source_id(row),
+        "stable_key": file_evidence_stable_key(row),
+    }
+    return (
+        "INSERT INTO evidence("
+        "repository_id, file_id, stable_key, start_line, end_line, "
+        "extractor, metadata_json"
+        ") SELECT "
+        ":repo_id, files.id, "
+        f"{sql_literal(file_evidence_stable_key(row))}, "
+        "NULL, NULL, "
+        f"{sql_literal(file_extractor(row))}, "
+        f"{sql_literal(json.dumps(metadata_json, sort_keys=True))}::jsonb "
+        "FROM files "
+        "WHERE files.repository_id = :repo_id "
+        f"AND files.path = {sql_literal(row.path)} "
+        "ON CONFLICT (repository_id, stable_key) DO UPDATE SET "
+        "file_id = EXCLUDED.file_id, "
+        "extractor = EXCLUDED.extractor, "
+        "metadata_json = EXCLUDED.metadata_json;"
+    )
+
+
+def file_node_stable_key(row: FileRow) -> str:
+    return f"node:{row.path}:file:{file_source_id(row)}"
+
+
+def file_evidence_stable_key(row: FileRow) -> str:
+    return f"evidence:{row.path}:0-0:{file_extractor(row)}:{file_source_id(row)}"
+
+
+def file_source_id(row: FileRow) -> str:
+    return row_metadata_text(row, "raw_source_id", row.path)
+
+
+def file_extractor(row: FileRow) -> str:
+    return row_metadata_text(row, "extractor", "unknown")
+
+
+def file_extractor_version(row: FileRow) -> str:
+    return row_metadata_text(row, "extractor_version", "unknown")
+
+
+def file_node_metadata(row: FileRow) -> dict[str, Any]:
+    source_metadata = row.metadata_json.get("source_metadata")
+    return source_metadata if isinstance(source_metadata, dict) else {}
+
+
+def row_metadata_text(row: FileRow, key: str, default: str) -> str:
+    value = row.metadata_json.get(key, default)
+    return value if isinstance(value, str) and value else default
 
 
 def file_record_from_storage_payload(payload: Any) -> FileRecord:

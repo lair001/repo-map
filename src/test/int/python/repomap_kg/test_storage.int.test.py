@@ -68,8 +68,20 @@ INSERT INTO nodes(repository_id, file_id, kind, name, stable_key)
 VALUES (:id, :file_id, 'file', 'bin/tool', 'file:bin/tool')
 RETURNING id
 \\gset node_
-INSERT INTO evidence(repository_id, file_id, extractor, metadata_json)
-VALUES (:id, :file_id, 'repo-discovery', '{"source":"test"}'::jsonb)
+INSERT INTO evidence(
+  repository_id,
+  file_id,
+  stable_key,
+  extractor,
+  metadata_json
+)
+VALUES (
+  :id,
+  :file_id,
+  'evidence:bin/tool:0-0:repo-discovery:bin/tool',
+  'repo-discovery',
+  '{"source":"test"}'::jsonb
+)
 RETURNING id
 \\gset evidence_
 INSERT INTO edges(
@@ -159,9 +171,29 @@ JOIN repositories ON repositories.id = files.repository_id
 JOIN runs ON runs.id = files.last_seen_run_id;
 """
             )
+            graph_row = postgres.psql_scalar(
+                """
+SELECT nodes.kind
+       || '|'
+       || nodes.stable_key
+       || '|'
+       || evidence.extractor
+       || '|'
+       || evidence.stable_key
+FROM files
+JOIN nodes ON nodes.file_id = files.id
+JOIN evidence ON evidence.file_id = files.id
+WHERE files.path = 'bin/tool';
+"""
+            )
 
         self.assertEqual(summary.files, 1)
         self.assertEqual(row, "fixture|abc123|bin/tool|entrypoint|true|manual")
+        self.assertEqual(
+            graph_row,
+            "file|node:bin/tool:file:bin/tool|"
+            "fixture-discovery|evidence:bin/tool:0-0:fixture-discovery:bin/tool",
+        )
 
     def test_storage_load_files_cli_loads_discovery_jsonl(self):
         require_postgres_binaries()

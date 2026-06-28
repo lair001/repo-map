@@ -110,6 +110,7 @@ evidence(
   id,
   repository_id,
   file_id,
+  stable_key,
   start_line,
   end_line,
   excerpt,
@@ -144,6 +145,7 @@ The initial migrations are:
 ```text
 src/main/resources/rdbms/2026/06/28-001-core-create_graph_tables.sql
 src/main/resources/rdbms/2026/06/28-002-core-add_file_run_tracking.sql
+src/main/resources/rdbms/2026/06/28-003-core-add_evidence_stable_key.sql
 ```
 
 Until the Liquibase CLI is part of the local toolchain, RepoMap includes a
@@ -153,8 +155,9 @@ Liquibase-formatted SQL files from `changelog.yaml` and applies them with
 local verification, not a replacement for Liquibase as the migration format.
 
 The first ingestion path loads raw discovery `file` observations into Postgres
-by creating or updating a repository, recording an indexing run, and upserting
-file rows with `last_seen_run_id` pointing back to the run that observed them.
+by creating or updating a repository, recording an indexing run, upserting file
+rows with `last_seen_run_id` pointing back to the run that observed them, and
+upserting normalized file nodes plus evidence rows with stable keys.
 The CLI exposes this path as `repomap-kg storage load-files`, accepting raw
 observation JSONL plus repository identity fields and optional `psql` connection
 arguments.
