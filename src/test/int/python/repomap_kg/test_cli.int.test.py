@@ -254,6 +254,43 @@ class CliIntegrationTests(unittest.TestCase):
             "test",
         )
 
+    def test_discover_command_applies_project_profile(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "fixture-repo"
+            profile_path = Path(tmpdir) / "repomap-profile.toml"
+            self.write_fixture(fixture / "ops" / "ship", "#!/usr/bin/env bash\n")
+            self.write_fixture(fixture / "scripts" / "repair.sh", "#!/usr/bin/env bash\n")
+            self.write_fixture(fixture / "out" / "manifest.json", "{}\n")
+            self.write_fixture(fixture / "README.md", "# Fixture\n")
+            profile_path.write_text(
+                """
+command_dirs = ["ops"]
+script_dirs = ["scripts"]
+generated_dirs = ["out"]
+
+[role_overrides]
+"README.md" = "config"
+
+[confidence_overrides]
+"README.md" = "manual"
+"""
+            )
+
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "discover", str(fixture), "--profile", str(profile_path), "--jsonl"
+            )
+
+        observations = [json.loads(line) for line in stdout.splitlines()]
+        by_path = {observation["path"]: observation for observation in observations}
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(by_path["ops/ship"]["metadata"]["role"], "entrypoint")
+        self.assertEqual(by_path["scripts/repair.sh"]["metadata"]["role"], "script")
+        self.assertEqual(by_path["out/manifest.json"]["metadata"]["role"], "generated")
+        self.assertTrue(by_path["out/manifest.json"]["metadata"]["generated"])
+        self.assertEqual(by_path["README.md"]["metadata"]["role"], "config")
+        self.assertEqual(by_path["README.md"]["confidence"], "manual")
+
     def run_module_entrypoint(self, *args):
         original_argv = sys.argv[:]
         stdout = io.StringIO()

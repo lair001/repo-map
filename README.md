@@ -44,6 +44,7 @@ Run the CLI from the source tree:
 PYTHONPATH=src/main/python python3 -m repomap_kg --version
 PYTHONPATH=src/main/python python3 -m repomap_kg identity --json
 PYTHONPATH=src/main/python python3 -m repomap_kg discover . --jsonl
+PYTHONPATH=src/main/python python3 -m repomap_kg discover . --profile repomap-profile.toml --jsonl
 PYTHONPATH=src/main/python python3 -m repomap_kg observations normalize raw-observations.jsonl --json
 ```
 
@@ -65,6 +66,7 @@ gate and print per-file advisory rows.
 - [Architecture](docs/specs/architecture.md)
 - [Storage Model](docs/specs/storage-model.md)
 - [Extractor Strategy](docs/specs/extractor-strategy.md)
+- [Project Profile Schema](docs/specs/profile-schema.md)
 - [Raw Observation Schema](docs/specs/raw-observation-schema.md)
 - [Roadmap](docs/specs/roadmap.md)
 

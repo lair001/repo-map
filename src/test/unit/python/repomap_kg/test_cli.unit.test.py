@@ -113,6 +113,38 @@ class CliUnitTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("invalid JSON", stderr.getvalue())
 
+    def test_discover_prints_text_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "src" / "main" / "python" / "app.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("print('ok')\n")
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(["discover", str(root)])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stdout.getvalue().strip(), "discovered 1 files")
+
+    def test_discover_reports_profile_validation_errors(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            profile = root / "repomap-profile.toml"
+            profile.write_text(
+                """
+[confidence_overrides]
+"README.md" = "certain"
+"""
+            )
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = main(["discover", str(root), "--profile", str(profile)])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("confidence_overrides", stderr.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

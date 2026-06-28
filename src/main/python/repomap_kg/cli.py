@@ -10,6 +10,7 @@ from repomap_kg import __version__
 from repomap_kg.discovery import discover_observations
 from repomap_kg.normalization import normalize_observations
 from repomap_kg.observations import ObservationValidationError, read_observations_jsonl
+from repomap_kg.profiles import ProfileValidationError, load_profile
 from repomap_kg.project_identity import PROJECT_IDENTITY
 
 
@@ -30,6 +31,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="discover repository files as raw observations",
     )
     discover.add_argument("root", help="repository root to discover")
+    discover.add_argument(
+        "--profile",
+        help="path to an optional RepoMap project profile",
+    )
     discover.add_argument(
         "--jsonl",
         action="store_true",
@@ -83,7 +88,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "discover":
-        observations = discover_observations(args.root)
+        try:
+            profile = load_profile(args.profile) if args.profile else None
+        except ProfileValidationError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        observations = discover_observations(args.root, profile=profile)
         if args.jsonl:
             for observation in observations:
                 print(observation.to_json_line(), end="")

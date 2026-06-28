@@ -100,6 +100,9 @@ runners, generated artifact locations, or confidence adjustments.
 Profiles must not be required for basic indexing, but they are the right place
 for project-specific knowledge.
 
+The initial profile schema is documented in
+[Project Profile Schema](profile-schema.md).
+
 ## Confidence Model
 
 Every graph edge should carry a confidence value:

@@ -10,6 +10,7 @@ from typing import Any
 
 from repomap_kg import __version__
 from repomap_kg.observations import RawObservation
+from repomap_kg.profiles import ProjectProfile
 
 
 IGNORED_DIR_NAMES = frozenset(
@@ -62,6 +63,7 @@ class FileInfo:
     content_hash: str
     executable: bool
     generated: bool
+    confidence: str = "extracted"
 
     def to_observation(self) -> RawObservation:
         return RawObservation(
@@ -69,7 +71,7 @@ class FileInfo:
             source_id=self.path,
             path=self.path,
             name=self.path,
-            confidence="extracted",
+            confidence=self.confidence,
             extractor="repo-discovery",
             extractor_version=__version__,
             metadata=self.to_metadata(),
@@ -85,7 +87,9 @@ class FileInfo:
         }
 
 
-def discover_repository(root: Path | str) -> list[FileInfo]:
+def discover_repository(
+    root: Path | str, *, profile: ProjectProfile | None = None
+) -> list[FileInfo]:
     repository_root = Path(root).resolve()
     files = []
     for directory, dirnames, filenames in os.walk(repository_root):
@@ -95,15 +99,22 @@ def discover_repository(root: Path | str) -> list[FileInfo]:
         directory_path = Path(directory)
         for filename in sorted(filenames):
             file_path = directory_path / filename
-            files.append(classify_path(repository_root, file_path))
+            files.append(classify_path(repository_root, file_path, profile=profile))
     return sorted(files, key=lambda file_info: file_info.path)
 
 
-def discover_observations(root: Path | str) -> list[RawObservation]:
-    return [file_info.to_observation() for file_info in discover_repository(root)]
+def discover_observations(
+    root: Path | str, *, profile: ProjectProfile | None = None
+) -> list[RawObservation]:
+    return [
+        file_info.to_observation()
+        for file_info in discover_repository(root, profile=profile)
+    ]
 
 
-def classify_path(root: Path | str, path: Path | str) -> FileInfo:
+def classify_path(
+    root: Path | str, path: Path | str, *, profile: ProjectProfile | None = None
+) -> FileInfo:
     repository_root = Path(root).resolve()
     file_path = Path(path).resolve()
     relative_path = file_path.relative_to(repository_root).as_posix()
@@ -111,6 +122,11 @@ def classify_path(root: Path | str, path: Path | str) -> FileInfo:
     generated = is_generated(relative_path)
     language = detect_language(file_path)
     role = detect_role(relative_path, executable=executable, generated=generated)
+    confidence = "extracted"
+    if profile is not None:
+        generated = profile.generated_for_path(relative_path, generated)
+        role = profile.role_for_path(relative_path, role)
+        confidence = profile.confidence_for_path(relative_path, confidence)
 
     return FileInfo(
         path=relative_path,
@@ -119,6 +135,7 @@ def classify_path(root: Path | str, path: Path | str) -> FileInfo:
         content_hash=content_hash(file_path),
         executable=executable,
         generated=generated,
+        confidence=confidence,
     )
 
 
