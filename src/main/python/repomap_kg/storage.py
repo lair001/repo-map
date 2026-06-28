@@ -130,6 +130,22 @@ class NeighborhoodRecord:
 
 
 @dataclass(frozen=True)
+class FileNeighborhoodRecord:
+    path: str
+    centers: tuple[NodeRecord, ...]
+    nodes: tuple[NodeRecord, ...]
+    edges: tuple[EdgeRecord, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "centers": [center.to_dict() for center in self.centers],
+            "nodes": [node.to_dict() for node in self.nodes],
+            "edges": [edge.to_dict() for edge in self.edges],
+        }
+
+
+@dataclass(frozen=True)
 class StorageSummaryRecord:
     root_path: str
     repository_id: int | None
@@ -403,6 +419,30 @@ def query_neighborhood(
     )
     return neighborhood_from_storage_payload(
         parse_psql_json(result.stdout, "neighborhood")
+    )
+
+
+def query_file_neighborhood(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    path: str,
+    direction: str = "both",
+    depth: int = 1,
+    psql_command: str = "psql",
+) -> FileNeighborhoodRecord:
+    if depth != 1:
+        raise StorageSchemaError("storage file-neighborhood only supports depth 1")
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_file_neighborhood_query_sql(
+            root_path,
+            path=path,
+            direction=direction,
+        ),
+    )
+    return file_neighborhood_from_storage_payload(
+        parse_psql_json(result.stdout, "file neighborhood")
     )
 
 
@@ -701,6 +741,125 @@ def neighborhood_center_join_sql(direction: str) -> str:
     if direction == "both":
         return "JOIN center ON (src.id = center.id OR dst.id = center.id) "
     raise StorageSchemaError("storage neighborhood direction must be in, out, or both")
+
+
+def build_file_neighborhood_query_sql(
+    root_path: str,
+    *,
+    path: str,
+    direction: str = "both",
+) -> str:
+    center_join = file_neighborhood_center_join_sql(direction)
+    quoted_root = sql_literal(root_path)
+    quoted_path = sql_literal(path)
+    return (
+        "WITH repo AS ("
+        "SELECT id FROM repositories "
+        f"WHERE repositories.root_path = {quoted_root}"
+        "), "
+        "file_row AS ("
+        "SELECT files.id, files.path FROM files "
+        "JOIN repo ON repo.id = files.repository_id "
+        f"WHERE files.path = {quoted_path}"
+        "), "
+        "center_nodes AS ("
+        "SELECT nodes.id, file_row.path AS path, "
+        "nodes.kind AS node_kind, nodes.name AS node_name, "
+        "nodes.stable_key AS node_stable_key, "
+        "nodes.start_line, nodes.end_line "
+        "FROM nodes "
+        "JOIN file_row ON file_row.id = nodes.file_id"
+        "), "
+        "neighborhood_edges AS ("
+        "SELECT DISTINCT edges.id AS edge_id, edges.src_node_id, edges.dst_node_id, "
+        "COALESCE(files.path, '') AS path, "
+        "edges.kind AS edge_kind, edges.stable_key AS edge_stable_key, "
+        "edges.confidence, src.kind AS src_node_kind, "
+        "src.name AS src_node_name, src.stable_key AS src_node_stable_key, "
+        "dst.kind AS dst_node_kind, dst.name AS dst_node_name, "
+        "dst.stable_key AS dst_node_stable_key, "
+        "evidence.stable_key AS evidence_stable_key, "
+        "evidence.extractor "
+        "FROM edges "
+        "JOIN repo ON repo.id = edges.repository_id "
+        "JOIN nodes src ON src.id = edges.src_node_id "
+        "JOIN nodes dst ON dst.id = edges.dst_node_id "
+        "JOIN evidence ON evidence.id = edges.evidence_id "
+        "LEFT JOIN files ON files.id = evidence.file_id "
+        f"{center_join}"
+        "), "
+        "node_ids AS ("
+        "SELECT id FROM center_nodes "
+        "UNION SELECT src_node_id FROM neighborhood_edges "
+        "UNION SELECT dst_node_id FROM neighborhood_edges"
+        "), "
+        "node_rows AS ("
+        "SELECT COALESCE(files.path, '') AS path, nodes.kind AS node_kind, "
+        "nodes.name AS node_name, nodes.stable_key AS node_stable_key, "
+        "nodes.start_line, nodes.end_line "
+        "FROM node_ids "
+        "JOIN nodes ON nodes.id = node_ids.id "
+        "LEFT JOIN files ON files.id = nodes.file_id "
+        "AND files.repository_id = nodes.repository_id"
+        ") "
+        "SELECT json_build_object("
+        f"'path', {quoted_path}, "
+        "'centers', COALESCE(("
+        "SELECT json_agg(json_build_object("
+        "'path', center_nodes.path, "
+        "'node_kind', center_nodes.node_kind, "
+        "'node_name', center_nodes.node_name, "
+        "'node_stable_key', center_nodes.node_stable_key, "
+        "'start_line', center_nodes.start_line, "
+        "'end_line', center_nodes.end_line"
+        ") ORDER BY center_nodes.node_kind, center_nodes.node_stable_key) "
+        "FROM center_nodes"
+        "), '[]'::json), "
+        "'nodes', COALESCE(("
+        "SELECT json_agg(json_build_object("
+        "'path', node_rows.path, "
+        "'node_kind', node_rows.node_kind, "
+        "'node_name', node_rows.node_name, "
+        "'node_stable_key', node_rows.node_stable_key, "
+        "'start_line', node_rows.start_line, "
+        "'end_line', node_rows.end_line"
+        ") ORDER BY node_rows.path, node_rows.node_kind, "
+        "node_rows.node_stable_key) FROM node_rows"
+        "), '[]'::json), "
+        "'edges', COALESCE(("
+        "SELECT json_agg(json_build_object("
+        "'path', neighborhood_edges.path, "
+        "'edge_kind', neighborhood_edges.edge_kind, "
+        "'edge_stable_key', neighborhood_edges.edge_stable_key, "
+        "'confidence', neighborhood_edges.confidence, "
+        "'src_node_kind', neighborhood_edges.src_node_kind, "
+        "'src_node_name', neighborhood_edges.src_node_name, "
+        "'src_node_stable_key', neighborhood_edges.src_node_stable_key, "
+        "'dst_node_kind', neighborhood_edges.dst_node_kind, "
+        "'dst_node_name', neighborhood_edges.dst_node_name, "
+        "'dst_node_stable_key', neighborhood_edges.dst_node_stable_key, "
+        "'evidence_stable_key', neighborhood_edges.evidence_stable_key, "
+        "'extractor', neighborhood_edges.extractor"
+        ") ORDER BY neighborhood_edges.edge_kind, "
+        "neighborhood_edges.edge_stable_key) FROM neighborhood_edges"
+        "), '[]'::json)"
+        ")::text;"
+    )
+
+
+def file_neighborhood_center_join_sql(direction: str) -> str:
+    if direction == "in":
+        return "JOIN center_nodes ON dst.id = center_nodes.id "
+    if direction == "out":
+        return "JOIN center_nodes ON src.id = center_nodes.id "
+    if direction == "both":
+        return (
+            "JOIN center_nodes ON "
+            "(src.id = center_nodes.id OR dst.id = center_nodes.id) "
+        )
+    raise StorageSchemaError(
+        "storage file-neighborhood direction must be in, out, or both"
+    )
 
 
 def build_edge_query_sql(
@@ -1107,6 +1266,35 @@ def neighborhood_from_storage_payload(payload: Any) -> NeighborhoodRecord:
     )
 
 
+def file_neighborhood_from_storage_payload(payload: Any) -> FileNeighborhoodRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed file neighborhood")
+    centers_payload = payload.get("centers")
+    nodes_payload = payload.get("nodes")
+    edges_payload = payload.get("edges")
+    if not isinstance(centers_payload, list):
+        raise StorageSchemaError("psql returned a malformed file neighborhood: centers")
+    if not isinstance(nodes_payload, list):
+        raise StorageSchemaError("psql returned a malformed file neighborhood: nodes")
+    if not isinstance(edges_payload, list):
+        raise StorageSchemaError("psql returned a malformed file neighborhood: edges")
+    return FileNeighborhoodRecord(
+        path=payload_text(payload, "path", label="file neighborhood"),
+        centers=tuple(
+            node_record_from_storage_payload(center_payload)
+            for center_payload in centers_payload
+        ),
+        nodes=tuple(
+            node_record_from_storage_payload(node_payload)
+            for node_payload in nodes_payload
+        ),
+        edges=tuple(
+            edge_record_from_storage_payload(edge_payload)
+            for edge_payload in edges_payload
+        ),
+    )
+
+
 def storage_summary_from_payload(payload: Any) -> StorageSummaryRecord:
     if not isinstance(payload, dict):
         raise StorageSchemaError("psql returned a malformed storage summary")
@@ -1144,6 +1332,10 @@ def edge_records_to_jsonable(records: Sequence[EdgeRecord]) -> list[dict[str, An
 
 
 def neighborhood_to_jsonable(record: NeighborhoodRecord) -> dict[str, Any]:
+    return record.to_dict()
+
+
+def file_neighborhood_to_jsonable(record: FileNeighborhoodRecord) -> dict[str, Any]:
     return record.to_dict()
 
 
@@ -1233,6 +1425,17 @@ def format_neighborhood_table(record: NeighborhoodRecord) -> str:
     return "\n".join(
         [
             f"center_node_stable_key: {center_key}",
+            "",
+            format_edge_table(record.edges),
+        ]
+    )
+
+
+def format_file_neighborhood_table(record: FileNeighborhoodRecord) -> str:
+    return "\n".join(
+        [
+            f"file_path: {record.path}",
+            f"center_nodes: {len(record.centers)}",
             "",
             format_edge_table(record.edges),
         ]

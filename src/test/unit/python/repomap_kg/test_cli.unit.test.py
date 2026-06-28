@@ -14,6 +14,7 @@ from repomap_kg.observations import RawObservation, write_observations_jsonl
 from repomap_kg.storage import (
     EdgeRecord,
     FileNodeRecord,
+    FileNeighborhoodRecord,
     LoadSummary,
     NeighborhoodRecord,
     NodeRecord,
@@ -91,6 +92,10 @@ class CliUnitTests(unittest.TestCase):
             ("file-nodes", ["--root-path", "/tmp/fixture"]),
             ("nodes", ["--root-path", "/tmp/fixture"]),
             ("neighborhood", ["--root-path", "/tmp/fixture", "--node", "tool:nix"]),
+            (
+                "file-neighborhood",
+                ["--root-path", "/tmp/fixture", "--path", "bin/tool"],
+            ),
             ("edges", ["--root-path", "/tmp/fixture"]),
             ("summary", ["--root-path", "/tmp/fixture"]),
         )
@@ -735,6 +740,104 @@ class CliUnitTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertIn("psql did not return neighborhood", stderr.getvalue())
+
+    def test_storage_file_neighborhood_prints_json_record(self):
+        record = FileNeighborhoodRecord(
+            path="bin/tool",
+            centers=(
+                NodeRecord(
+                    path="bin/tool",
+                    node_kind="shell.command",
+                    node_name="nix build",
+                    node_stable_key="node:bin/tool:shell.command:x",
+                    start_line=2,
+                    end_line=2,
+                ),
+            ),
+            nodes=(
+                NodeRecord(
+                    path="bin/tool",
+                    node_kind="shell.command",
+                    node_name="nix build",
+                    node_stable_key="node:bin/tool:shell.command:x",
+                    start_line=2,
+                    end_line=2,
+                ),
+            ),
+            edges=(
+                EdgeRecord(
+                    path="bin/tool",
+                    edge_kind="shell.command",
+                    edge_stable_key="edge:node:bin/tool:shell.command:x",
+                    confidence="heuristic",
+                    src_node_kind="shell.command",
+                    src_node_name="nix build",
+                    src_node_stable_key="node:bin/tool:shell.command:x",
+                    dst_node_kind="tool",
+                    dst_node_name="nix",
+                    dst_node_stable_key="tool:nix",
+                    evidence_stable_key="evidence:bin/tool:2-2:fixture-shell:x",
+                    extractor="fixture-shell",
+                ),
+            ),
+        )
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_file_neighborhood",
+            return_value=record,
+        ) as query:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "file-neighborhood",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--path",
+                        "bin/tool",
+                        "--direction",
+                        "out",
+                        "--depth",
+                        "1",
+                        "--pg-database",
+                        "postgres",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["path"], "bin/tool")
+        self.assertEqual(payload["centers"][0]["node_kind"], "shell.command")
+        self.assertEqual(payload["edges"][0]["dst_node_stable_key"], "tool:nix")
+        self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
+        self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+        self.assertEqual(query.call_args.kwargs["path"], "bin/tool")
+        self.assertEqual(query.call_args.kwargs["direction"], "out")
+        self.assertEqual(query.call_args.kwargs["depth"], 1)
+
+    def test_storage_file_neighborhood_reports_query_errors(self):
+        stderr = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_file_neighborhood",
+            side_effect=StorageSchemaError("psql did not return file neighborhood"),
+        ):
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "storage",
+                        "file-neighborhood",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--path",
+                        "bin/tool",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("psql did not return file neighborhood", stderr.getvalue())
 
     def test_storage_edges_prints_json_records(self):
         records = (

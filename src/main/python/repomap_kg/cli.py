@@ -28,8 +28,10 @@ from repomap_kg.project_identity import PROJECT_IDENTITY
 from repomap_kg.storage import (
     StorageSchemaError,
     edge_records_to_jsonable,
+    file_neighborhood_to_jsonable,
     file_node_records_to_jsonable,
     format_edge_table,
+    format_file_neighborhood_table,
     format_file_node_table,
     format_neighborhood_table,
     format_node_table,
@@ -38,6 +40,7 @@ from repomap_kg.storage import (
     neighborhood_to_jsonable,
     node_records_to_jsonable,
     query_edge_records,
+    query_file_neighborhood,
     query_file_node_records,
     query_file_records,
     query_neighborhood,
@@ -241,6 +244,34 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit stored graph neighborhood as JSON",
+    )
+    storage_file_neighborhood = storage_subcommands.add_parser(
+        "file-neighborhood",
+        help="list a depth-1 graph neighborhood for a stored file path",
+    )
+    add_storage_root_argument(storage_file_neighborhood)
+    storage_file_neighborhood.add_argument(
+        "--path",
+        required=True,
+        help="center file path",
+    )
+    storage_file_neighborhood.add_argument(
+        "--direction",
+        choices=("both", "in", "out"),
+        default="both",
+        help="edge direction relative to nodes in the file",
+    )
+    storage_file_neighborhood.add_argument(
+        "--depth",
+        type=int,
+        default=1,
+        help="graph traversal depth; only 1 is currently supported",
+    )
+    add_storage_connection_arguments(storage_file_neighborhood)
+    storage_file_neighborhood.add_argument(
+        "--json",
+        action="store_true",
+        help="emit stored file graph neighborhood as JSON",
     )
     storage_edges = storage_subcommands.add_parser(
         "edges",
@@ -494,6 +525,25 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(neighborhood_to_jsonable(record), sort_keys=True))
         else:
             print(format_neighborhood_table(record))
+        return 0
+
+    if args.command == "storage" and args.storage_command == "file-neighborhood":
+        try:
+            record = query_file_neighborhood(
+                psql_args_from_args(args),
+                root_path=args.root_path,
+                path=args.path,
+                direction=args.direction,
+                depth=args.depth,
+                psql_command=args.psql_command,
+            )
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(file_neighborhood_to_jsonable(record), sort_keys=True))
+        else:
+            print(format_file_neighborhood_table(record))
         return 0
 
     if args.command == "storage" and args.storage_command == "edges":

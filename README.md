@@ -56,6 +56,7 @@ PYTHONPATH=src/main/python python3 -m repomap_kg storage entrypoints --root-path
 PYTHONPATH=src/main/python python3 -m repomap_kg storage file-nodes --root-path . --path README.md --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage nodes --root-path . --kind shell.command --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage neighborhood --root-path . --node tool:nix --direction in --json
+PYTHONPATH=src/main/python python3 -m repomap_kg storage file-neighborhood --root-path . --path bin/tool --direction out --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage edges --root-path . --kind shell.command --target-node tool:nix --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage summary --root-path . --json
 ```

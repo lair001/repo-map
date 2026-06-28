@@ -9,10 +9,12 @@ from repomap_kg.observations import RawObservation
 from repomap_kg.storage import (
     EdgeRecord,
     FileNodeRecord,
+    FileNeighborhoodRecord,
     NeighborhoodRecord,
     NodeRecord,
     StorageSummaryRecord,
     StorageSchemaError,
+    build_file_neighborhood_query_sql,
     build_neighborhood_query_sql,
     build_node_query_sql,
     build_storage_summary_query_sql,
@@ -25,6 +27,7 @@ from repomap_kg.storage import (
     discover_migrations,
     format_edge_table,
     format_file_node_table,
+    format_file_neighborhood_table,
     format_neighborhood_table,
     format_node_table,
     format_storage_summary_table,
@@ -32,6 +35,7 @@ from repomap_kg.storage import (
     query_edge_records,
     query_file_node_records,
     query_file_records,
+    query_file_neighborhood,
     query_neighborhood,
     query_node_records,
     query_storage_summary,
@@ -685,6 +689,86 @@ SELECT 1;
                     node="tool:nix",
                 )
 
+    def test_query_file_neighborhood_returns_centers_nodes_and_edges(self):
+        completed = SimpleNamespace(
+            stdout=(
+                "{"
+                '"path":"bin/tool",'
+                '"centers":['
+                '{"path":"bin/tool","node_kind":"shell.command",'
+                '"node_name":"nix build",'
+                '"node_stable_key":"node:bin/tool:shell.command:x",'
+                '"start_line":2,"end_line":2}'
+                "],"
+                '"nodes":['
+                '{"path":"bin/tool","node_kind":"shell.command",'
+                '"node_name":"nix build",'
+                '"node_stable_key":"node:bin/tool:shell.command:x",'
+                '"start_line":2,"end_line":2},'
+                '{"path":"","node_kind":"tool","node_name":"nix",'
+                '"node_stable_key":"tool:nix","start_line":null,"end_line":null}'
+                "],"
+                '"edges":['
+                '{"path":"bin/tool","edge_kind":"shell.command",'
+                '"edge_stable_key":"edge:node:bin/tool:shell.command:x",'
+                '"confidence":"heuristic","src_node_kind":"shell.command",'
+                '"src_node_name":"nix build",'
+                '"src_node_stable_key":"node:bin/tool:shell.command:x",'
+                '"dst_node_kind":"tool","dst_node_name":"nix",'
+                '"dst_node_stable_key":"tool:nix",'
+                '"evidence_stable_key":"evidence:bin/tool:2-2:fixture-shell:x",'
+                '"extractor":"fixture-shell"}'
+                "]"
+                "}\n"
+            )
+        )
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+            record = query_file_neighborhood(
+                ["-d", "postgres"],
+                root_path="/tmp/fixture",
+                path="bin/tool",
+                direction="out",
+                psql_command="/bin/psql",
+            )
+
+        self.assertEqual(record.path, "bin/tool")
+        self.assertEqual(record.centers[0].node_kind, "shell.command")
+        self.assertEqual(record.nodes[-1].node_stable_key, "tool:nix")
+        self.assertEqual(
+            record.edges[0].src_node_stable_key,
+            "node:bin/tool:shell.command:x",
+        )
+        self.assertIn("-qAt", run.call_args.args[0])
+        self.assertIn("files.path = 'bin/tool'", run.call_args.kwargs["input"])
+        self.assertIn(
+            "JOIN center_nodes ON src.id = center_nodes.id",
+            run.call_args.kwargs["input"],
+        )
+
+    def test_query_file_neighborhood_rejects_depth_above_one(self):
+        with patch("repomap_kg.storage.subprocess.run") as run:
+            with self.assertRaisesRegex(StorageSchemaError, "depth 1"):
+                query_file_neighborhood(
+                    ["-d", "postgres"],
+                    root_path="/tmp/fixture",
+                    path="bin/tool",
+                    depth=2,
+                )
+
+        run.assert_not_called()
+
+    def test_query_file_neighborhood_rejects_malformed_json(self):
+        completed = SimpleNamespace(stdout='{"path": "bin/tool"}\n')
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(StorageSchemaError, "file neighborhood"):
+                query_file_neighborhood(
+                    ["-d", "postgres"],
+                    root_path="/tmp/fixture",
+                    path="bin/tool",
+                )
+
     def test_query_edge_records_returns_records(self):
         completed = SimpleNamespace(
             stdout=(
@@ -858,6 +942,41 @@ SELECT 1;
                 direction="sideways",
             )
 
+    def test_build_file_neighborhood_query_sql_filters_by_path_and_direction(self):
+        inbound = build_file_neighborhood_query_sql(
+            "/tmp/fixture",
+            path="bin/tool",
+            direction="in",
+        )
+        outbound = build_file_neighborhood_query_sql(
+            "/tmp/fixture",
+            path="bin/tool",
+            direction="out",
+        )
+        both = build_file_neighborhood_query_sql(
+            "/tmp/fixture",
+            path="bin/tool",
+            direction="both",
+        )
+
+        self.assertIn("repositories.root_path = '/tmp/fixture'", inbound)
+        self.assertIn("files.path = 'bin/tool'", inbound)
+        self.assertIn("JOIN center_nodes ON dst.id = center_nodes.id", inbound)
+        self.assertIn("JOIN center_nodes ON src.id = center_nodes.id", outbound)
+        self.assertIn(
+            "JOIN center_nodes ON "
+            "(src.id = center_nodes.id OR dst.id = center_nodes.id)",
+            both,
+        )
+
+    def test_build_file_neighborhood_query_sql_rejects_unknown_direction(self):
+        with self.assertRaisesRegex(StorageSchemaError, "direction"):
+            build_file_neighborhood_query_sql(
+                "/tmp/fixture",
+                path="bin/tool",
+                direction="sideways",
+            )
+
     def test_build_edge_query_sql_quotes_root_path_and_orders_edges(self):
         sql = build_edge_query_sql("/tmp/fixture's repo")
 
@@ -1003,6 +1122,54 @@ SELECT 1;
         self.assertIn("center_node_stable_key: tool:nix", table)
         self.assertIn("edge_kind", table)
         self.assertIn("dst_node_stable_key", table)
+        self.assertIn("tool:nix", table)
+
+    def test_format_file_neighborhood_table_prints_path_and_edges(self):
+        table = format_file_neighborhood_table(
+            FileNeighborhoodRecord(
+                path="bin/tool",
+                centers=(
+                    NodeRecord(
+                        path="bin/tool",
+                        node_kind="shell.command",
+                        node_name="nix build",
+                        node_stable_key="node:bin/tool:shell.command:x",
+                        start_line=2,
+                        end_line=2,
+                    ),
+                ),
+                nodes=(
+                    NodeRecord(
+                        path="bin/tool",
+                        node_kind="shell.command",
+                        node_name="nix build",
+                        node_stable_key="node:bin/tool:shell.command:x",
+                        start_line=2,
+                        end_line=2,
+                    ),
+                ),
+                edges=(
+                    EdgeRecord(
+                        path="bin/tool",
+                        edge_kind="shell.command",
+                        edge_stable_key="edge:node:bin/tool:shell.command:x",
+                        confidence="heuristic",
+                        src_node_kind="shell.command",
+                        src_node_name="nix build",
+                        src_node_stable_key="node:bin/tool:shell.command:x",
+                        dst_node_kind="tool",
+                        dst_node_name="nix",
+                        dst_node_stable_key="tool:nix",
+                        evidence_stable_key="evidence:bin/tool:2-2:fixture-shell:x",
+                        extractor="fixture-shell",
+                    ),
+                ),
+            )
+        )
+
+        self.assertIn("file_path: bin/tool", table)
+        self.assertIn("center_nodes: 1", table)
+        self.assertIn("edge_kind", table)
         self.assertIn("tool:nix", table)
 
     def test_build_file_node_query_sql_quotes_root_path_and_orders_graph_records(self):
