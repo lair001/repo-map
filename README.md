@@ -54,7 +54,7 @@ PYTHONPATH=src/main/python python3 -m repomap_kg storage load-files raw-observat
 PYTHONPATH=src/main/python python3 -m repomap_kg storage files --root-path . --role source --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage entrypoints --root-path . --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage file-nodes --root-path . --json
-PYTHONPATH=src/main/python python3 -m repomap_kg storage edges --root-path . --json
+PYTHONPATH=src/main/python python3 -m repomap_kg storage edges --root-path . --kind shell.command --json
 ```
 
 Run the host-safe test suites with coverage gates:

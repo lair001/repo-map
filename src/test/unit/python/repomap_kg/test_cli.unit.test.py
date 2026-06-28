@@ -595,6 +595,8 @@ class CliUnitTests(unittest.TestCase):
                         "edges",
                         "--root-path",
                         "/tmp/fixture",
+                        "--kind",
+                        "shell.command",
                         "--pg-database",
                         "postgres",
                         "--json",
@@ -607,6 +609,7 @@ class CliUnitTests(unittest.TestCase):
         self.assertEqual(payload[0]["dst_node_stable_key"], "tool:nix")
         self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
         self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+        self.assertEqual(query.call_args.kwargs["kind"], "shell.command")
 
     def test_storage_edges_reports_query_errors(self):
         stderr = io.StringIO()

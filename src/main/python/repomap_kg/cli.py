@@ -192,6 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="list stored relationship edges from Postgres storage",
     )
     add_storage_root_argument(storage_edges)
+    storage_edges.add_argument("--kind", help="include only edges with this kind")
     add_storage_connection_arguments(storage_edges)
     storage_edges.add_argument(
         "--json",
@@ -387,6 +388,7 @@ def main(argv: list[str] | None = None) -> int:
             records = query_edge_records(
                 psql_args_from_args(args),
                 root_path=args.root_path,
+                kind=args.kind,
                 psql_command=args.psql_command,
             )
         except StorageSchemaError as error:

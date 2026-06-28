@@ -553,6 +553,23 @@ SELECT 1;
             run.call_args.kwargs["input"],
         )
 
+    def test_query_edge_records_can_filter_by_kind(self):
+        completed = SimpleNamespace(stdout="[]\n")
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+            records = query_edge_records(
+                ["-d", "postgres"],
+                root_path="/tmp/fixture",
+                kind="shell.command",
+                psql_command="/bin/psql",
+            )
+
+        self.assertEqual(records, ())
+        self.assertIn(
+            "AND edges.kind = 'shell.command'",
+            run.call_args.kwargs["input"],
+        )
+
     def test_query_edge_records_rejects_malformed_json(self):
         completed = SimpleNamespace(stdout='{"path": "bin/tool"}\n')
 
@@ -567,6 +584,12 @@ SELECT 1;
         self.assertIn("JOIN nodes src ON src.id = edges.src_node_id", sql)
         self.assertIn("JOIN nodes dst ON dst.id = edges.dst_node_id", sql)
         self.assertIn("ORDER BY edges.kind, edges.stable_key", sql)
+
+    def test_build_edge_query_sql_can_filter_by_kind(self):
+        sql = build_edge_query_sql("/tmp/fixture's repo", kind="shell.command")
+
+        self.assertIn("fixture''s repo", sql)
+        self.assertIn("AND edges.kind = 'shell.command'", sql)
 
     def test_format_edge_table_uses_edge_columns(self):
         table = format_edge_table(

@@ -696,6 +696,19 @@ WHERE edges.kind = 'shell.command';
                 extractor_version="0.1.0",
                 metadata={"argv": ["nix", "build"]},
             ),
+            RawObservation(
+                kind="python.import",
+                source_id="bin/tool#import:json",
+                path="bin/tool",
+                start_line=3,
+                end_line=3,
+                name="json",
+                target="module:json",
+                confidence="heuristic",
+                extractor="fixture-python",
+                extractor_version="0.1.0",
+                metadata={"module": "json"},
+            ),
         ]
 
         with temporary_postgres() as postgres:
@@ -716,6 +729,8 @@ WHERE edges.kind = 'shell.command';
                 "edges",
                 "--root-path",
                 "/tmp/fixture",
+                "--kind",
+                "shell.command",
                 "--pg-host",
                 str(postgres.socket_dir),
                 "--pg-port",
@@ -733,6 +748,8 @@ WHERE edges.kind = 'shell.command';
                 "edges",
                 "--root-path",
                 "/tmp/fixture",
+                "--kind",
+                "python.import",
                 "--pg-host",
                 str(postgres.socket_dir),
                 "--pg-port",
@@ -753,7 +770,9 @@ WHERE edges.kind = 'shell.command';
         self.assertEqual(payload[0]["dst_node_stable_key"], "tool:nix")
         self.assertEqual(text_exit_code, 0, text_stderr)
         self.assertIn("edge_stable_key", text_stdout)
-        self.assertIn("tool:nix", text_stdout)
+        self.assertIn("python.import", text_stdout)
+        self.assertIn("module:json", text_stdout)
+        self.assertNotIn("tool:nix", text_stdout)
 
 
 class PostgresCluster:

@@ -318,11 +318,12 @@ def query_edge_records(
     psql_args: Sequence[str],
     *,
     root_path: str,
+    kind: str | None = None,
     psql_command: str = "psql",
 ) -> tuple[EdgeRecord, ...]:
     result = run_psql(
         [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
-        input_text=build_edge_query_sql(root_path),
+        input_text=build_edge_query_sql(root_path, kind=kind),
     )
     payload = parse_psql_json(result.stdout, "edge records")
     if not isinstance(payload, list):
@@ -441,7 +442,10 @@ def build_file_node_query_sql(root_path: str) -> str:
     )
 
 
-def build_edge_query_sql(root_path: str) -> str:
+def build_edge_query_sql(root_path: str, *, kind: str | None = None) -> str:
+    kind_filter = ""
+    if kind is not None:
+        kind_filter = f"AND edges.kind = {sql_literal(kind)} "
     return (
         "SELECT COALESCE(json_agg(json_build_object("
         "'path', COALESCE(files.path, ''), "
@@ -463,7 +467,8 @@ def build_edge_query_sql(root_path: str) -> str:
         "JOIN nodes dst ON dst.id = edges.dst_node_id "
         "JOIN evidence ON evidence.id = edges.evidence_id "
         "LEFT JOIN files ON files.id = evidence.file_id "
-        f"WHERE repositories.root_path = {sql_literal(root_path)};"
+        f"WHERE repositories.root_path = {sql_literal(root_path)} "
+        f"{kind_filter};"
     )
 
 
