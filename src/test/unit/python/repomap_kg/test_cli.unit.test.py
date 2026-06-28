@@ -65,6 +65,49 @@ class CliUnitTests(unittest.TestCase):
         self.assertIn("identity", help_text)
         self.assertIn("deterministic knowledge graph", help_text)
 
+    def test_storage_subcommands_accept_shared_connection_options(self):
+        parser = build_parser()
+        cases = (
+            (
+                "load-files",
+                [
+                    "raw-observations.jsonl",
+                    "--repository-name",
+                    "fixture",
+                    "--root-path",
+                    "/tmp/fixture",
+                ],
+            ),
+            ("files", ["--root-path", "/tmp/fixture"]),
+            ("entrypoints", ["--root-path", "/tmp/fixture"]),
+        )
+
+        for subcommand, required_args in cases:
+            with self.subTest(subcommand=subcommand):
+                args = parser.parse_args(
+                    [
+                        "storage",
+                        subcommand,
+                        *required_args,
+                        "--pg-host",
+                        "/tmp/socket",
+                        "--pg-port",
+                        "5432",
+                        "--pg-user",
+                        "repo_map_test",
+                        "--pg-database",
+                        "postgres",
+                        "--psql-command",
+                        "/bin/psql",
+                    ]
+                )
+
+                self.assertEqual(args.pg_host, "/tmp/socket")
+                self.assertEqual(args.pg_port, "5432")
+                self.assertEqual(args.pg_user, "repo_map_test")
+                self.assertEqual(args.pg_database, "postgres")
+                self.assertEqual(args.psql_command, "/bin/psql")
+
     def test_module_entrypoint_returns_cli_exit_status(self):
         with patch("repomap_kg.cli.main", return_value=7):
             with self.assertRaises(SystemExit) as caught:

@@ -129,13 +129,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     load_files.add_argument("jsonl_path", help="raw observation JSONL path")
     load_files.add_argument("--repository-name", required=True)
-    load_files.add_argument("--root-path", required=True)
+    add_storage_root_argument(load_files)
     load_files.add_argument("--git-commit")
-    load_files.add_argument("--pg-host")
-    load_files.add_argument("--pg-port")
-    load_files.add_argument("--pg-user")
-    load_files.add_argument("--pg-database")
-    load_files.add_argument("--psql-command", default="psql")
+    add_storage_connection_arguments(load_files)
     load_files.add_argument(
         "--json",
         action="store_true",
@@ -145,7 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
         "files",
         help="list stored files from Postgres storage",
     )
-    storage_files.add_argument("--root-path", required=True)
+    add_storage_root_argument(storage_files)
     storage_files.add_argument("--role", help="include only files with this role")
     storage_files.add_argument(
         "--language",
@@ -157,11 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="include",
         help="control generated-file rows",
     )
-    storage_files.add_argument("--pg-host")
-    storage_files.add_argument("--pg-port")
-    storage_files.add_argument("--pg-user")
-    storage_files.add_argument("--pg-database")
-    storage_files.add_argument("--psql-command", default="psql")
+    add_storage_connection_arguments(storage_files)
     storage_files.add_argument(
         "--json",
         action="store_true",
@@ -171,12 +163,8 @@ def build_parser() -> argparse.ArgumentParser:
         "entrypoints",
         help="list stored entrypoint files from Postgres storage",
     )
-    storage_entrypoints.add_argument("--root-path", required=True)
-    storage_entrypoints.add_argument("--pg-host")
-    storage_entrypoints.add_argument("--pg-port")
-    storage_entrypoints.add_argument("--pg-user")
-    storage_entrypoints.add_argument("--pg-database")
-    storage_entrypoints.add_argument("--psql-command", default="psql")
+    add_storage_root_argument(storage_entrypoints)
+    add_storage_connection_arguments(storage_entrypoints)
     storage_entrypoints.add_argument(
         "--json",
         action="store_true",
@@ -184,6 +172,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def add_storage_root_argument(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--root-path", required=True)
+
+
+def add_storage_connection_arguments(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--pg-host")
+    command.add_argument("--pg-port")
+    command.add_argument("--pg-user")
+    command.add_argument("--pg-database")
+    command.add_argument("--psql-command", default="psql")
 
 
 def main(argv: list[str] | None = None) -> int:
