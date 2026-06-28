@@ -398,6 +398,67 @@ class CliUnitTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("psql did not return file records", stderr.getvalue())
 
+    def test_storage_entrypoints_prints_json_records(self):
+        records = (
+            FileRecord(
+                path="bin/tool",
+                language="shell",
+                role="entrypoint",
+                confidence="manual",
+                generated=False,
+                executable=True,
+            ),
+            FileRecord(
+                path="scripts/helper.sh",
+                language="shell",
+                role="script",
+                confidence="extracted",
+                generated=False,
+                executable=True,
+            ),
+        )
+        stdout = io.StringIO()
+
+        with patch("repomap_kg.cli.query_file_records", return_value=records) as query:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "entrypoints",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--pg-database",
+                        "postgres",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual([record["path"] for record in payload], ["bin/tool"])
+        self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
+        self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+
+    def test_storage_entrypoints_reports_query_errors(self):
+        stderr = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_file_records",
+            side_effect=StorageSchemaError("psql did not return file records"),
+        ):
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "storage",
+                        "entrypoints",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("psql did not return file records", stderr.getvalue())
+
     def test_discover_prints_text_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

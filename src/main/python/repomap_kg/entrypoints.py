@@ -19,11 +19,12 @@ Obs = Iterable[RawObservation]
 Records = tuple[FileRecord, ...]
 
 
+def entrypoint_records_from_file_records(records: Iterable[FileRecord]) -> Records:
+    return filter_file_records(records, FileFilters(role="entrypoint"))
+
+
 def entrypoint_records_from_observations(observations: Obs) -> Records:
-    return filter_file_records(
-        file_records_from_observations(observations),
-        FileFilters(role="entrypoint"),
-    )
+    return entrypoint_records_from_file_records(file_records_from_observations(observations))
 
 
 def format_entrypoint_table(records: Iterable[FileRecord]) -> str:

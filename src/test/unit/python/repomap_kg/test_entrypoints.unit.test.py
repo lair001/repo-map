@@ -1,10 +1,12 @@
 import unittest
 
 from repomap_kg.entrypoints import (
+    entrypoint_records_from_file_records,
     entrypoint_records_from_observations,
     entrypoints_to_jsonable,
     format_entrypoint_table,
 )
+from repomap_kg.files import FileRecord
 from repomap_kg.observations import RawObservation
 
 
@@ -29,6 +31,30 @@ class EntrypointsUnitTests(unittest.TestCase):
         self.assertEqual([record.path for record in records], ["bin/tool"])
         self.assertEqual(records[0].role, "entrypoint")
         self.assertTrue(records[0].executable)
+
+    def test_entrypoint_records_from_file_records_select_only_entrypoints(self):
+        records = (
+            FileRecord(
+                path="bin/tool",
+                language="shell",
+                role="entrypoint",
+                confidence="manual",
+                generated=False,
+                executable=True,
+            ),
+            FileRecord(
+                path="scripts/helper.sh",
+                language="shell",
+                role="script",
+                confidence="extracted",
+                generated=False,
+                executable=True,
+            ),
+        )
+
+        entrypoints = entrypoint_records_from_file_records(records)
+
+        self.assertEqual([record.path for record in entrypoints], ["bin/tool"])
 
     def test_format_entrypoint_table_uses_file_columns(self):
         records = entrypoint_records_from_observations(

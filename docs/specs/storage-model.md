@@ -161,6 +161,9 @@ arguments.
 Stored file rows can be read back with `repomap-kg storage files`, using the
 same role, language, generated-file, table, and JSON presentation controls as
 the raw-JSONL `files` command.
+Stored entrypoint file rows can be read back with
+`repomap-kg storage entrypoints`, reusing the same table and JSON presentation
+as the raw-JSONL `entrypoints` command.
 
 ## Local Development
 

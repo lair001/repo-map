@@ -331,6 +331,77 @@ JOIN runs ON runs.id = files.last_seen_run_id;
             ],
         )
 
+    def test_storage_entrypoints_cli_reads_loaded_entrypoint_rows(self):
+        require_postgres_binaries()
+        observations = [
+            RawObservation(
+                kind="file",
+                source_id="bin/tool",
+                path="bin/tool",
+                confidence="manual",
+                extractor="fixture-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "shell",
+                    "role": "entrypoint",
+                    "content_hash": "c" * 64,
+                    "generated": False,
+                    "executable": True,
+                },
+            ),
+            RawObservation(
+                kind="file",
+                source_id="scripts/helper.sh",
+                path="scripts/helper.sh",
+                confidence="extracted",
+                extractor="fixture-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "shell",
+                    "role": "script",
+                    "content_hash": "d" * 64,
+                    "generated": False,
+                    "executable": True,
+                },
+            ),
+        ]
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            load_file_observations(
+                postgres.psql_args,
+                observations,
+                repository_name="fixture",
+                root_path="/tmp/fixture",
+                psql_command=postgres.psql_command,
+            )
+            exit_code, stdout, stderr = run_repo_map_in_process(
+                "storage",
+                "entrypoints",
+                "--root-path",
+                "/tmp/fixture",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+                "--json",
+            )
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual([record["path"] for record in payload], ["bin/tool"])
+        self.assertTrue(payload[0]["executable"])
+
 
 class PostgresCluster:
     def __init__(self, root: Path):

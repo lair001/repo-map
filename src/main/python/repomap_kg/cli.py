@@ -9,6 +9,7 @@ import sys
 from repomap_kg import __version__
 from repomap_kg.discovery import discover_observations
 from repomap_kg.entrypoints import (
+    entrypoint_records_from_file_records,
     entrypoint_records_from_observations,
     entrypoints_to_jsonable,
     format_entrypoint_table,
@@ -166,6 +167,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="emit stored file records as JSON",
     )
+    storage_entrypoints = storage_subcommands.add_parser(
+        "entrypoints",
+        help="list stored entrypoint files from Postgres storage",
+    )
+    storage_entrypoints.add_argument("--root-path", required=True)
+    storage_entrypoints.add_argument("--pg-host")
+    storage_entrypoints.add_argument("--pg-port")
+    storage_entrypoints.add_argument("--pg-user")
+    storage_entrypoints.add_argument("--pg-database")
+    storage_entrypoints.add_argument("--psql-command", default="psql")
+    storage_entrypoints.add_argument(
+        "--json",
+        action="store_true",
+        help="emit stored entrypoint records as JSON",
+    )
 
     return parser
 
@@ -303,6 +319,23 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(records_to_jsonable(records), sort_keys=True))
         else:
             print(format_file_table(records))
+        return 0
+
+    if args.command == "storage" and args.storage_command == "entrypoints":
+        try:
+            records = query_file_records(
+                psql_args_from_args(args),
+                root_path=args.root_path,
+                psql_command=args.psql_command,
+            )
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        records = entrypoint_records_from_file_records(records)
+        if args.json:
+            print(json.dumps(entrypoints_to_jsonable(records), sort_keys=True))
+        else:
+            print(format_entrypoint_table(records))
         return 0
 
     parser.print_help()
