@@ -260,7 +260,10 @@ class CliIntegrationTests(unittest.TestCase):
             fixture = Path(tmpdir) / "fixture-repo"
             profile_path = Path(tmpdir) / "repomap-profile.toml"
             self.write_fixture(fixture / "ops" / "ship", "#!/usr/bin/env bash\n")
-            self.write_fixture(fixture / "scripts" / "repair.sh", "#!/usr/bin/env bash\n")
+            self.write_fixture(
+                fixture / "scripts" / "repair.sh",
+                "#!/usr/bin/env bash\n",
+            )
             self.write_fixture(fixture / "out" / "manifest.json", "{}\n")
             self.write_fixture(fixture / "README.md", "# Fixture\n")
             profile_path.write_text(
@@ -303,8 +306,8 @@ generated_dirs = ["out"]
             )
             self.write_fixture(fixture / "generated" / "report.json", "{}\n")
 
-            discover_exit, discover_stdout, discover_stderr = self.run_module_entrypoint(
-                "discover", str(fixture), "--jsonl"
+            discover_exit, discover_stdout, discover_stderr = (
+                self.run_module_entrypoint("discover", str(fixture), "--jsonl")
             )
             raw_jsonl.write_text(discover_stdout)
             exit_code, stdout, stderr = self.run_module_entrypoint(
@@ -343,6 +346,72 @@ generated_dirs = ["out"]
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload[0]["path"], "README.md")
+        self.assertEqual(payload[0]["confidence"], "manual")
+        self.assertEqual(result.stderr, "")
+
+    def test_entrypoints_command_prints_profile_command_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "fixture-repo"
+            profile_path = Path(tmpdir) / "repomap-profile.toml"
+            raw_jsonl = Path(tmpdir) / "raw-observations.jsonl"
+            self.write_fixture(fixture / "ops" / "ship", "#!/usr/bin/env bash\n")
+            self.write_fixture(
+                fixture / "scripts" / "repair.sh",
+                "#!/usr/bin/env bash\n",
+            )
+            profile_path.write_text(
+                """
+command_dirs = ["ops"]
+script_dirs = ["scripts"]
+"""
+            )
+
+            discover_args = (
+                "discover",
+                str(fixture),
+                "--profile",
+                str(profile_path),
+                "--jsonl",
+            )
+            discover_exit, discover_stdout, discover_stderr = (
+                self.run_module_entrypoint(*discover_args)
+            )
+            raw_jsonl.write_text(discover_stdout)
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "entrypoints", str(raw_jsonl)
+            )
+
+        self.assertEqual(discover_exit, 0, discover_stderr)
+        self.assertEqual(exit_code, 0)
+        self.assertIn("ops/ship", stdout)
+        self.assertIn("entrypoint", stdout)
+        self.assertNotIn("scripts/repair.sh", stdout)
+        self.assertEqual(stderr, "")
+
+    def test_entrypoints_command_accepts_stdin_jsonl_as_json(self):
+        observation = RawObservation(
+            kind="file",
+            source_id="bin/tool",
+            path="bin/tool",
+            confidence="manual",
+            extractor="fixture-discovery",
+            extractor_version="0.1.0",
+            metadata={
+                "language": "shell",
+                "role": "entrypoint",
+                "content_hash": "0" * 64,
+                "generated": False,
+                "executable": True,
+            },
+        )
+
+        result = self.run_cli(
+            "entrypoints", "-", "--json", input_text=observation.to_json_line()
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload[0]["path"], "bin/tool")
         self.assertEqual(payload[0]["confidence"], "manual")
         self.assertEqual(result.stderr, "")
 

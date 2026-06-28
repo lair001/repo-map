@@ -155,6 +155,63 @@ class CliUnitTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("invalid JSON", stderr.getvalue())
 
+    def test_entrypoints_prints_json_view(self):
+        entrypoint = RawObservation(
+            kind="file",
+            source_id="bin/tool",
+            path="bin/tool",
+            confidence="manual",
+            extractor="fixture-discovery",
+            extractor_version="0.1.0",
+            metadata={
+                "language": "shell",
+                "role": "entrypoint",
+                "content_hash": "0" * 64,
+                "generated": False,
+                "executable": True,
+            },
+        )
+        script = RawObservation(
+            kind="file",
+            source_id="scripts/helper.sh",
+            path="scripts/helper.sh",
+            confidence="extracted",
+            extractor="fixture-discovery",
+            extractor_version="0.1.0",
+            metadata={
+                "language": "shell",
+                "role": "script",
+                "content_hash": "0" * 64,
+                "generated": False,
+                "executable": True,
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl_path = Path(tmpdir) / "raw-observations.jsonl"
+            write_observations_jsonl([entrypoint, script], jsonl_path)
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(["entrypoints", str(jsonl_path), "--json"])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual([record["path"] for record in payload], ["bin/tool"])
+        self.assertEqual(payload[0]["confidence"], "manual")
+
+    def test_entrypoints_reports_validation_errors(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl_path = Path(tmpdir) / "bad-observations.jsonl"
+            jsonl_path.write_text("{bad json}\n")
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = main(["entrypoints", str(jsonl_path), "--json"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("invalid JSON", stderr.getvalue())
+
     def test_discover_prints_text_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

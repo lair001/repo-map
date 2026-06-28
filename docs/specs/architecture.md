@@ -84,7 +84,7 @@ and metadata.
 The CLI should answer common repository questions without forcing users to write
 SQL. Examples:
 
-- `repomap-kg entrypoints`
+- `repomap-kg entrypoints <raw-observations.jsonl>`
 - `repomap-kg files <raw-observations.jsonl>`
 - `repomap-kg explain <path>`
 - `repomap-kg callers <path-or-symbol>`

@@ -8,6 +8,11 @@ import sys
 
 from repomap_kg import __version__
 from repomap_kg.discovery import discover_observations
+from repomap_kg.entrypoints import (
+    entrypoint_records_from_observations,
+    entrypoints_to_jsonable,
+    format_entrypoint_table,
+)
 from repomap_kg.files import (
     FileFilters,
     file_records_from_observations,
@@ -46,6 +51,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--jsonl",
         action="store_true",
         help="emit raw file observations as JSONL",
+    )
+
+    entrypoints = subparsers.add_parser(
+        "entrypoints",
+        help="list entrypoint files from raw observation JSONL",
+    )
+    entrypoints.add_argument(
+        "jsonl_path",
+        help="raw observation JSONL path, or - for stdin",
+    )
+    entrypoints.add_argument(
+        "--json",
+        action="store_true",
+        help="emit entrypoint records as JSON",
     )
 
     files = subparsers.add_parser(
@@ -129,10 +148,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "files":
         try:
-            if args.jsonl_path == "-":
-                observations = read_observations_jsonl(sys.stdin)
-            else:
-                observations = read_observations_jsonl(args.jsonl_path)
+            observations = read_observations_argument(args.jsonl_path)
         except ObservationValidationError as error:
             print(f"ERROR: {error}", file=sys.stderr)
             return 1
@@ -148,6 +164,19 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(records_to_jsonable(records), sort_keys=True))
         else:
             print(format_file_table(records))
+        return 0
+
+    if args.command == "entrypoints":
+        try:
+            observations = read_observations_argument(args.jsonl_path)
+        except ObservationValidationError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        records = entrypoint_records_from_observations(observations)
+        if args.json:
+            print(json.dumps(entrypoints_to_jsonable(records), sort_keys=True))
+        else:
+            print(format_entrypoint_table(records))
         return 0
 
     if args.command == "observations" and args.observation_command == "normalize":
@@ -173,3 +202,9 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.print_help()
     return 0
+
+
+def read_observations_argument(jsonl_path: str):
+    if jsonl_path == "-":
+        return read_observations_jsonl(sys.stdin)
+    return read_observations_jsonl(jsonl_path)
