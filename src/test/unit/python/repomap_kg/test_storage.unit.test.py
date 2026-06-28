@@ -1,3 +1,4 @@
+import subprocess
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -150,6 +151,40 @@ SELECT 1;
             text=True,
         )
 
+    def test_apply_migrations_wraps_psql_failures(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "rdbms"
+            migration = root / "2026" / "06" / "28-001-core-create_graph_tables.sql"
+            migration.parent.mkdir(parents=True)
+            (root / "changelog.yaml").write_text(
+                """
+databaseChangeLog:
+  - includeAll:
+      path: "2026"
+      relativeToChangelogFile: true
+"""
+            )
+            migration.write_text(
+                """
+--liquibase formatted sql
+--changeset slair:2026_06_28-001-core-create_graph_tables
+SELECT 1;
+"""
+            )
+            error = subprocess.CalledProcessError(
+                2,
+                ["/bin/psql"],
+                output="",
+                stderr="relation already exists\n",
+            )
+
+            with patch("repomap_kg.storage.subprocess.run", side_effect=error):
+                with self.assertRaisesRegex(
+                    StorageSchemaError,
+                    "relation already exists",
+                ):
+                    apply_migrations(root, ["-d", "postgres"], psql_command="/bin/psql")
+
     def test_file_rows_from_observations_preserves_file_metadata(self):
         observation = RawObservation(
             kind="file",
@@ -251,6 +286,23 @@ SELECT 1;
         self.assertEqual(summary.files, 1)
         self.assertIn("-qAt", run.call_args.args[0])
 
+    def test_load_file_observations_wraps_psql_failures(self):
+        error = subprocess.CalledProcessError(
+            2,
+            ["/bin/psql"],
+            output="",
+            stderr="database does not exist\n",
+        )
+
+        with patch("repomap_kg.storage.subprocess.run", side_effect=error):
+            with self.assertRaisesRegex(StorageSchemaError, "database does not exist"):
+                load_file_observations(
+                    ["-d", "missing"],
+                    [],
+                    repository_name="fixture",
+                    root_path="/tmp/fixture",
+                )
+
     def test_query_file_records_returns_file_records(self):
         completed = SimpleNamespace(
             stdout=(
@@ -276,7 +328,22 @@ SELECT 1;
         self.assertEqual(records[0].role, "documentation")
         self.assertTrue(records[1].executable)
         self.assertIn("-qAt", run.call_args.args[0])
-        self.assertIn("repositories.root_path = '/tmp/fixture'", run.call_args.kwargs["input"])
+        self.assertIn(
+            "repositories.root_path = '/tmp/fixture'",
+            run.call_args.kwargs["input"],
+        )
+
+    def test_query_file_records_wraps_psql_failures(self):
+        error = subprocess.CalledProcessError(
+            2,
+            ["/bin/psql"],
+            output="",
+            stderr="connection refused\n",
+        )
+
+        with patch("repomap_kg.storage.subprocess.run", side_effect=error):
+            with self.assertRaisesRegex(StorageSchemaError, "connection refused"):
+                query_file_records(["-d", "postgres"], root_path="/tmp/fixture")
 
     def test_query_file_records_rejects_non_array_json(self):
         completed = SimpleNamespace(stdout='{"path": "README.md"}\n')

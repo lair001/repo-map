@@ -331,6 +331,30 @@ JOIN runs ON runs.id = files.last_seen_run_id;
             ],
         )
 
+    def test_storage_files_cli_reports_psql_failures(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            failing_psql = Path(tmpdir) / "psql"
+            failing_psql.write_text(
+                "#!/bin/sh\n"
+                "echo connection refused >&2\n"
+                "exit 2\n"
+            )
+            failing_psql.chmod(0o755)
+
+            exit_code, stdout, stderr = run_repo_map_in_process(
+                "storage",
+                "files",
+                "--root-path",
+                "/tmp/fixture",
+                "--psql-command",
+                str(failing_psql),
+                "--json",
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("connection refused", stderr)
+
     def test_storage_entrypoints_cli_reads_loaded_entrypoint_rows(self):
         require_postgres_binaries()
         observations = [

@@ -108,7 +108,7 @@ def apply_migrations(
 ) -> tuple[Migration, ...]:
     migrations = discover_migrations(rdbms_root)
     for migration in migrations:
-        subprocess.run(
+        run_psql(
             [
                 psql_command,
                 *psql_args,
@@ -117,10 +117,6 @@ def apply_migrations(
                 "-f",
                 str(migration.path),
             ],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
         )
     return migrations
 
@@ -170,13 +166,9 @@ def load_file_observations(
         root_path=root_path,
         git_commit=git_commit,
     )
-    result = subprocess.run(
+    result = run_psql(
         [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
-        check=True,
-        input=sql,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+        input_text=sql,
     )
     payload = json.loads(last_output_line(result.stdout))
     return LoadSummary(
@@ -192,13 +184,9 @@ def query_file_records(
     root_path: str,
     psql_command: str = "psql",
 ) -> tuple[FileRecord, ...]:
-    result = subprocess.run(
+    result = run_psql(
         [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
-        check=True,
-        input=build_file_query_sql(root_path),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+        input_text=build_file_query_sql(root_path),
     )
     try:
         payload = json.loads(last_output_line(result.stdout))
@@ -246,6 +234,28 @@ def build_file_ingest_sql(
         ]
     )
     return "\n".join(statements) + "\n"
+
+
+def run_psql(command: Sequence[str], *, input_text: str | None = None):
+    kwargs = {
+        "check": True,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+    }
+    if input_text is not None:
+        kwargs["input"] = input_text
+    try:
+        return subprocess.run(list(command), **kwargs)
+    except subprocess.CalledProcessError as error:
+        raise StorageSchemaError(psql_failure_message(error)) from error
+
+
+def psql_failure_message(error: subprocess.CalledProcessError) -> str:
+    details = (error.stderr or error.stdout or "").strip()
+    if details:
+        return f"psql failed: {details}"
+    return f"psql failed with exit code {error.returncode}"
 
 
 def build_file_query_sql(root_path: str) -> str:
