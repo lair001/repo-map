@@ -12,7 +12,7 @@ files, and command-line tools.
 
 ## Project Identity
 
-- Human name: RepoMap
+- Official name: RepoMap
 - Git repository: `repo-map`
 - Python distribution: `repomap-kg`
 - Python import package: `repomap_kg`
