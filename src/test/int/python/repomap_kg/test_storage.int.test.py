@@ -786,6 +786,129 @@ WHERE edges.kind = 'shell.command';
         self.assertIn("tool", text_stdout)
         self.assertNotIn("module:json", text_stdout)
 
+    def test_storage_neighborhood_cli_reads_depth_one_graph(self):
+        require_postgres_binaries()
+        observations = [
+            RawObservation(
+                kind="file",
+                source_id="bin/tool",
+                path="bin/tool",
+                confidence="manual",
+                extractor="fixture-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "shell",
+                    "role": "entrypoint",
+                    "content_hash": "c" * 64,
+                    "generated": False,
+                    "executable": True,
+                },
+            ),
+            RawObservation(
+                kind="shell.command",
+                source_id="bin/tool#call:nix-build",
+                path="bin/tool",
+                start_line=2,
+                end_line=2,
+                name="nix build",
+                target="tool:nix",
+                confidence="heuristic",
+                extractor="fixture-shell",
+                extractor_version="0.1.0",
+                metadata={"argv": ["nix", "build"]},
+            ),
+            RawObservation(
+                kind="python.import",
+                source_id="bin/tool#import:json",
+                path="bin/tool",
+                start_line=3,
+                end_line=3,
+                name="json",
+                target="module:json",
+                confidence="heuristic",
+                extractor="fixture-python",
+                extractor_version="0.1.0",
+                metadata={"module": "json"},
+            ),
+        ]
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            load_file_observations(
+                postgres.psql_args,
+                observations,
+                repository_name="fixture",
+                root_path="/tmp/fixture",
+                psql_command=postgres.psql_command,
+            )
+            exit_code, stdout, stderr = run_repo_map_in_process(
+                "storage",
+                "neighborhood",
+                "--root-path",
+                "/tmp/fixture",
+                "--node",
+                "tool:nix",
+                "--direction",
+                "in",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+                "--json",
+            )
+            text_exit_code, text_stdout, text_stderr = run_repo_map_in_process(
+                "storage",
+                "neighborhood",
+                "--root-path",
+                "/tmp/fixture",
+                "--node",
+                "node:bin/tool:python.import:bin/tool#import:json",
+                "--direction",
+                "out",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+            )
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["center"]["node_stable_key"], "tool:nix")
+        self.assertEqual(
+            {
+                node["node_stable_key"]
+                for node in payload["nodes"]
+            },
+            {
+                "tool:nix",
+                "node:bin/tool:shell.command:bin/tool#call:nix-build",
+            },
+        )
+        self.assertEqual(len(payload["edges"]), 1)
+        self.assertEqual(payload["edges"][0]["edge_kind"], "shell.command")
+        self.assertEqual(payload["edges"][0]["dst_node_stable_key"], "tool:nix")
+        self.assertEqual(text_exit_code, 0, text_stderr)
+        self.assertIn("center_node_stable_key", text_stdout)
+        self.assertIn("module:json", text_stdout)
+        self.assertIn("python.import", text_stdout)
+        self.assertNotIn("tool:nix", text_stdout)
+
     def test_storage_edges_cli_reads_loaded_relationship_rows(self):
         require_postgres_binaries()
         observations = [

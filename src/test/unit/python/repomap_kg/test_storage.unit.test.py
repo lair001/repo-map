@@ -9,9 +9,11 @@ from repomap_kg.observations import RawObservation
 from repomap_kg.storage import (
     EdgeRecord,
     FileNodeRecord,
+    NeighborhoodRecord,
     NodeRecord,
     StorageSummaryRecord,
     StorageSchemaError,
+    build_neighborhood_query_sql,
     build_node_query_sql,
     build_storage_summary_query_sql,
     build_edge_query_sql,
@@ -23,12 +25,14 @@ from repomap_kg.storage import (
     discover_migrations,
     format_edge_table,
     format_file_node_table,
+    format_neighborhood_table,
     format_node_table,
     format_storage_summary_table,
     file_rows_from_observations,
     query_edge_records,
     query_file_node_records,
     query_file_records,
+    query_neighborhood,
     query_node_records,
     query_storage_summary,
     relationship_rows_from_observations,
@@ -607,6 +611,80 @@ SELECT 1;
             with self.assertRaisesRegex(StorageSchemaError, "node records"):
                 query_node_records(["-d", "postgres"], root_path="/tmp/fixture")
 
+    def test_query_neighborhood_returns_center_nodes_and_edges(self):
+        completed = SimpleNamespace(
+            stdout=(
+                "{"
+                '"center":{"path":"","node_kind":"tool","node_name":"nix",'
+                '"node_stable_key":"tool:nix","start_line":null,"end_line":null},'
+                '"nodes":['
+                '{"path":"","node_kind":"tool","node_name":"nix",'
+                '"node_stable_key":"tool:nix","start_line":null,"end_line":null},'
+                '{"path":"bin/tool","node_kind":"shell.command",'
+                '"node_name":"nix build",'
+                '"node_stable_key":"node:bin/tool:shell.command:x",'
+                '"start_line":2,"end_line":2}'
+                "],"
+                '"edges":['
+                '{"path":"bin/tool","edge_kind":"shell.command",'
+                '"edge_stable_key":"edge:node:bin/tool:shell.command:x",'
+                '"confidence":"heuristic","src_node_kind":"shell.command",'
+                '"src_node_name":"nix build",'
+                '"src_node_stable_key":"node:bin/tool:shell.command:x",'
+                '"dst_node_kind":"tool","dst_node_name":"nix",'
+                '"dst_node_stable_key":"tool:nix",'
+                '"evidence_stable_key":"evidence:bin/tool:2-2:fixture-shell:x",'
+                '"extractor":"fixture-shell"}'
+                "]"
+                "}\n"
+            )
+        )
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+            record = query_neighborhood(
+                ["-d", "postgres"],
+                root_path="/tmp/fixture",
+                node="tool:nix",
+                direction="in",
+                psql_command="/bin/psql",
+            )
+
+        self.assertEqual(record.center.node_stable_key, "tool:nix")
+        self.assertEqual([node.node_stable_key for node in record.nodes][0], "tool:nix")
+        self.assertEqual(record.edges[0].dst_node_stable_key, "tool:nix")
+        self.assertIn("-qAt", run.call_args.args[0])
+        self.assertIn(
+            "repositories.root_path = '/tmp/fixture'",
+            run.call_args.kwargs["input"],
+        )
+        self.assertIn(
+            "JOIN center ON dst.id = center.id",
+            run.call_args.kwargs["input"],
+        )
+
+    def test_query_neighborhood_rejects_depth_above_one(self):
+        with patch("repomap_kg.storage.subprocess.run") as run:
+            with self.assertRaisesRegex(StorageSchemaError, "depth 1"):
+                query_neighborhood(
+                    ["-d", "postgres"],
+                    root_path="/tmp/fixture",
+                    node="tool:nix",
+                    depth=2,
+                )
+
+        run.assert_not_called()
+
+    def test_query_neighborhood_rejects_malformed_json(self):
+        completed = SimpleNamespace(stdout='{"center": null}\n')
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(StorageSchemaError, "neighborhood"):
+                query_neighborhood(
+                    ["-d", "postgres"],
+                    root_path="/tmp/fixture",
+                    node="tool:nix",
+                )
+
     def test_query_edge_records_returns_records(self):
         completed = SimpleNamespace(
             stdout=(
@@ -746,6 +824,40 @@ SELECT 1;
         self.assertIn("AND files.path = 'bin/tool'", sql)
         self.assertIn("AND nodes.stable_key = 'node:bin/tool:shell.command:x'", sql)
 
+    def test_build_neighborhood_query_sql_filters_by_direction(self):
+        inbound = build_neighborhood_query_sql(
+            "/tmp/fixture",
+            node="tool:nix",
+            direction="in",
+        )
+        outbound = build_neighborhood_query_sql(
+            "/tmp/fixture",
+            node="tool:nix",
+            direction="out",
+        )
+        both = build_neighborhood_query_sql(
+            "/tmp/fixture",
+            node="tool:nix",
+            direction="both",
+        )
+
+        self.assertIn("repositories.root_path = '/tmp/fixture'", inbound)
+        self.assertIn("nodes.stable_key = 'tool:nix'", inbound)
+        self.assertIn("JOIN center ON dst.id = center.id", inbound)
+        self.assertIn("JOIN center ON src.id = center.id", outbound)
+        self.assertIn(
+            "JOIN center ON (src.id = center.id OR dst.id = center.id)",
+            both,
+        )
+
+    def test_build_neighborhood_query_sql_rejects_unknown_direction(self):
+        with self.assertRaisesRegex(StorageSchemaError, "direction"):
+            build_neighborhood_query_sql(
+                "/tmp/fixture",
+                node="tool:nix",
+                direction="sideways",
+            )
+
     def test_build_edge_query_sql_quotes_root_path_and_orders_edges(self):
         sql = build_edge_query_sql("/tmp/fixture's repo")
 
@@ -847,6 +959,51 @@ SELECT 1;
         self.assertIn("node_stable_key", table)
         self.assertIn("start_line", table)
         self.assertIn("node:bin/tool:shell.command:x", table)
+
+    def test_format_neighborhood_table_prints_center_and_edges(self):
+        table = format_neighborhood_table(
+            NeighborhoodRecord(
+                center=NodeRecord(
+                    path="",
+                    node_kind="tool",
+                    node_name="nix",
+                    node_stable_key="tool:nix",
+                    start_line=None,
+                    end_line=None,
+                ),
+                nodes=(
+                    NodeRecord(
+                        path="",
+                        node_kind="tool",
+                        node_name="nix",
+                        node_stable_key="tool:nix",
+                        start_line=None,
+                        end_line=None,
+                    ),
+                ),
+                edges=(
+                    EdgeRecord(
+                        path="bin/tool",
+                        edge_kind="shell.command",
+                        edge_stable_key="edge:node:bin/tool:shell.command:x",
+                        confidence="heuristic",
+                        src_node_kind="shell.command",
+                        src_node_name="nix build",
+                        src_node_stable_key="node:bin/tool:shell.command:x",
+                        dst_node_kind="tool",
+                        dst_node_name="nix",
+                        dst_node_stable_key="tool:nix",
+                        evidence_stable_key="evidence:bin/tool:2-2:fixture-shell:x",
+                        extractor="fixture-shell",
+                    ),
+                ),
+            )
+        )
+
+        self.assertIn("center_node_stable_key: tool:nix", table)
+        self.assertIn("edge_kind", table)
+        self.assertIn("dst_node_stable_key", table)
+        self.assertIn("tool:nix", table)
 
     def test_build_file_node_query_sql_quotes_root_path_and_orders_graph_records(self):
         sql = build_file_node_query_sql("/tmp/fixture's repo")

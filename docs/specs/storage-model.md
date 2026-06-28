@@ -177,6 +177,11 @@ file node keys and their evidence records as table or JSON output.
 Stored graph nodes can be read back with `repomap-kg storage nodes`, optionally
 filtered by node kind, file path, or node stable key, returning node path, kind,
 name, stable key, and line range as table or JSON output.
+Depth-1 graph neighborhoods can be read back with
+`repomap-kg storage neighborhood`, centered on a required node stable key and
+optionally filtered to inbound, outbound, or both directions. JSON output
+returns the center node, all nodes in the neighborhood, and matching edge rows;
+table output identifies the center node and renders the matching edge rows.
 Stored relationship edges can be read back with `repomap-kg storage edges`,
 optionally filtered by edge kind, source node stable key, or target node stable
 key, returning source node, target node, edge, evidence, kind, confidence, and
