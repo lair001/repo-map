@@ -175,8 +175,9 @@ Stored normalized file graph rows can be read back with
 `repomap-kg storage file-nodes`, returning file node keys and their evidence
 records as table or JSON output.
 Stored relationship edges can be read back with `repomap-kg storage edges`,
-optionally filtered by edge kind, returning source node, target node, edge,
-evidence, kind, confidence, and stable key fields as table or JSON output.
+optionally filtered by edge kind, source node stable key, or target node stable
+key, returning source node, target node, edge, evidence, kind, confidence, and
+stable key fields as table or JSON output.
 
 ## Local Development
 

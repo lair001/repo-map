@@ -193,6 +193,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_storage_root_argument(storage_edges)
     storage_edges.add_argument("--kind", help="include only edges with this kind")
+    storage_edges.add_argument(
+        "--source-node",
+        help="include only edges with this source node stable key",
+    )
+    storage_edges.add_argument(
+        "--target-node",
+        help="include only edges with this target node stable key",
+    )
     add_storage_connection_arguments(storage_edges)
     storage_edges.add_argument(
         "--json",
@@ -389,6 +397,8 @@ def main(argv: list[str] | None = None) -> int:
                 psql_args_from_args(args),
                 root_path=args.root_path,
                 kind=args.kind,
+                source_node=args.source_node,
+                target_node=args.target_node,
                 psql_command=args.psql_command,
             )
         except StorageSchemaError as error:
