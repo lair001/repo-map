@@ -1,0 +1,30 @@
+.DS_Store
+.cache/
+.coverage
+.env
+.env.*
+.idea/
+.pytest_cache/
+.ruff_cache/
+.venv/
+.vscode/
+__pycache__/
+build/
+coverage/
+dist/
+htmlcov/
+node_modules/
+reports/
+*.egg-info/
+*.py[cod]
+
+# Local database and generated graph artifacts
+data/
+tmp/
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+
+# Keep explicit examples and templates trackable.
+!.env.example
