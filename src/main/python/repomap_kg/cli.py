@@ -7,6 +7,7 @@ import json
 import sys
 
 from repomap_kg import __version__
+from repomap_kg.discovery import discover_observations
 from repomap_kg.normalization import normalize_observations
 from repomap_kg.observations import ObservationValidationError, read_observations_jsonl
 from repomap_kg.project_identity import PROJECT_IDENTITY
@@ -23,6 +24,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the repomap-kg version and exit",
     )
     subparsers = parser.add_subparsers(dest="command")
+
+    discover = subparsers.add_parser(
+        "discover",
+        help="discover repository files as raw observations",
+    )
+    discover.add_argument("root", help="repository root to discover")
+    discover.add_argument(
+        "--jsonl",
+        action="store_true",
+        help="emit raw file observations as JSONL",
+    )
 
     identity = subparsers.add_parser(
         "identity",
@@ -68,6 +80,15 @@ def main(argv: list[str] | None = None) -> int:
         else:
             for key, value in identity.items():
                 print(f"{key}: {value}")
+        return 0
+
+    if args.command == "discover":
+        observations = discover_observations(args.root)
+        if args.jsonl:
+            for observation in observations:
+                print(observation.to_json_line(), end="")
+        else:
+            print(f"discovered {len(observations)} files")
         return 0
 
     if args.command == "observations" and args.observation_command == "normalize":

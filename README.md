@@ -43,6 +43,7 @@ Run the CLI from the source tree:
 ```sh
 PYTHONPATH=src/main/python python3 -m repomap_kg --version
 PYTHONPATH=src/main/python python3 -m repomap_kg identity --json
+PYTHONPATH=src/main/python python3 -m repomap_kg discover . --jsonl
 PYTHONPATH=src/main/python python3 -m repomap_kg observations normalize raw-observations.jsonl --json
 ```
 

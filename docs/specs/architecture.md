@@ -42,6 +42,10 @@ test file, generated artifact, or profile-defined entry point.
 Detection should use file extension, shebang, executable bit, directory role,
 and optional project profile hints.
 
+The initial discovery implementation emits `file` raw observations with
+repository-relative path, detected language, role, executable flag, generated
+flag, and SHA-256 content hash metadata.
+
 ### Extractors
 
 Extractors are deterministic modules that read one language or file family and

@@ -195,6 +195,65 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertIn("start_line must be an integer", stderr)
 
+    def test_discover_command_emits_file_observations_for_fixture_repo(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "fixture-repo"
+            self.write_fixture(
+                fixture / "bin" / "tool",
+                "#!/usr/bin/env bash\necho ok\n",
+            )
+            (fixture / "bin" / "tool").chmod(
+                (fixture / "bin" / "tool").stat().st_mode | 0o111
+            )
+            self.write_fixture(
+                fixture / "src" / "main" / "python" / "app.py",
+                "print('ok')\n",
+            )
+            self.write_fixture(
+                fixture / "src" / "test" / "unit" / "python" / "app.unit.test.py",
+                "import unittest\n",
+            )
+            self.write_fixture(fixture / "flake.nix", "{ outputs = _: {}; }\n")
+            self.write_fixture(fixture / "generated" / "report.json", "{}\n")
+            self.write_fixture(fixture / ".git" / "config", "ignored\n")
+
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "discover", str(fixture), "--jsonl"
+            )
+
+        observations = [json.loads(line) for line in stdout.splitlines()]
+        paths = [observation["path"] for observation in observations]
+        metadata_by_path = {
+            observation["path"]: observation["metadata"] for observation in observations
+        }
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            paths,
+            [
+                "bin/tool",
+                "flake.nix",
+                "generated/report.json",
+                "src/main/python/app.py",
+                "src/test/unit/python/app.unit.test.py",
+            ],
+        )
+        self.assertTrue(
+            all(observation["kind"] == "file" for observation in observations)
+        )
+        self.assertNotIn(".git/config", paths)
+        self.assertEqual(metadata_by_path["bin/tool"]["language"], "shell")
+        self.assertEqual(metadata_by_path["bin/tool"]["role"], "entrypoint")
+        self.assertTrue(metadata_by_path["bin/tool"]["executable"])
+        self.assertEqual(metadata_by_path["flake.nix"]["language"], "nix")
+        self.assertEqual(metadata_by_path["flake.nix"]["role"], "config")
+        self.assertEqual(metadata_by_path["generated/report.json"]["role"], "generated")
+        self.assertEqual(metadata_by_path["src/main/python/app.py"]["role"], "source")
+        self.assertEqual(
+            metadata_by_path["src/test/unit/python/app.unit.test.py"]["role"],
+            "test",
+        )
+
     def run_module_entrypoint(self, *args):
         original_argv = sys.argv[:]
         stdout = io.StringIO()
@@ -209,6 +268,10 @@ class CliIntegrationTests(unittest.TestCase):
             sys.argv = original_argv
 
         return caught.exception.code, stdout.getvalue(), stderr.getvalue()
+
+    def write_fixture(self, path, content):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
 
 
 if __name__ == "__main__":

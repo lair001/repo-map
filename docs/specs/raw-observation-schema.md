@@ -33,6 +33,16 @@ Example:
 {"confidence":"heuristic","end_line":2,"extractor":"fixture-shell","extractor_version":"0.1.0","kind":"shell.command","metadata":{"fixture":true},"name":"nix build","path":"scripts/build.sh","schema_version":1,"source_id":"scripts/build.sh#call:nix-build","start_line":2,"target":"tool:nix"}
 ```
 
+The `repo-discovery` extractor emits `file` observations. Their metadata
+contains:
+
+- `language`: detected language, or `unknown`.
+- `role`: high-level file role, such as `source`, `test`, `config`,
+  `documentation`, `entrypoint`, `generated`, or `unknown`.
+- `content_hash`: SHA-256 hash of file bytes.
+- `executable`: whether the file has an executable bit.
+- `generated`: whether the path lives under a generated-output directory.
+
 ## Normalization Boundary
 
 The first normalizer maps raw observations into graph-shaped records without a
