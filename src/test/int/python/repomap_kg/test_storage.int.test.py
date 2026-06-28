@@ -620,6 +620,8 @@ WHERE edges.kind = 'shell.command';
                 "file-nodes",
                 "--root-path",
                 "/tmp/fixture",
+                "--path",
+                "bin/tool",
                 "--pg-host",
                 str(postgres.socket_dir),
                 "--pg-port",
@@ -637,6 +639,8 @@ WHERE edges.kind = 'shell.command';
                 "file-nodes",
                 "--root-path",
                 "/tmp/fixture",
+                "--path",
+                "README.md",
                 "--pg-host",
                 str(postgres.socket_dir),
                 "--pg-port",
@@ -653,17 +657,18 @@ WHERE edges.kind = 'shell.command';
         payload = json.loads(stdout)
         self.assertEqual(
             [record["path"] for record in payload],
-            ["README.md", "bin/tool"],
+            ["bin/tool"],
         )
-        self.assertEqual(payload[1]["node_kind"], "file")
-        self.assertEqual(payload[1]["node_stable_key"], "node:bin/tool:file:bin/tool")
+        self.assertEqual(payload[0]["node_kind"], "file")
+        self.assertEqual(payload[0]["node_stable_key"], "node:bin/tool:file:bin/tool")
         self.assertEqual(
-            payload[1]["evidence_stable_key"],
+            payload[0]["evidence_stable_key"],
             "evidence:bin/tool:0-0:fixture-discovery:bin/tool",
         )
         self.assertEqual(text_exit_code, 0, text_stderr)
         self.assertIn("node_stable_key", text_stdout)
-        self.assertIn("evidence:bin/tool:0-0:fixture-discovery:bin/tool", text_stdout)
+        self.assertIn("README.md", text_stdout)
+        self.assertNotIn("bin/tool", text_stdout)
 
     def test_storage_edges_cli_reads_loaded_relationship_rows(self):
         require_postgres_binaries()

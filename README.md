@@ -53,7 +53,7 @@ PYTHONPATH=src/main/python python3 -m repomap_kg observations normalize raw-obse
 PYTHONPATH=src/main/python python3 -m repomap_kg storage load-files raw-observations.jsonl --repository-name repo-map --root-path . --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage files --root-path . --role source --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage entrypoints --root-path . --json
-PYTHONPATH=src/main/python python3 -m repomap_kg storage file-nodes --root-path . --json
+PYTHONPATH=src/main/python python3 -m repomap_kg storage file-nodes --root-path . --path README.md --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage edges --root-path . --kind shell.command --target-node tool:nix --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage summary --root-path . --json
 ```

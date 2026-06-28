@@ -172,8 +172,8 @@ Stored entrypoint file rows can be read back with
 `repomap-kg storage entrypoints`, reusing the same table and JSON presentation
 as the raw-JSONL `entrypoints` command.
 Stored normalized file graph rows can be read back with
-`repomap-kg storage file-nodes`, returning file node keys and their evidence
-records as table or JSON output.
+`repomap-kg storage file-nodes`, optionally filtered by file path, returning
+file node keys and their evidence records as table or JSON output.
 Stored relationship edges can be read back with `repomap-kg storage edges`,
 optionally filtered by edge kind, source node stable key, or target node stable
 key, returning source node, target node, edge, evidence, kind, confidence, and

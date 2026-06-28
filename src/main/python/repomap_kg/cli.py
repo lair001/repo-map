@@ -184,6 +184,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="list stored file nodes and evidence from Postgres storage",
     )
     add_storage_root_argument(storage_file_nodes)
+    storage_file_nodes.add_argument("--path", help="include only this file path")
     add_storage_connection_arguments(storage_file_nodes)
     storage_file_nodes.add_argument(
         "--json",
@@ -394,6 +395,7 @@ def main(argv: list[str] | None = None) -> int:
             records = query_file_node_records(
                 psql_args_from_args(args),
                 root_path=args.root_path,
+                path=args.path,
                 psql_command=args.psql_command,
             )
         except StorageSchemaError as error:

@@ -516,6 +516,20 @@ SELECT 1;
             run.call_args.kwargs["input"],
         )
 
+    def test_query_file_node_records_can_filter_by_path(self):
+        completed = SimpleNamespace(stdout="[]\n")
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+            records = query_file_node_records(
+                ["-d", "postgres"],
+                root_path="/tmp/fixture",
+                path="bin/tool",
+                psql_command="/bin/psql",
+            )
+
+        self.assertEqual(records, ())
+        self.assertIn("AND files.path = 'bin/tool'", run.call_args.kwargs["input"])
+
     def test_query_file_node_records_rejects_malformed_json(self):
         completed = SimpleNamespace(stdout='{"path": "bin/tool"}\n')
 
@@ -727,6 +741,12 @@ SELECT 1;
         self.assertIn("JOIN nodes ON nodes.file_id = files.id", sql)
         self.assertIn("JOIN evidence ON evidence.file_id = files.id", sql)
         self.assertIn("ORDER BY files.path, nodes.stable_key, evidence.stable_key", sql)
+
+    def test_build_file_node_query_sql_can_filter_by_path(self):
+        sql = build_file_node_query_sql("/tmp/fixture", path="bin/tool")
+
+        self.assertIn("repositories.root_path = '/tmp/fixture'", sql)
+        self.assertIn("AND files.path = 'bin/tool'", sql)
 
     def test_format_file_node_table_uses_graph_columns(self):
         table = format_file_node_table(

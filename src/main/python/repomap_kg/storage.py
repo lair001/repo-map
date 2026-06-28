@@ -316,11 +316,12 @@ def query_file_node_records(
     psql_args: Sequence[str],
     *,
     root_path: str,
+    path: str | None = None,
     psql_command: str = "psql",
 ) -> tuple[FileNodeRecord, ...]:
     result = run_psql(
         [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
-        input_text=build_file_node_query_sql(root_path),
+        input_text=build_file_node_query_sql(root_path, path=path),
     )
     payload = parse_psql_json(result.stdout, "file node records")
     if not isinstance(payload, list):
@@ -454,7 +455,11 @@ def build_file_query_sql(root_path: str) -> str:
     )
 
 
-def build_file_node_query_sql(root_path: str) -> str:
+def build_file_node_query_sql(root_path: str, *, path: str | None = None) -> str:
+    filters = [f"repositories.root_path = {sql_literal(root_path)}"]
+    if path is not None:
+        filters.append(f"files.path = {sql_literal(path)}")
+    where_sql = " AND ".join(filters)
     return (
         "SELECT COALESCE(json_agg(json_build_object("
         "'path', files.path, "
@@ -476,7 +481,7 @@ def build_file_node_query_sql(root_path: str) -> str:
         "AND nodes.kind = 'file' "
         "JOIN evidence ON evidence.file_id = files.id "
         "AND evidence.repository_id = files.repository_id "
-        f"WHERE repositories.root_path = {sql_literal(root_path)};"
+        f"WHERE {where_sql};"
     )
 
 

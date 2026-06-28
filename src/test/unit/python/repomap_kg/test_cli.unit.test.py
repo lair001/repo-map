@@ -537,6 +537,8 @@ class CliUnitTests(unittest.TestCase):
                         "file-nodes",
                         "--root-path",
                         "/tmp/fixture",
+                        "--path",
+                        "bin/tool",
                         "--pg-database",
                         "postgres",
                         "--json",
@@ -549,6 +551,7 @@ class CliUnitTests(unittest.TestCase):
         self.assertEqual(payload[0]["node_stable_key"], "node:bin/tool:file:bin/tool")
         self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
         self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+        self.assertEqual(query.call_args.kwargs["path"], "bin/tool")
 
     def test_storage_file_nodes_reports_query_errors(self):
         stderr = io.StringIO()
