@@ -32,8 +32,30 @@ files, and command-line tools.
 
 ## Current Status
 
-RepoMap is in the design/specification stage. The initial specs live under
-`docs/specs/`.
+RepoMap has an initial Python package skeleton with a minimal CLI identity
+surface. The initial specs live under `docs/specs/`.
+
+## Development
+
+Run the CLI from the source tree:
+
+```sh
+PYTHONPATH=src/main/python python3 -m repomap_kg --version
+PYTHONPATH=src/main/python python3 -m repomap_kg identity --json
+```
+
+Run the host-safe test suites with coverage gates:
+
+```sh
+python3 tools/run_tests.py --suite unit
+python3 tools/run_tests.py --suite int
+python3 tools/run_tests.py --suite all
+```
+
+The project runner uses stdlib `unittest` and `trace`, so the initial test
+suite does not require network access or third-party test packages. Unit,
+integration, and combined runs enforce an 85 percent aggregate line coverage
+gate and print per-file advisory rows.
 
 ## Specifications
 
