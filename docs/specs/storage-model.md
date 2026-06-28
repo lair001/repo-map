@@ -120,8 +120,25 @@ evidence(
 
 ## Migration Strategy
 
-Migrations should be explicit and versioned. Development and CI should be able
-to create a fresh database, apply migrations, load fixtures, and run tests.
+RepoMap uses Liquibase for database versioning and migrations. Migrations
+should be explicit, reviewable, and reproducible. Development and CI should be
+able to create a fresh database, apply migrations, load fixtures, and run tests.
+
+Migration resources should use this layout:
+
+```text
+src/main/resources/rdbms/
+  changelog.yaml
+  migrations/
+    <year>/
+      <month>/
+        <sequence>_<description>.sql
+```
+
+The root `changelog.yaml` should include the migration tree with `includeAll`.
+Migration SQL files should live under folders organized first by year and then
+by month. This keeps the history browsable while avoiding one large flat
+migration directory.
 
 ## Local Development
 
