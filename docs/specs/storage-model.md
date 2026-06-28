@@ -155,11 +155,19 @@ local verification, not a replacement for Liquibase as the migration format.
 The first ingestion path loads raw discovery `file` observations into Postgres
 by creating or updating a repository, recording an indexing run, and upserting
 file rows with `last_seen_run_id` pointing back to the run that observed them.
+The CLI exposes this path as `repomap-kg storage load-files`, accepting raw
+observation JSONL plus repository identity fields and optional `psql` connection
+arguments.
 
 ## Local Development
 
 The default development database should run in a Postgres container. Tests may
 use isolated schemas or disposable databases.
+
+Integration tests can also use host Postgres tools for disposable local
+clusters. When `pg_config` is available, the test harness uses it to locate the
+matching Postgres binary and share directories before falling back to the
+`initdb` location on `PATH`.
 
 SQLite may be considered later as an optional lightweight cache backend, but it
 is not the primary design target.

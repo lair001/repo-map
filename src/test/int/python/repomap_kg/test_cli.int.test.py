@@ -196,6 +196,40 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertIn("start_line must be an integer", stderr)
 
+    def test_storage_load_files_command_reports_schema_errors(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bad_jsonl = Path(tmpdir) / "bad-observations.jsonl"
+            bad_jsonl.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "kind": "file",
+                        "source_id": "README.md",
+                        "path": "README.md",
+                        "confidence": "certain",
+                        "extractor": "fixture-discovery",
+                        "extractor_version": "0.1.0",
+                        "metadata": {},
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "storage",
+                "load-files",
+                str(bad_jsonl),
+                "--repository-name",
+                "fixture",
+                "--root-path",
+                "/tmp/fixture",
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("confidence must be one of", stderr)
+
     def test_discover_command_emits_file_observations_for_fixture_repo(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture = Path(tmpdir) / "fixture-repo"

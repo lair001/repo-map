@@ -10,6 +10,7 @@ from unittest.mock import patch
 from repomap_kg import __version__
 from repomap_kg.cli import build_parser, main
 from repomap_kg.observations import RawObservation, write_observations_jsonl
+from repomap_kg.storage import LoadSummary, StorageSchemaError
 
 
 class CliUnitTests(unittest.TestCase):
@@ -211,6 +212,102 @@ class CliUnitTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertIn("invalid JSON", stderr.getvalue())
+
+    def test_storage_load_files_prints_json_summary(self):
+        observation = RawObservation(
+            kind="file",
+            source_id="README.md",
+            path="README.md",
+            confidence="extracted",
+            extractor="fixture-discovery",
+            extractor_version="0.1.0",
+            metadata={
+                "language": "markdown",
+                "role": "documentation",
+                "content_hash": "0" * 64,
+                "generated": False,
+                "executable": False,
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl_path = Path(tmpdir) / "raw-observations.jsonl"
+            write_observations_jsonl([observation], jsonl_path)
+            stdout = io.StringIO()
+
+            with patch(
+                "repomap_kg.cli.load_file_observations",
+                return_value=LoadSummary(repository_id=7, run_id=11, files=1),
+            ) as load:
+                with redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            "storage",
+                            "load-files",
+                            str(jsonl_path),
+                            "--repository-name",
+                            "fixture",
+                            "--root-path",
+                            "/tmp/fixture",
+                            "--pg-host",
+                            "/tmp/socket",
+                            "--pg-port",
+                            "5432",
+                            "--pg-user",
+                            "repo_map_test",
+                            "--pg-database",
+                            "postgres",
+                            "--psql-command",
+                            "/bin/psql",
+                            "--json",
+                        ]
+                    )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["repository_id"], 7)
+        self.assertEqual(payload["files"], 1)
+        load.assert_called_once()
+        self.assertEqual(
+            load.call_args.args[0],
+            [
+                "-h",
+                "/tmp/socket",
+                "-p",
+                "5432",
+                "-U",
+                "repo_map_test",
+                "-d",
+                "postgres",
+            ],
+        )
+
+    def test_storage_load_files_reports_loader_errors(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl_path = Path(tmpdir) / "raw-observations.jsonl"
+            write_observations_jsonl([], jsonl_path)
+            stderr = io.StringIO()
+
+            with patch(
+                "repomap_kg.cli.load_file_observations",
+                side_effect=StorageSchemaError("psql did not return a summary"),
+            ):
+                with redirect_stderr(stderr):
+                    exit_code = main(
+                        [
+                            "storage",
+                            "load-files",
+                            str(jsonl_path),
+                            "--repository-name",
+                            "fixture",
+                            "--root-path",
+                            "/tmp/fixture",
+                            "--json",
+                        ]
+                    )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("psql did not return", stderr.getvalue())
 
     def test_discover_prints_text_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:

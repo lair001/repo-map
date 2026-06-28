@@ -24,6 +24,10 @@ from repomap_kg.normalization import normalize_observations
 from repomap_kg.observations import ObservationValidationError, read_observations_jsonl
 from repomap_kg.profiles import ProfileValidationError, load_profile
 from repomap_kg.project_identity import PROJECT_IDENTITY
+from repomap_kg.storage import (
+    StorageSchemaError,
+    load_file_observations,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -110,6 +114,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit normalized records as JSON",
+    )
+
+    storage = subparsers.add_parser(
+        "storage",
+        help="work with RepoMap storage backends",
+    )
+    storage_subcommands = storage.add_subparsers(dest="storage_command")
+    load_files = storage_subcommands.add_parser(
+        "load-files",
+        help="load raw file observations into Postgres storage",
+    )
+    load_files.add_argument("jsonl_path", help="raw observation JSONL path")
+    load_files.add_argument("--repository-name", required=True)
+    load_files.add_argument("--root-path", required=True)
+    load_files.add_argument("--git-commit")
+    load_files.add_argument("--pg-host")
+    load_files.add_argument("--pg-port")
+    load_files.add_argument("--pg-user")
+    load_files.add_argument("--pg-database")
+    load_files.add_argument("--psql-command", default="psql")
+    load_files.add_argument(
+        "--json",
+        action="store_true",
+        help="emit load summary as JSON",
     )
 
     return parser
@@ -200,6 +228,34 @@ def main(argv: list[str] | None = None) -> int:
             )
         return 0
 
+    if args.command == "storage" and args.storage_command == "load-files":
+        try:
+            observations = read_observations_jsonl(args.jsonl_path)
+            summary = load_file_observations(
+                psql_args_from_args(args),
+                observations,
+                repository_name=args.repository_name,
+                root_path=args.root_path,
+                git_commit=args.git_commit,
+                psql_command=args.psql_command,
+            )
+        except (ObservationValidationError, StorageSchemaError) as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        payload = {
+            "repository_id": summary.repository_id,
+            "run_id": summary.run_id,
+            "files": summary.files,
+        }
+        if args.json:
+            print(json.dumps(payload, sort_keys=True))
+        else:
+            print(
+                f"loaded {summary.files} files into "
+                f"repository {summary.repository_id} run {summary.run_id}"
+            )
+        return 0
+
     parser.print_help()
     return 0
 
@@ -208,3 +264,18 @@ def read_observations_argument(jsonl_path: str):
     if jsonl_path == "-":
         return read_observations_jsonl(sys.stdin)
     return read_observations_jsonl(jsonl_path)
+
+
+def psql_args_from_args(args) -> list[str]:
+    psql_args = []
+    options = (
+        ("pg_host", "-h"),
+        ("pg_port", "-p"),
+        ("pg_user", "-U"),
+        ("pg_database", "-d"),
+    )
+    for attribute, flag in options:
+        value = getattr(args, attribute)
+        if value:
+            psql_args.extend([flag, value])
+    return psql_args
