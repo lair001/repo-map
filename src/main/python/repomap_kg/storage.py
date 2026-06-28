@@ -83,6 +83,25 @@ class FileNodeRecord:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class EdgeRecord:
+    path: str
+    edge_kind: str
+    edge_stable_key: str
+    confidence: str
+    src_node_kind: str
+    src_node_name: str
+    src_node_stable_key: str
+    dst_node_kind: str
+    dst_node_name: str
+    dst_node_stable_key: str
+    evidence_stable_key: str
+    extractor: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 CHANGESET_PATTERN = re.compile(r"^--changeset\s+(\S+)")
 
 
@@ -295,6 +314,22 @@ def query_file_node_records(
     return tuple(file_node_record_from_storage_payload(item) for item in payload)
 
 
+def query_edge_records(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    psql_command: str = "psql",
+) -> tuple[EdgeRecord, ...]:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_edge_query_sql(root_path),
+    )
+    payload = parse_psql_json(result.stdout, "edge records")
+    if not isinstance(payload, list):
+        raise StorageSchemaError("psql did not return edge records as a JSON array")
+    return tuple(edge_record_from_storage_payload(item) for item in payload)
+
+
 def build_file_ingest_sql(
     rows: Sequence[FileRow],
     *,
@@ -402,6 +437,32 @@ def build_file_node_query_sql(root_path: str) -> str:
         "AND nodes.kind = 'file' "
         "JOIN evidence ON evidence.file_id = files.id "
         "AND evidence.repository_id = files.repository_id "
+        f"WHERE repositories.root_path = {sql_literal(root_path)};"
+    )
+
+
+def build_edge_query_sql(root_path: str) -> str:
+    return (
+        "SELECT COALESCE(json_agg(json_build_object("
+        "'path', COALESCE(files.path, ''), "
+        "'edge_kind', edges.kind, "
+        "'edge_stable_key', edges.stable_key, "
+        "'confidence', edges.confidence, "
+        "'src_node_kind', src.kind, "
+        "'src_node_name', src.name, "
+        "'src_node_stable_key', src.stable_key, "
+        "'dst_node_kind', dst.kind, "
+        "'dst_node_name', dst.name, "
+        "'dst_node_stable_key', dst.stable_key, "
+        "'evidence_stable_key', evidence.stable_key, "
+        "'extractor', evidence.extractor"
+        ") ORDER BY edges.kind, edges.stable_key), '[]'::json)::text "
+        "FROM edges "
+        "JOIN repositories ON repositories.id = edges.repository_id "
+        "JOIN nodes src ON src.id = edges.src_node_id "
+        "JOIN nodes dst ON dst.id = edges.dst_node_id "
+        "JOIN evidence ON evidence.id = edges.evidence_id "
+        "LEFT JOIN files ON files.id = evidence.file_id "
         f"WHERE repositories.root_path = {sql_literal(root_path)};"
     )
 
@@ -664,9 +725,38 @@ def file_node_record_from_storage_payload(payload: Any) -> FileNodeRecord:
     )
 
 
+def edge_record_from_storage_payload(payload: Any) -> EdgeRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed edge record")
+    return EdgeRecord(
+        path=payload_text(payload, "path", label="edge record"),
+        edge_kind=payload_text(payload, "edge_kind", label="edge record"),
+        edge_stable_key=payload_text(payload, "edge_stable_key", label="edge record"),
+        confidence=payload_text(payload, "confidence", label="edge record"),
+        src_node_kind=payload_text(payload, "src_node_kind", label="edge record"),
+        src_node_name=payload_text(payload, "src_node_name", label="edge record"),
+        src_node_stable_key=payload_text(
+            payload, "src_node_stable_key", label="edge record"
+        ),
+        dst_node_kind=payload_text(payload, "dst_node_kind", label="edge record"),
+        dst_node_name=payload_text(payload, "dst_node_name", label="edge record"),
+        dst_node_stable_key=payload_text(
+            payload, "dst_node_stable_key", label="edge record"
+        ),
+        evidence_stable_key=payload_text(
+            payload, "evidence_stable_key", label="edge record"
+        ),
+        extractor=payload_text(payload, "extractor", label="edge record"),
+    )
+
+
 def file_node_records_to_jsonable(
     records: Sequence[FileNodeRecord],
 ) -> list[dict[str, Any]]:
+    return [record.to_dict() for record in records]
+
+
+def edge_records_to_jsonable(records: Sequence[EdgeRecord]) -> list[dict[str, Any]]:
     return [record.to_dict() for record in records]
 
 
@@ -679,6 +769,31 @@ def format_file_node_table(records: Sequence[FileNodeRecord]) -> str:
         "node_stable_key",
         "evidence_stable_key",
         "extractor",
+    )
+    rendered_rows = [
+        {key: render_table_value(row[key]) for key in columns}
+        for row in rows
+    ]
+    widths = {
+        key: max([len(key), *(len(row[key]) for row in rendered_rows)])
+        for key in columns
+    }
+    lines = [format_table_row(dict(zip(columns, columns, strict=True)), columns, widths)]
+    for row in rendered_rows:
+        lines.append(format_table_row(row, columns, widths))
+    return "\n".join(lines)
+
+
+def format_edge_table(records: Sequence[EdgeRecord]) -> str:
+    rows = [record.to_dict() for record in records]
+    columns = (
+        "path",
+        "edge_kind",
+        "edge_stable_key",
+        "confidence",
+        "src_node_stable_key",
+        "dst_node_stable_key",
+        "evidence_stable_key",
     )
     rendered_rows = [
         {key: render_table_value(row[key]) for key in columns}

@@ -11,7 +11,12 @@ from repomap_kg import __version__
 from repomap_kg.cli import build_parser, main
 from repomap_kg.files import FileRecord
 from repomap_kg.observations import RawObservation, write_observations_jsonl
-from repomap_kg.storage import FileNodeRecord, LoadSummary, StorageSchemaError
+from repomap_kg.storage import (
+    EdgeRecord,
+    FileNodeRecord,
+    LoadSummary,
+    StorageSchemaError,
+)
 
 
 class CliUnitTests(unittest.TestCase):
@@ -81,6 +86,7 @@ class CliUnitTests(unittest.TestCase):
             ("files", ["--root-path", "/tmp/fixture"]),
             ("entrypoints", ["--root-path", "/tmp/fixture"]),
             ("file-nodes", ["--root-path", "/tmp/fixture"]),
+            ("edges", ["--root-path", "/tmp/fixture"]),
         )
 
         for subcommand, required_args in cases:
@@ -561,6 +567,66 @@ class CliUnitTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertIn("psql did not return file node records", stderr.getvalue())
+
+    def test_storage_edges_prints_json_records(self):
+        records = (
+            EdgeRecord(
+                path="bin/tool",
+                edge_kind="shell.command",
+                edge_stable_key="edge:node:bin/tool:shell.command:x",
+                confidence="heuristic",
+                src_node_kind="shell.command",
+                src_node_name="nix build",
+                src_node_stable_key="node:bin/tool:shell.command:x",
+                dst_node_kind="tool",
+                dst_node_name="nix",
+                dst_node_stable_key="tool:nix",
+                evidence_stable_key="evidence:bin/tool:2-2:fixture-shell:x",
+                extractor="fixture-shell",
+            ),
+        )
+        stdout = io.StringIO()
+
+        with patch("repomap_kg.cli.query_edge_records", return_value=records) as query:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "edges",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--pg-database",
+                        "postgres",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload[0]["edge_kind"], "shell.command")
+        self.assertEqual(payload[0]["dst_node_stable_key"], "tool:nix")
+        self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
+        self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+
+    def test_storage_edges_reports_query_errors(self):
+        stderr = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_edge_records",
+            side_effect=StorageSchemaError("psql did not return edge records"),
+        ):
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "storage",
+                        "edges",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("psql did not return edge records", stderr.getvalue())
 
     def test_discover_prints_text_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:

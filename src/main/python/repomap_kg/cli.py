@@ -27,9 +27,12 @@ from repomap_kg.profiles import ProfileValidationError, load_profile
 from repomap_kg.project_identity import PROJECT_IDENTITY
 from repomap_kg.storage import (
     StorageSchemaError,
+    edge_records_to_jsonable,
     file_node_records_to_jsonable,
+    format_edge_table,
     format_file_node_table,
     load_file_observations,
+    query_edge_records,
     query_file_node_records,
     query_file_records,
 )
@@ -183,6 +186,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit stored file node records as JSON",
+    )
+    storage_edges = storage_subcommands.add_parser(
+        "edges",
+        help="list stored relationship edges from Postgres storage",
+    )
+    add_storage_root_argument(storage_edges)
+    add_storage_connection_arguments(storage_edges)
+    storage_edges.add_argument(
+        "--json",
+        action="store_true",
+        help="emit stored edge records as JSON",
     )
 
     return parser
@@ -366,6 +380,22 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(file_node_records_to_jsonable(records), sort_keys=True))
         else:
             print(format_file_node_table(records))
+        return 0
+
+    if args.command == "storage" and args.storage_command == "edges":
+        try:
+            records = query_edge_records(
+                psql_args_from_args(args),
+                root_path=args.root_path,
+                psql_command=args.psql_command,
+            )
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(edge_records_to_jsonable(records), sort_keys=True))
+        else:
+            print(format_edge_table(records))
         return 0
 
     parser.print_help()

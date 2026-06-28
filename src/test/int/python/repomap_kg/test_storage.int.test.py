@@ -665,6 +665,96 @@ WHERE edges.kind = 'shell.command';
         self.assertIn("node_stable_key", text_stdout)
         self.assertIn("evidence:bin/tool:0-0:fixture-discovery:bin/tool", text_stdout)
 
+    def test_storage_edges_cli_reads_loaded_relationship_rows(self):
+        require_postgres_binaries()
+        observations = [
+            RawObservation(
+                kind="file",
+                source_id="bin/tool",
+                path="bin/tool",
+                confidence="manual",
+                extractor="fixture-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "shell",
+                    "role": "entrypoint",
+                    "content_hash": "c" * 64,
+                    "generated": False,
+                    "executable": True,
+                },
+            ),
+            RawObservation(
+                kind="shell.command",
+                source_id="bin/tool#call:nix-build",
+                path="bin/tool",
+                start_line=2,
+                end_line=2,
+                name="nix build",
+                target="tool:nix",
+                confidence="heuristic",
+                extractor="fixture-shell",
+                extractor_version="0.1.0",
+                metadata={"argv": ["nix", "build"]},
+            ),
+        ]
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            load_file_observations(
+                postgres.psql_args,
+                observations,
+                repository_name="fixture",
+                root_path="/tmp/fixture",
+                psql_command=postgres.psql_command,
+            )
+            exit_code, stdout, stderr = run_repo_map_in_process(
+                "storage",
+                "edges",
+                "--root-path",
+                "/tmp/fixture",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+                "--json",
+            )
+            text_exit_code, text_stdout, text_stderr = run_repo_map_in_process(
+                "storage",
+                "edges",
+                "--root-path",
+                "/tmp/fixture",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+            )
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["path"], "bin/tool")
+        self.assertEqual(payload[0]["edge_kind"], "shell.command")
+        self.assertEqual(payload[0]["dst_node_stable_key"], "tool:nix")
+        self.assertEqual(text_exit_code, 0, text_stderr)
+        self.assertIn("edge_stable_key", text_stdout)
+        self.assertIn("tool:nix", text_stdout)
+
 
 class PostgresCluster:
     def __init__(self, root: Path):
