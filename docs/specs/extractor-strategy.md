@@ -28,6 +28,9 @@ It emits raw JSONL observations. Each observation should include:
 - extractor name and version;
 - metadata for language-specific details.
 
+The initial versioned JSONL schema is documented in
+[Raw Observation Schema](raw-observation-schema.md).
+
 ## Shell Extractor
 
 Shell support is first-class because many infrastructure repositories route

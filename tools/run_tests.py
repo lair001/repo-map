@@ -141,7 +141,11 @@ class FileCoverage:
 def coverage_for_file(
     path: Path, counts: dict[tuple[str, int], int]
 ) -> FileCoverage:
-    executable = {line for line in trace._find_executable_linenos(str(path)) if line > 0}
+    executable = {
+        line
+        for line in trace._find_executable_linenos(str(path))
+        if isinstance(line, int) and line > 0
+    }
     covered = {
         line
         for (filename, line), count in counts.items()

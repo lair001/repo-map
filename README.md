@@ -33,7 +33,8 @@ files, and command-line tools.
 ## Current Status
 
 RepoMap has an initial Python package skeleton with a minimal CLI identity
-surface. The initial specs live under `docs/specs/`.
+surface, raw observation JSONL validation, and a first normalization boundary.
+The initial specs live under `docs/specs/`.
 
 ## Development
 
@@ -42,6 +43,7 @@ Run the CLI from the source tree:
 ```sh
 PYTHONPATH=src/main/python python3 -m repomap_kg --version
 PYTHONPATH=src/main/python python3 -m repomap_kg identity --json
+PYTHONPATH=src/main/python python3 -m repomap_kg observations normalize raw-observations.jsonl --json
 ```
 
 Run the host-safe test suites with coverage gates:
@@ -62,6 +64,7 @@ gate and print per-file advisory rows.
 - [Architecture](docs/specs/architecture.md)
 - [Storage Model](docs/specs/storage-model.md)
 - [Extractor Strategy](docs/specs/extractor-strategy.md)
+- [Raw Observation Schema](docs/specs/raw-observation-schema.md)
 - [Roadmap](docs/specs/roadmap.md)
 
 ## License

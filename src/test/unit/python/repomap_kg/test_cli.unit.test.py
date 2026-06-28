@@ -1,12 +1,15 @@
 import io
 import json
 import runpy
+import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest.mock import patch
 
 from repomap_kg import __version__
 from repomap_kg.cli import build_parser, main
+from repomap_kg.observations import RawObservation, write_observations_jsonl
 
 
 class CliUnitTests(unittest.TestCase):
@@ -66,6 +69,49 @@ class CliUnitTests(unittest.TestCase):
                 runpy.run_module("repomap_kg", run_name="__main__")
 
         self.assertEqual(caught.exception.code, 7)
+
+    def test_observations_normalize_prints_normalized_json(self):
+        observation = RawObservation(
+            kind="shell.command",
+            source_id="scripts/build.sh#call:nix-build",
+            path="scripts/build.sh",
+            start_line=21,
+            end_line=21,
+            name="nix-build",
+            target="tool:nix",
+            confidence="heuristic",
+            extractor="shell-static",
+            extractor_version="0.1.0",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl_path = Path(tmpdir) / "raw-observations.jsonl"
+            write_observations_jsonl([observation], jsonl_path)
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    ["observations", "normalize", str(jsonl_path), "--json"]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["summary"]["raw_observations"], 1)
+        self.assertEqual(payload["edges"][0]["dst_node_key"], "tool:nix")
+
+    def test_observations_normalize_reports_validation_errors(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl_path = Path(tmpdir) / "bad-observations.jsonl"
+            jsonl_path.write_text("{bad json}\n")
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    ["observations", "normalize", str(jsonl_path), "--json"]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("invalid JSON", stderr.getvalue())
 
 
 if __name__ == "__main__":
