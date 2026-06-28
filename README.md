@@ -45,6 +45,7 @@ PYTHONPATH=src/main/python python3 -m repomap_kg --version
 PYTHONPATH=src/main/python python3 -m repomap_kg identity --json
 PYTHONPATH=src/main/python python3 -m repomap_kg discover . --jsonl
 PYTHONPATH=src/main/python python3 -m repomap_kg discover . --profile repomap-profile.toml --jsonl
+PYTHONPATH=src/main/python python3 -m repomap_kg files raw-observations.jsonl --role source
 PYTHONPATH=src/main/python python3 -m repomap_kg observations normalize raw-observations.jsonl --json
 ```
 

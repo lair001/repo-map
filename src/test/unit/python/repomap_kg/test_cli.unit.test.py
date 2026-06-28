@@ -113,6 +113,48 @@ class CliUnitTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("invalid JSON", stderr.getvalue())
 
+    def test_files_prints_json_view(self):
+        observation = RawObservation(
+            kind="file",
+            source_id="README.md",
+            path="README.md",
+            confidence="manual",
+            extractor="fixture-discovery",
+            extractor_version="0.1.0",
+            metadata={
+                "language": "markdown",
+                "role": "documentation",
+                "content_hash": "0" * 64,
+                "generated": False,
+                "executable": False,
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl_path = Path(tmpdir) / "raw-observations.jsonl"
+            write_observations_jsonl([observation], jsonl_path)
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(["files", str(jsonl_path), "--json"])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload[0]["path"], "README.md")
+        self.assertEqual(payload[0]["confidence"], "manual")
+
+    def test_files_reports_validation_errors(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl_path = Path(tmpdir) / "bad-observations.jsonl"
+            jsonl_path.write_text("{bad json}\n")
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = main(["files", str(jsonl_path), "--json"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("invalid JSON", stderr.getvalue())
+
     def test_discover_prints_text_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

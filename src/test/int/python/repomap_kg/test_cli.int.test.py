@@ -17,7 +17,7 @@ SOURCE_ROOT = REPO_ROOT / "src" / "main" / "python"
 
 
 class CliIntegrationTests(unittest.TestCase):
-    def run_cli(self, *args):
+    def run_cli(self, *args, input_text=None):
         env = os.environ.copy()
         env["PYTHONPATH"] = str(SOURCE_ROOT)
         return subprocess.run(
@@ -25,6 +25,7 @@ class CliIntegrationTests(unittest.TestCase):
             check=False,
             cwd=REPO_ROOT,
             env=env,
+            input=input_text,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -290,6 +291,60 @@ generated_dirs = ["out"]
         self.assertTrue(by_path["out/manifest.json"]["metadata"]["generated"])
         self.assertEqual(by_path["README.md"]["metadata"]["role"], "config")
         self.assertEqual(by_path["README.md"]["confidence"], "manual")
+
+    def test_files_command_prints_filtered_table_from_discovery_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "fixture-repo"
+            raw_jsonl = Path(tmpdir) / "raw-observations.jsonl"
+            self.write_fixture(fixture / "README.md", "# Fixture\n")
+            self.write_fixture(
+                fixture / "src" / "main" / "python" / "app.py",
+                "print('ok')\n",
+            )
+            self.write_fixture(fixture / "generated" / "report.json", "{}\n")
+
+            discover_exit, discover_stdout, discover_stderr = self.run_module_entrypoint(
+                "discover", str(fixture), "--jsonl"
+            )
+            raw_jsonl.write_text(discover_stdout)
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "files", str(raw_jsonl), "--role", "source", "--language", "python"
+            )
+
+        self.assertEqual(discover_exit, 0, discover_stderr)
+        self.assertEqual(exit_code, 0)
+        self.assertIn("path", stdout)
+        self.assertIn("src/main/python/app.py", stdout)
+        self.assertNotIn("README.md", stdout)
+        self.assertNotIn("generated/report.json", stdout)
+        self.assertEqual(stderr, "")
+
+    def test_files_command_accepts_stdin_jsonl_as_json(self):
+        observation = RawObservation(
+            kind="file",
+            source_id="README.md",
+            path="README.md",
+            confidence="manual",
+            extractor="fixture-discovery",
+            extractor_version="0.1.0",
+            metadata={
+                "language": "markdown",
+                "role": "documentation",
+                "content_hash": "0" * 64,
+                "generated": False,
+                "executable": False,
+            },
+        )
+
+        result = self.run_cli(
+            "files", "-", "--json", input_text=observation.to_json_line()
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload[0]["path"], "README.md")
+        self.assertEqual(payload[0]["confidence"], "manual")
+        self.assertEqual(result.stderr, "")
 
     def run_module_entrypoint(self, *args):
         original_argv = sys.argv[:]

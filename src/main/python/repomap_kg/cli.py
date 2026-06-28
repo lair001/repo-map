@@ -8,6 +8,13 @@ import sys
 
 from repomap_kg import __version__
 from repomap_kg.discovery import discover_observations
+from repomap_kg.files import (
+    FileFilters,
+    file_records_from_observations,
+    filter_file_records,
+    format_file_table,
+    records_to_jsonable,
+)
 from repomap_kg.normalization import normalize_observations
 from repomap_kg.observations import ObservationValidationError, read_observations_jsonl
 from repomap_kg.profiles import ProfileValidationError, load_profile
@@ -39,6 +46,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--jsonl",
         action="store_true",
         help="emit raw file observations as JSONL",
+    )
+
+    files = subparsers.add_parser(
+        "files",
+        help="list discovered files from raw observation JSONL",
+    )
+    files.add_argument("jsonl_path", help="raw observation JSONL path, or - for stdin")
+    files.add_argument("--role", help="include only files with this role")
+    files.add_argument("--language", help="include only files with this language")
+    files.add_argument(
+        "--generated",
+        choices=("include", "exclude", "only"),
+        default="include",
+        help="control generated-file rows",
+    )
+    files.add_argument(
+        "--json",
+        action="store_true",
+        help="emit file records as JSON",
     )
 
     identity = subparsers.add_parser(
@@ -99,6 +125,29 @@ def main(argv: list[str] | None = None) -> int:
                 print(observation.to_json_line(), end="")
         else:
             print(f"discovered {len(observations)} files")
+        return 0
+
+    if args.command == "files":
+        try:
+            if args.jsonl_path == "-":
+                observations = read_observations_jsonl(sys.stdin)
+            else:
+                observations = read_observations_jsonl(args.jsonl_path)
+        except ObservationValidationError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        filters = FileFilters(
+            role=args.role,
+            language=args.language,
+            generated=args.generated,
+        )
+        records = filter_file_records(
+            file_records_from_observations(observations), filters
+        )
+        if args.json:
+            print(json.dumps(records_to_jsonable(records), sort_keys=True))
+        else:
+            print(format_file_table(records))
         return 0
 
     if args.command == "observations" and args.observation_command == "normalize":
