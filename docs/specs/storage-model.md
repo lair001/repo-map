@@ -174,6 +174,9 @@ as the raw-JSONL `entrypoints` command.
 Stored normalized file graph rows can be read back with
 `repomap-kg storage file-nodes`, optionally filtered by file path, returning
 file node keys and their evidence records as table or JSON output.
+Stored graph nodes can be read back with `repomap-kg storage nodes`, optionally
+filtered by node kind, file path, or node stable key, returning node path, kind,
+name, stable key, and line range as table or JSON output.
 Stored relationship edges can be read back with `repomap-kg storage edges`,
 optionally filtered by edge kind, source node stable key, or target node stable
 key, returning source node, target node, edge, evidence, kind, confidence, and

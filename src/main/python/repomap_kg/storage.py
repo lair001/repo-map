@@ -84,6 +84,19 @@ class FileNodeRecord:
 
 
 @dataclass(frozen=True)
+class NodeRecord:
+    path: str
+    node_kind: str
+    node_name: str
+    node_stable_key: str
+    start_line: int | None
+    end_line: int | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class EdgeRecord:
     path: str
     edge_kind: str
@@ -331,6 +344,30 @@ def query_file_node_records(
     return tuple(file_node_record_from_storage_payload(item) for item in payload)
 
 
+def query_node_records(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    kind: str | None = None,
+    path: str | None = None,
+    stable_key: str | None = None,
+    psql_command: str = "psql",
+) -> tuple[NodeRecord, ...]:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_node_query_sql(
+            root_path,
+            kind=kind,
+            path=path,
+            stable_key=stable_key,
+        ),
+    )
+    payload = parse_psql_json(result.stdout, "node records")
+    if not isinstance(payload, list):
+        raise StorageSchemaError("psql did not return node records as a JSON array")
+    return tuple(node_record_from_storage_payload(item) for item in payload)
+
+
 def query_edge_records(
     psql_args: Sequence[str],
     *,
@@ -481,6 +518,39 @@ def build_file_node_query_sql(root_path: str, *, path: str | None = None) -> str
         "AND nodes.kind = 'file' "
         "JOIN evidence ON evidence.file_id = files.id "
         "AND evidence.repository_id = files.repository_id "
+        f"WHERE {where_sql};"
+    )
+
+
+def build_node_query_sql(
+    root_path: str,
+    *,
+    kind: str | None = None,
+    path: str | None = None,
+    stable_key: str | None = None,
+) -> str:
+    filters = [f"repositories.root_path = {sql_literal(root_path)}"]
+    if kind is not None:
+        filters.append(f"nodes.kind = {sql_literal(kind)}")
+    if path is not None:
+        filters.append(f"files.path = {sql_literal(path)}")
+    if stable_key is not None:
+        filters.append(f"nodes.stable_key = {sql_literal(stable_key)}")
+    where_sql = " AND ".join(filters)
+    return (
+        "SELECT COALESCE(json_agg(json_build_object("
+        "'path', COALESCE(files.path, ''), "
+        "'node_kind', nodes.kind, "
+        "'node_name', nodes.name, "
+        "'node_stable_key', nodes.stable_key, "
+        "'start_line', nodes.start_line, "
+        "'end_line', nodes.end_line"
+        ") ORDER BY COALESCE(files.path, ''), nodes.kind, nodes.stable_key), "
+        "'[]'::json)::text "
+        "FROM nodes "
+        "JOIN repositories ON repositories.id = nodes.repository_id "
+        "LEFT JOIN files ON files.id = nodes.file_id "
+        "AND files.repository_id = nodes.repository_id "
         f"WHERE {where_sql};"
     )
 
@@ -847,6 +917,19 @@ def edge_record_from_storage_payload(payload: Any) -> EdgeRecord:
     )
 
 
+def node_record_from_storage_payload(payload: Any) -> NodeRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed node record")
+    return NodeRecord(
+        path=payload_string(payload, "path", label="node record"),
+        node_kind=payload_text(payload, "node_kind", label="node record"),
+        node_name=payload_text(payload, "node_name", label="node record"),
+        node_stable_key=payload_text(payload, "node_stable_key", label="node record"),
+        start_line=payload_optional_int(payload, "start_line", label="node record"),
+        end_line=payload_optional_int(payload, "end_line", label="node record"),
+    )
+
+
 def storage_summary_from_payload(payload: Any) -> StorageSummaryRecord:
     if not isinstance(payload, dict):
         raise StorageSchemaError("psql returned a malformed storage summary")
@@ -875,6 +958,10 @@ def file_node_records_to_jsonable(
     return [record.to_dict() for record in records]
 
 
+def node_records_to_jsonable(records: Sequence[NodeRecord]) -> list[dict[str, Any]]:
+    return [record.to_dict() for record in records]
+
+
 def edge_records_to_jsonable(records: Sequence[EdgeRecord]) -> list[dict[str, Any]]:
     return [record.to_dict() for record in records]
 
@@ -892,6 +979,30 @@ def format_file_node_table(records: Sequence[FileNodeRecord]) -> str:
         "node_stable_key",
         "evidence_stable_key",
         "extractor",
+    )
+    rendered_rows = [
+        {key: render_table_value(row[key]) for key in columns}
+        for row in rows
+    ]
+    widths = {
+        key: max([len(key), *(len(row[key]) for row in rendered_rows)])
+        for key in columns
+    }
+    lines = [format_table_row(dict(zip(columns, columns, strict=True)), columns, widths)]
+    for row in rendered_rows:
+        lines.append(format_table_row(row, columns, widths))
+    return "\n".join(lines)
+
+
+def format_node_table(records: Sequence[NodeRecord]) -> str:
+    rows = [record.to_dict() for record in records]
+    columns = (
+        "path",
+        "node_kind",
+        "node_name",
+        "node_stable_key",
+        "start_line",
+        "end_line",
     )
     rendered_rows = [
         {key: render_table_value(row[key]) for key in columns}
@@ -983,6 +1094,15 @@ def payload_text(
 ) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value:
+        raise StorageSchemaError(f"psql returned a malformed {label}: {key}")
+    return value
+
+
+def payload_string(
+    payload: dict[str, Any], key: str, *, label: str = "file record"
+) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str):
         raise StorageSchemaError(f"psql returned a malformed {label}: {key}")
     return value
 

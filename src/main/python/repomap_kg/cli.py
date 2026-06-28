@@ -31,11 +31,14 @@ from repomap_kg.storage import (
     file_node_records_to_jsonable,
     format_edge_table,
     format_file_node_table,
+    format_node_table,
     format_storage_summary_table,
     load_file_observations,
+    node_records_to_jsonable,
     query_edge_records,
     query_file_node_records,
     query_file_records,
+    query_node_records,
     query_storage_summary,
     storage_summary_to_jsonable,
 )
@@ -190,6 +193,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit stored file node records as JSON",
+    )
+    storage_nodes = storage_subcommands.add_parser(
+        "nodes",
+        help="list stored graph nodes from Postgres storage",
+    )
+    add_storage_root_argument(storage_nodes)
+    storage_nodes.add_argument("--kind", help="include only nodes with this kind")
+    storage_nodes.add_argument("--path", help="include only nodes from this file path")
+    storage_nodes.add_argument(
+        "--stable-key",
+        help="include only the node with this stable key",
+    )
+    add_storage_connection_arguments(storage_nodes)
+    storage_nodes.add_argument(
+        "--json",
+        action="store_true",
+        help="emit stored graph node records as JSON",
     )
     storage_edges = storage_subcommands.add_parser(
         "edges",
@@ -405,6 +425,25 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(file_node_records_to_jsonable(records), sort_keys=True))
         else:
             print(format_file_node_table(records))
+        return 0
+
+    if args.command == "storage" and args.storage_command == "nodes":
+        try:
+            records = query_node_records(
+                psql_args_from_args(args),
+                root_path=args.root_path,
+                kind=args.kind,
+                path=args.path,
+                stable_key=args.stable_key,
+                psql_command=args.psql_command,
+            )
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(node_records_to_jsonable(records), sort_keys=True))
+        else:
+            print(format_node_table(records))
         return 0
 
     if args.command == "storage" and args.storage_command == "edges":

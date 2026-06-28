@@ -9,8 +9,10 @@ from repomap_kg.observations import RawObservation
 from repomap_kg.storage import (
     EdgeRecord,
     FileNodeRecord,
+    NodeRecord,
     StorageSummaryRecord,
     StorageSchemaError,
+    build_node_query_sql,
     build_storage_summary_query_sql,
     build_edge_query_sql,
     apply_migrations,
@@ -21,11 +23,13 @@ from repomap_kg.storage import (
     discover_migrations,
     format_edge_table,
     format_file_node_table,
+    format_node_table,
     format_storage_summary_table,
     file_rows_from_observations,
     query_edge_records,
     query_file_node_records,
     query_file_records,
+    query_node_records,
     query_storage_summary,
     relationship_rows_from_observations,
     load_file_observations,
@@ -537,6 +541,72 @@ SELECT 1;
             with self.assertRaisesRegex(StorageSchemaError, "file node records"):
                 query_file_node_records(["-d", "postgres"], root_path="/tmp/fixture")
 
+    def test_query_node_records_returns_records(self):
+        completed = SimpleNamespace(
+            stdout=(
+                "["
+                '{"path":"bin/tool","node_kind":"shell.command",'
+                '"node_name":"nix build",'
+                '"node_stable_key":"node:bin/tool:shell.command:bin/tool#call:nix-build",'
+                '"start_line":2,"end_line":2},'
+                '{"path":"","node_kind":"tool","node_name":"nix",'
+                '"node_stable_key":"tool:nix",'
+                '"start_line":null,"end_line":null}'
+                "]\n"
+            )
+        )
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+            records = query_node_records(
+                ["-d", "postgres"],
+                root_path="/tmp/fixture",
+                psql_command="/bin/psql",
+            )
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0].path, "bin/tool")
+        self.assertEqual(records[0].node_kind, "shell.command")
+        self.assertEqual(records[0].start_line, 2)
+        self.assertEqual(records[1].path, "")
+        self.assertEqual(records[1].node_stable_key, "tool:nix")
+        self.assertIsNone(records[1].start_line)
+        self.assertIn("-qAt", run.call_args.args[0])
+        self.assertIn(
+            "repositories.root_path = '/tmp/fixture'",
+            run.call_args.kwargs["input"],
+        )
+
+    def test_query_node_records_can_filter_by_kind_path_and_stable_key(self):
+        completed = SimpleNamespace(stdout="[]\n")
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+            records = query_node_records(
+                ["-d", "postgres"],
+                root_path="/tmp/fixture",
+                kind="shell.command",
+                path="bin/tool",
+                stable_key="node:bin/tool:shell.command:x",
+                psql_command="/bin/psql",
+            )
+
+        self.assertEqual(records, ())
+        self.assertIn(
+            "AND nodes.kind = 'shell.command'",
+            run.call_args.kwargs["input"],
+        )
+        self.assertIn("AND files.path = 'bin/tool'", run.call_args.kwargs["input"])
+        self.assertIn(
+            "AND nodes.stable_key = 'node:bin/tool:shell.command:x'",
+            run.call_args.kwargs["input"],
+        )
+
+    def test_query_node_records_rejects_malformed_json(self):
+        completed = SimpleNamespace(stdout='{"path": "bin/tool"}\n')
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(StorageSchemaError, "node records"):
+                query_node_records(["-d", "postgres"], root_path="/tmp/fixture")
+
     def test_query_edge_records_returns_records(self):
         completed = SimpleNamespace(
             stdout=(
@@ -652,6 +722,30 @@ SELECT 1;
             with self.assertRaisesRegex(StorageSchemaError, "storage summary"):
                 query_storage_summary(["-d", "postgres"], root_path="/tmp/fixture")
 
+    def test_build_node_query_sql_quotes_root_path_and_orders_nodes(self):
+        sql = build_node_query_sql("/tmp/fixture's repo")
+
+        self.assertIn("fixture''s repo", sql)
+        self.assertIn("JOIN repositories ON repositories.id = nodes.repository_id", sql)
+        self.assertIn("LEFT JOIN files ON files.id = nodes.file_id", sql)
+        self.assertIn(
+            "ORDER BY COALESCE(files.path, ''), nodes.kind, nodes.stable_key",
+            sql,
+        )
+
+    def test_build_node_query_sql_can_filter_by_kind_path_and_stable_key(self):
+        sql = build_node_query_sql(
+            "/tmp/fixture",
+            kind="shell.command",
+            path="bin/tool",
+            stable_key="node:bin/tool:shell.command:x",
+        )
+
+        self.assertIn("repositories.root_path = '/tmp/fixture'", sql)
+        self.assertIn("AND nodes.kind = 'shell.command'", sql)
+        self.assertIn("AND files.path = 'bin/tool'", sql)
+        self.assertIn("AND nodes.stable_key = 'node:bin/tool:shell.command:x'", sql)
+
     def test_build_edge_query_sql_quotes_root_path_and_orders_edges(self):
         sql = build_edge_query_sql("/tmp/fixture's repo")
 
@@ -733,6 +827,26 @@ SELECT 1;
         self.assertIn("files", table)
         self.assertIn("edges", table)
         self.assertIn("/tmp/fixture", table)
+
+    def test_format_node_table_uses_node_columns(self):
+        table = format_node_table(
+            [
+                NodeRecord(
+                    path="bin/tool",
+                    node_kind="shell.command",
+                    node_name="nix build",
+                    node_stable_key="node:bin/tool:shell.command:x",
+                    start_line=2,
+                    end_line=2,
+                )
+            ]
+        )
+
+        self.assertIn("path", table)
+        self.assertIn("node_kind", table)
+        self.assertIn("node_stable_key", table)
+        self.assertIn("start_line", table)
+        self.assertIn("node:bin/tool:shell.command:x", table)
 
     def test_build_file_node_query_sql_quotes_root_path_and_orders_graph_records(self):
         sql = build_file_node_query_sql("/tmp/fixture's repo")

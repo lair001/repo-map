@@ -15,6 +15,7 @@ from repomap_kg.storage import (
     EdgeRecord,
     FileNodeRecord,
     LoadSummary,
+    NodeRecord,
     StorageSchemaError,
     StorageSummaryRecord,
 )
@@ -87,6 +88,7 @@ class CliUnitTests(unittest.TestCase):
             ("files", ["--root-path", "/tmp/fixture"]),
             ("entrypoints", ["--root-path", "/tmp/fixture"]),
             ("file-nodes", ["--root-path", "/tmp/fixture"]),
+            ("nodes", ["--root-path", "/tmp/fixture"]),
             ("edges", ["--root-path", "/tmp/fixture"]),
             ("summary", ["--root-path", "/tmp/fixture"]),
         )
@@ -572,6 +574,73 @@ class CliUnitTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertIn("psql did not return file node records", stderr.getvalue())
+
+    def test_storage_nodes_prints_json_records(self):
+        records = (
+            NodeRecord(
+                path="bin/tool",
+                node_kind="shell.command",
+                node_name="nix build",
+                node_stable_key="node:bin/tool:shell.command:x",
+                start_line=2,
+                end_line=2,
+            ),
+        )
+        stdout = io.StringIO()
+
+        with patch("repomap_kg.cli.query_node_records", return_value=records) as query:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "nodes",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--kind",
+                        "shell.command",
+                        "--path",
+                        "bin/tool",
+                        "--stable-key",
+                        "node:bin/tool:shell.command:x",
+                        "--pg-database",
+                        "postgres",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload[0]["node_kind"], "shell.command")
+        self.assertEqual(payload[0]["node_stable_key"], "node:bin/tool:shell.command:x")
+        self.assertEqual(payload[0]["start_line"], 2)
+        self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
+        self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+        self.assertEqual(query.call_args.kwargs["kind"], "shell.command")
+        self.assertEqual(query.call_args.kwargs["path"], "bin/tool")
+        self.assertEqual(
+            query.call_args.kwargs["stable_key"],
+            "node:bin/tool:shell.command:x",
+        )
+
+    def test_storage_nodes_reports_query_errors(self):
+        stderr = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_node_records",
+            side_effect=StorageSchemaError("psql did not return node records"),
+        ):
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "storage",
+                        "nodes",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("psql did not return node records", stderr.getvalue())
 
     def test_storage_edges_prints_json_records(self):
         records = (
