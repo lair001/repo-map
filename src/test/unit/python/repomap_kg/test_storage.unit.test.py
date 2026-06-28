@@ -19,6 +19,7 @@ from repomap_kg.storage import (
     file_rows_from_observations,
     query_file_node_records,
     query_file_records,
+    relationship_rows_from_observations,
     load_file_observations,
 )
 
@@ -223,6 +224,39 @@ SELECT 1;
         self.assertEqual(rows[0].metadata_json["confidence"], "manual")
         self.assertEqual(rows[0].metadata_json["raw_source_id"], "src/app.py")
 
+    def test_relationship_rows_from_observations_preserves_edge_metadata(self):
+        observation = RawObservation(
+            kind="shell.command",
+            source_id="bin/tool#call:nix-build",
+            path="bin/tool",
+            start_line=2,
+            end_line=2,
+            name="nix build",
+            target="tool:nix",
+            confidence="heuristic",
+            extractor="fixture-shell",
+            extractor_version="0.1.0",
+            metadata={"argv": ["nix", "build"]},
+        )
+
+        rows = relationship_rows_from_observations([observation])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            rows[0].src_node_stable_key,
+            "node:bin/tool:shell.command:bin/tool#call:nix-build",
+        )
+        self.assertEqual(rows[0].dst_node_stable_key, "tool:nix")
+        self.assertEqual(
+            rows[0].edge_stable_key,
+            "edge:node:bin/tool:shell.command:bin/tool#call:nix-build:"
+            "shell.command:tool:nix",
+        )
+        self.assertEqual(
+            rows[0].evidence_stable_key,
+            "evidence:bin/tool:2-2:fixture-shell:bin/tool#call:nix-build",
+        )
+
     def test_build_file_ingest_sql_quotes_values_and_sets_run(self):
         rows = file_rows_from_observations(
             [
@@ -262,6 +296,55 @@ SELECT 1;
             "evidence:docs/it''s.md:0-0:fixture-discovery:docs/it''s.md",
             sql,
         )
+
+    def test_load_file_observations_builds_relationship_edge_sql(self):
+        observations = [
+            RawObservation(
+                kind="file",
+                source_id="bin/tool",
+                path="bin/tool",
+                confidence="manual",
+                extractor="fixture-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "shell",
+                    "role": "entrypoint",
+                    "content_hash": "a" * 64,
+                    "generated": False,
+                    "executable": True,
+                },
+            ),
+            RawObservation(
+                kind="shell.command",
+                source_id="bin/tool#call:nix-build",
+                path="bin/tool",
+                start_line=2,
+                end_line=2,
+                name="nix build",
+                target="tool:nix",
+                confidence="heuristic",
+                extractor="fixture-shell",
+                extractor_version="0.1.0",
+                metadata={"argv": ["nix", "build"]},
+            ),
+        ]
+        completed = SimpleNamespace(
+            stdout='{"repository_id": 7, "run_id": 11, "files": 1}\n'
+        )
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+            load_file_observations(
+                ["-d", "postgres"],
+                observations,
+                repository_name="fixture",
+                root_path="/tmp/fixture",
+                psql_command="/bin/psql",
+            )
+
+        sql = run.call_args.kwargs["input"]
+        self.assertIn("INSERT INTO edges(", sql)
+        self.assertIn("edge:node:bin/tool:shell.command:bin/tool#call:nix-build", sql)
+        self.assertIn("tool:nix", sql)
 
     def test_load_file_observations_returns_psql_summary(self):
         observation = RawObservation(

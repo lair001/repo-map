@@ -89,6 +89,7 @@ INSERT INTO edges(
   src_node_id,
   dst_node_id,
   kind,
+  stable_key,
   confidence,
   evidence_id
 )
@@ -97,6 +98,7 @@ VALUES (
   :node_id,
   :node_id,
   'self',
+  'edge:file:bin/tool:self:file:bin/tool',
   'manual',
   :evidence_id
 );
@@ -183,7 +185,9 @@ SELECT nodes.kind
 FROM files
 JOIN nodes ON nodes.file_id = files.id
 JOIN evidence ON evidence.file_id = files.id
-WHERE files.path = 'bin/tool';
+WHERE files.path = 'bin/tool'
+  AND nodes.kind = 'file'
+  AND evidence.stable_key = 'evidence:bin/tool:0-0:fixture-discovery:bin/tool';
 """
             )
 
@@ -193,6 +197,82 @@ WHERE files.path = 'bin/tool';
             graph_row,
             "file|node:bin/tool:file:bin/tool|"
             "fixture-discovery|evidence:bin/tool:0-0:fixture-discovery:bin/tool",
+        )
+
+    def test_load_file_observations_inserts_relationship_edges(self):
+        require_postgres_binaries()
+        observations = [
+            RawObservation(
+                kind="file",
+                source_id="bin/tool",
+                path="bin/tool",
+                confidence="manual",
+                extractor="fixture-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "shell",
+                    "role": "entrypoint",
+                    "content_hash": "f" * 64,
+                    "generated": False,
+                    "executable": True,
+                },
+            ),
+            RawObservation(
+                kind="shell.command",
+                source_id="bin/tool#call:nix-build",
+                path="bin/tool",
+                start_line=2,
+                end_line=2,
+                name="nix build",
+                target="tool:nix",
+                confidence="heuristic",
+                extractor="fixture-shell",
+                extractor_version="0.1.0",
+                metadata={"argv": ["nix", "build"]},
+            ),
+        ]
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            load_file_observations(
+                postgres.psql_args,
+                observations,
+                repository_name="fixture",
+                root_path="/tmp/fixture",
+                psql_command=postgres.psql_command,
+            )
+            edge_row = postgres.psql_scalar(
+                """
+SELECT src.kind
+       || '|'
+       || src.stable_key
+       || '|'
+       || dst.kind
+       || '|'
+       || dst.stable_key
+       || '|'
+       || edges.kind
+       || '|'
+       || edges.confidence
+       || '|'
+       || evidence.stable_key
+FROM edges
+JOIN nodes src ON src.id = edges.src_node_id
+JOIN nodes dst ON dst.id = edges.dst_node_id
+JOIN evidence ON evidence.id = edges.evidence_id
+WHERE edges.kind = 'shell.command';
+"""
+            )
+
+        self.assertEqual(
+            edge_row,
+            "shell.command|node:bin/tool:shell.command:bin/tool#call:nix-build|"
+            "tool|tool:nix|shell.command|heuristic|"
+            "evidence:bin/tool:2-2:fixture-shell:bin/tool#call:nix-build",
         )
 
     def test_storage_load_files_cli_loads_discovery_jsonl(self):
