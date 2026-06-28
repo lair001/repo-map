@@ -27,7 +27,10 @@ from repomap_kg.profiles import ProfileValidationError, load_profile
 from repomap_kg.project_identity import PROJECT_IDENTITY
 from repomap_kg.storage import (
     StorageSchemaError,
+    file_node_records_to_jsonable,
+    format_file_node_table,
     load_file_observations,
+    query_file_node_records,
     query_file_records,
 )
 
@@ -169,6 +172,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit stored entrypoint records as JSON",
+    )
+    storage_file_nodes = storage_subcommands.add_parser(
+        "file-nodes",
+        help="list stored file nodes and evidence from Postgres storage",
+    )
+    add_storage_root_argument(storage_file_nodes)
+    add_storage_connection_arguments(storage_file_nodes)
+    storage_file_nodes.add_argument(
+        "--json",
+        action="store_true",
+        help="emit stored file node records as JSON",
     )
 
     return parser
@@ -336,6 +350,22 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(entrypoints_to_jsonable(records), sort_keys=True))
         else:
             print(format_entrypoint_table(records))
+        return 0
+
+    if args.command == "storage" and args.storage_command == "file-nodes":
+        try:
+            records = query_file_node_records(
+                psql_args_from_args(args),
+                root_path=args.root_path,
+                psql_command=args.psql_command,
+            )
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(file_node_records_to_jsonable(records), sort_keys=True))
+        else:
+            print(format_file_node_table(records))
         return 0
 
     parser.print_help()

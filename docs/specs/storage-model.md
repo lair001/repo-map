@@ -167,6 +167,9 @@ the raw-JSONL `files` command.
 Stored entrypoint file rows can be read back with
 `repomap-kg storage entrypoints`, reusing the same table and JSON presentation
 as the raw-JSONL `entrypoints` command.
+Stored normalized file graph rows can be read back with
+`repomap-kg storage file-nodes`, returning file node keys and their evidence
+records as table or JSON output.
 
 ## Local Development
 

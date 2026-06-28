@@ -35,7 +35,8 @@ files, and command-line tools.
 RepoMap has an initial Python package skeleton with a minimal CLI identity
 surface, raw observation JSONL validation, first file and entrypoint queries,
 and initial Postgres schema-backed file ingestion with file nodes and evidence
-rows. The initial specs live under `docs/specs/`.
+rows plus storage-backed file-node readback. The initial specs live under
+`docs/specs/`.
 
 ## Development
 
@@ -52,6 +53,7 @@ PYTHONPATH=src/main/python python3 -m repomap_kg observations normalize raw-obse
 PYTHONPATH=src/main/python python3 -m repomap_kg storage load-files raw-observations.jsonl --repository-name repo-map --root-path . --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage files --root-path . --role source --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage entrypoints --root-path . --json
+PYTHONPATH=src/main/python python3 -m repomap_kg storage file-nodes --root-path . --json
 ```
 
 Run the host-safe test suites with coverage gates:

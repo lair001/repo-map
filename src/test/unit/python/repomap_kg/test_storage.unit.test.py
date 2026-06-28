@@ -7,13 +7,17 @@ from unittest.mock import patch
 
 from repomap_kg.observations import RawObservation
 from repomap_kg.storage import (
+    FileNodeRecord,
     StorageSchemaError,
     apply_migrations,
     build_file_ingest_sql,
+    build_file_node_query_sql,
     build_file_query_sql,
     default_rdbms_root,
     discover_migrations,
+    format_file_node_table,
     file_rows_from_observations,
+    query_file_node_records,
     query_file_records,
     load_file_observations,
 )
@@ -389,6 +393,73 @@ SELECT 1;
         with patch("repomap_kg.storage.subprocess.run", return_value=completed):
             with self.assertRaisesRegex(StorageSchemaError, "file records as JSON"):
                 query_file_records(["-d", "postgres"], root_path="/tmp/fixture")
+
+    def test_query_file_node_records_returns_records(self):
+        completed = SimpleNamespace(
+            stdout=(
+                "["
+                '{"path":"bin/tool","node_kind":"file",'
+                '"node_name":"bin/tool","node_stable_key":"node:bin/tool:file:bin/tool",'
+                '"evidence_stable_key":"evidence:bin/tool:0-0:fixture:bin/tool",'
+                '"extractor":"fixture","extractor_version":"0.1.0",'
+                '"raw_source_id":"bin/tool"}'
+                "]\n"
+            )
+        )
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+            records = query_file_node_records(
+                ["-d", "postgres"],
+                root_path="/tmp/fixture",
+                psql_command="/bin/psql",
+            )
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].path, "bin/tool")
+        self.assertEqual(records[0].node_kind, "file")
+        self.assertEqual(records[0].node_stable_key, "node:bin/tool:file:bin/tool")
+        self.assertEqual(records[0].raw_source_id, "bin/tool")
+        self.assertIn("-qAt", run.call_args.args[0])
+        self.assertIn(
+            "repositories.root_path = '/tmp/fixture'",
+            run.call_args.kwargs["input"],
+        )
+
+    def test_query_file_node_records_rejects_malformed_json(self):
+        completed = SimpleNamespace(stdout='{"path": "bin/tool"}\n')
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(StorageSchemaError, "file node records"):
+                query_file_node_records(["-d", "postgres"], root_path="/tmp/fixture")
+
+    def test_build_file_node_query_sql_quotes_root_path_and_orders_graph_records(self):
+        sql = build_file_node_query_sql("/tmp/fixture's repo")
+
+        self.assertIn("fixture''s repo", sql)
+        self.assertIn("JOIN nodes ON nodes.file_id = files.id", sql)
+        self.assertIn("JOIN evidence ON evidence.file_id = files.id", sql)
+        self.assertIn("ORDER BY files.path, nodes.stable_key, evidence.stable_key", sql)
+
+    def test_format_file_node_table_uses_graph_columns(self):
+        table = format_file_node_table(
+            [
+                FileNodeRecord(
+                    path="bin/tool",
+                    node_kind="file",
+                    node_name="bin/tool",
+                    node_stable_key="node:bin/tool:file:bin/tool",
+                    evidence_stable_key="evidence:bin/tool:0-0:fixture:bin/tool",
+                    extractor="fixture",
+                    extractor_version="0.1.0",
+                    raw_source_id="bin/tool",
+                )
+            ]
+        )
+
+        self.assertIn("path", table)
+        self.assertIn("node_kind", table)
+        self.assertIn("evidence_stable_key", table)
+        self.assertIn("bin/tool", table)
 
     def test_build_file_query_sql_quotes_root_path(self):
         sql = build_file_query_sql("/tmp/fixture's repo")

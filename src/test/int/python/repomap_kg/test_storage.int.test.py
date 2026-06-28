@@ -487,6 +487,104 @@ WHERE files.path = 'bin/tool';
         self.assertEqual([record["path"] for record in payload], ["bin/tool"])
         self.assertTrue(payload[0]["executable"])
 
+    def test_storage_file_nodes_cli_reads_loaded_graph_rows(self):
+        require_postgres_binaries()
+        observations = [
+            RawObservation(
+                kind="file",
+                source_id="bin/tool",
+                path="bin/tool",
+                confidence="manual",
+                extractor="fixture-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "shell",
+                    "role": "entrypoint",
+                    "content_hash": "c" * 64,
+                    "generated": False,
+                    "executable": True,
+                },
+            ),
+            RawObservation(
+                kind="file",
+                source_id="README.md",
+                path="README.md",
+                confidence="extracted",
+                extractor="fixture-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "markdown",
+                    "role": "documentation",
+                    "content_hash": "d" * 64,
+                    "generated": False,
+                    "executable": False,
+                },
+            ),
+        ]
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            load_file_observations(
+                postgres.psql_args,
+                observations,
+                repository_name="fixture",
+                root_path="/tmp/fixture",
+                psql_command=postgres.psql_command,
+            )
+            exit_code, stdout, stderr = run_repo_map_in_process(
+                "storage",
+                "file-nodes",
+                "--root-path",
+                "/tmp/fixture",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+                "--json",
+            )
+            text_exit_code, text_stdout, text_stderr = run_repo_map_in_process(
+                "storage",
+                "file-nodes",
+                "--root-path",
+                "/tmp/fixture",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+            )
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(
+            [record["path"] for record in payload],
+            ["README.md", "bin/tool"],
+        )
+        self.assertEqual(payload[1]["node_kind"], "file")
+        self.assertEqual(payload[1]["node_stable_key"], "node:bin/tool:file:bin/tool")
+        self.assertEqual(
+            payload[1]["evidence_stable_key"],
+            "evidence:bin/tool:0-0:fixture-discovery:bin/tool",
+        )
+        self.assertEqual(text_exit_code, 0, text_stderr)
+        self.assertIn("node_stable_key", text_stdout)
+        self.assertIn("evidence:bin/tool:0-0:fixture-discovery:bin/tool", text_stdout)
+
 
 class PostgresCluster:
     def __init__(self, root: Path):
