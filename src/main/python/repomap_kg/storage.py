@@ -102,6 +102,22 @@ class EdgeRecord:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class StorageSummaryRecord:
+    root_path: str
+    repository_id: int | None
+    repository_name: str | None
+    latest_run_id: int | None
+    runs: int
+    files: int
+    nodes: int
+    edges: int
+    evidence: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 CHANGESET_PATTERN = re.compile(r"^--changeset\s+(\S+)")
 
 
@@ -338,6 +354,21 @@ def query_edge_records(
     return tuple(edge_record_from_storage_payload(item) for item in payload)
 
 
+def query_storage_summary(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    psql_command: str = "psql",
+) -> StorageSummaryRecord:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_storage_summary_query_sql(root_path),
+    )
+    return storage_summary_from_payload(
+        parse_psql_json(result.stdout, "storage summary")
+    )
+
+
 def build_file_ingest_sql(
     rows: Sequence[FileRow],
     *,
@@ -486,6 +517,45 @@ def build_edge_query_sql(
         "JOIN evidence ON evidence.id = edges.evidence_id "
         "LEFT JOIN files ON files.id = evidence.file_id "
         f"WHERE {where_sql};"
+    )
+
+
+def build_storage_summary_query_sql(root_path: str) -> str:
+    quoted_root = sql_literal(root_path)
+    return (
+        "WITH repo AS ("
+        "SELECT id, name, root_path FROM repositories "
+        f"WHERE repositories.root_path = {quoted_root}"
+        ") "
+        "SELECT json_build_object("
+        f"'root_path', {quoted_root}, "
+        "'repository_id', (SELECT id FROM repo), "
+        "'repository_name', (SELECT name FROM repo), "
+        "'latest_run_id', ("
+        "SELECT MAX(runs.id) FROM runs JOIN repo "
+        "ON repo.id = runs.repository_id"
+        "), "
+        "'runs', ("
+        "SELECT COUNT(*) FROM runs JOIN repo "
+        "ON repo.id = runs.repository_id"
+        "), "
+        "'files', ("
+        "SELECT COUNT(*) FROM files JOIN repo "
+        "ON repo.id = files.repository_id"
+        "), "
+        "'nodes', ("
+        "SELECT COUNT(*) FROM nodes JOIN repo "
+        "ON repo.id = nodes.repository_id"
+        "), "
+        "'edges', ("
+        "SELECT COUNT(*) FROM edges JOIN repo "
+        "ON repo.id = edges.repository_id"
+        "), "
+        "'evidence', ("
+        "SELECT COUNT(*) FROM evidence JOIN repo "
+        "ON repo.id = evidence.repository_id"
+        ")"
+        ")::text;"
     )
 
 
@@ -772,6 +842,28 @@ def edge_record_from_storage_payload(payload: Any) -> EdgeRecord:
     )
 
 
+def storage_summary_from_payload(payload: Any) -> StorageSummaryRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed storage summary")
+    return StorageSummaryRecord(
+        root_path=payload_text(payload, "root_path", label="storage summary"),
+        repository_id=payload_optional_int(
+            payload, "repository_id", label="storage summary"
+        ),
+        repository_name=payload_optional_text(
+            payload, "repository_name", label="storage summary"
+        ),
+        latest_run_id=payload_optional_int(
+            payload, "latest_run_id", label="storage summary"
+        ),
+        runs=payload_int(payload, "runs", label="storage summary"),
+        files=payload_int(payload, "files", label="storage summary"),
+        nodes=payload_int(payload, "nodes", label="storage summary"),
+        edges=payload_int(payload, "edges", label="storage summary"),
+        evidence=payload_int(payload, "evidence", label="storage summary"),
+    )
+
+
 def file_node_records_to_jsonable(
     records: Sequence[FileNodeRecord],
 ) -> list[dict[str, Any]]:
@@ -780,6 +872,10 @@ def file_node_records_to_jsonable(
 
 def edge_records_to_jsonable(records: Sequence[EdgeRecord]) -> list[dict[str, Any]]:
     return [record.to_dict() for record in records]
+
+
+def storage_summary_to_jsonable(record: StorageSummaryRecord) -> dict[str, Any]:
+    return record.to_dict()
 
 
 def format_file_node_table(records: Sequence[FileNodeRecord]) -> str:
@@ -831,6 +927,32 @@ def format_edge_table(records: Sequence[EdgeRecord]) -> str:
     return "\n".join(lines)
 
 
+def format_storage_summary_table(record: StorageSummaryRecord) -> str:
+    row = record.to_dict()
+    columns = (
+        "root_path",
+        "repository_id",
+        "repository_name",
+        "latest_run_id",
+        "runs",
+        "files",
+        "nodes",
+        "edges",
+        "evidence",
+    )
+    rendered_row = {key: render_table_value(row[key]) for key in columns}
+    widths = {
+        key: max(len(key), len(rendered_row[key]))
+        for key in columns
+    }
+    return "\n".join(
+        [
+            format_table_row(dict(zip(columns, columns, strict=True)), columns, widths),
+            format_table_row(rendered_row, columns, widths),
+        ]
+    )
+
+
 def load_summary_from_payload(payload: Any) -> LoadSummary:
     if not isinstance(payload, dict):
         raise StorageSchemaError("psql returned a malformed load summary")
@@ -864,6 +986,37 @@ def payload_bool(payload: dict[str, Any], key: str) -> bool:
     value = payload.get(key)
     if not isinstance(value, bool):
         raise StorageSchemaError(f"psql returned a malformed file record: {key}")
+    return value
+
+
+def payload_int(payload: dict[str, Any], key: str, *, label: str) -> int:
+    value = payload.get(key)
+    try:
+        return int(value)
+    except (TypeError, ValueError) as error:
+        raise StorageSchemaError(f"psql returned a malformed {label}: {key}") from error
+
+
+def payload_optional_int(
+    payload: dict[str, Any], key: str, *, label: str
+) -> int | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as error:
+        raise StorageSchemaError(f"psql returned a malformed {label}: {key}") from error
+
+
+def payload_optional_text(
+    payload: dict[str, Any], key: str, *, label: str
+) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise StorageSchemaError(f"psql returned a malformed {label}: {key}")
     return value
 
 

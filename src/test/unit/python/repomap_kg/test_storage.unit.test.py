@@ -9,7 +9,9 @@ from repomap_kg.observations import RawObservation
 from repomap_kg.storage import (
     EdgeRecord,
     FileNodeRecord,
+    StorageSummaryRecord,
     StorageSchemaError,
+    build_storage_summary_query_sql,
     build_edge_query_sql,
     apply_migrations,
     build_file_ingest_sql,
@@ -19,10 +21,12 @@ from repomap_kg.storage import (
     discover_migrations,
     format_edge_table,
     format_file_node_table,
+    format_storage_summary_table,
     file_rows_from_observations,
     query_edge_records,
     query_file_node_records,
     query_file_records,
+    query_storage_summary,
     relationship_rows_from_observations,
     load_file_observations,
 )
@@ -599,6 +603,41 @@ SELECT 1;
             with self.assertRaisesRegex(StorageSchemaError, "edge records"):
                 query_edge_records(["-d", "postgres"], root_path="/tmp/fixture")
 
+    def test_query_storage_summary_returns_counts(self):
+        completed = SimpleNamespace(
+            stdout=(
+                '{"root_path":"/tmp/fixture","repository_id":7,'
+                '"repository_name":"fixture","latest_run_id":11,'
+                '"runs":1,"files":2,"nodes":5,"edges":2,"evidence":3}\n'
+            )
+        )
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+            summary = query_storage_summary(
+                ["-d", "postgres"],
+                root_path="/tmp/fixture",
+                psql_command="/bin/psql",
+            )
+
+        self.assertEqual(summary.repository_id, 7)
+        self.assertEqual(summary.repository_name, "fixture")
+        self.assertEqual(summary.latest_run_id, 11)
+        self.assertEqual(summary.files, 2)
+        self.assertEqual(summary.nodes, 5)
+        self.assertEqual(summary.edges, 2)
+        self.assertIn("-qAt", run.call_args.args[0])
+        self.assertIn(
+            "repositories.root_path = '/tmp/fixture'",
+            run.call_args.kwargs["input"],
+        )
+
+    def test_query_storage_summary_rejects_malformed_json(self):
+        completed = SimpleNamespace(stdout='{"root_path": "/tmp/fixture"}\n')
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(StorageSchemaError, "storage summary"):
+                query_storage_summary(["-d", "postgres"], root_path="/tmp/fixture")
+
     def test_build_edge_query_sql_quotes_root_path_and_orders_edges(self):
         sql = build_edge_query_sql("/tmp/fixture's repo")
 
@@ -623,6 +662,16 @@ SELECT 1;
         self.assertIn("fixture''s repo", sql)
         self.assertIn("AND src.stable_key = 'node:bin/tool:shell.command:x'", sql)
         self.assertIn("AND dst.stable_key = 'tool:nix'", sql)
+
+    def test_build_storage_summary_query_sql_quotes_root_path_and_counts_tables(self):
+        sql = build_storage_summary_query_sql("/tmp/fixture's repo")
+
+        self.assertIn("fixture''s repo", sql)
+        self.assertIn("COUNT(*) FROM runs", sql)
+        self.assertIn("COUNT(*) FROM files", sql)
+        self.assertIn("COUNT(*) FROM nodes", sql)
+        self.assertIn("COUNT(*) FROM edges", sql)
+        self.assertIn("COUNT(*) FROM evidence", sql)
 
     def test_format_edge_table_uses_edge_columns(self):
         table = format_edge_table(
@@ -649,6 +698,27 @@ SELECT 1;
         self.assertIn("src_node_stable_key", table)
         self.assertIn("dst_node_stable_key", table)
         self.assertIn("tool:nix", table)
+
+    def test_format_storage_summary_table_uses_count_columns(self):
+        table = format_storage_summary_table(
+            StorageSummaryRecord(
+                root_path="/tmp/fixture",
+                repository_id=7,
+                repository_name="fixture",
+                latest_run_id=11,
+                runs=1,
+                files=2,
+                nodes=5,
+                edges=2,
+                evidence=3,
+            )
+        )
+
+        self.assertIn("root_path", table)
+        self.assertIn("latest_run_id", table)
+        self.assertIn("files", table)
+        self.assertIn("edges", table)
+        self.assertIn("/tmp/fixture", table)
 
     def test_build_file_node_query_sql_quotes_root_path_and_orders_graph_records(self):
         sql = build_file_node_query_sql("/tmp/fixture's repo")

@@ -178,6 +178,9 @@ Stored relationship edges can be read back with `repomap-kg storage edges`,
 optionally filtered by edge kind, source node stable key, or target node stable
 key, returning source node, target node, edge, evidence, kind, confidence, and
 stable key fields as table or JSON output.
+Repository storage counts can be read back with `repomap-kg storage summary`,
+returning repository identity, latest run id, and counts for runs, files, nodes,
+edges, and evidence as table or JSON output.
 
 ## Local Development
 

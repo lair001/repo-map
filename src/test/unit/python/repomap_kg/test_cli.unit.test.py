@@ -16,6 +16,7 @@ from repomap_kg.storage import (
     FileNodeRecord,
     LoadSummary,
     StorageSchemaError,
+    StorageSummaryRecord,
 )
 
 
@@ -87,6 +88,7 @@ class CliUnitTests(unittest.TestCase):
             ("entrypoints", ["--root-path", "/tmp/fixture"]),
             ("file-nodes", ["--root-path", "/tmp/fixture"]),
             ("edges", ["--root-path", "/tmp/fixture"]),
+            ("summary", ["--root-path", "/tmp/fixture"]),
         )
 
         for subcommand, required_args in cases:
@@ -639,6 +641,65 @@ class CliUnitTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertIn("psql did not return edge records", stderr.getvalue())
+
+    def test_storage_summary_prints_json_record(self):
+        summary = StorageSummaryRecord(
+            root_path="/tmp/fixture",
+            repository_id=7,
+            repository_name="fixture",
+            latest_run_id=11,
+            runs=1,
+            files=2,
+            nodes=5,
+            edges=2,
+            evidence=3,
+        )
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_storage_summary",
+            return_value=summary,
+        ) as query:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--pg-database",
+                        "postgres",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["root_path"], "/tmp/fixture")
+        self.assertEqual(payload["files"], 2)
+        self.assertEqual(payload["edges"], 2)
+        self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
+        self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+
+    def test_storage_summary_reports_query_errors(self):
+        stderr = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_storage_summary",
+            side_effect=StorageSchemaError("psql did not return storage summary"),
+        ):
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "storage",
+                        "summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("psql did not return storage summary", stderr.getvalue())
 
     def test_discover_prints_text_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
