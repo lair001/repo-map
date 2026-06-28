@@ -129,16 +129,27 @@ Migration resources should use this layout:
 ```text
 src/main/resources/rdbms/
   changelog.yaml
-  migrations/
-    <year>/
-      <month>/
-        <sequence>_<description>.sql
+  <year>/
+    <month>/
+      <day>-<counter>-<db id>-<primary action>.sql
 ```
 
 The root `changelog.yaml` should include the migration tree with `includeAll`.
 Migration SQL files should live under folders organized first by year and then
-by month. This keeps the history browsable while avoiding one large flat
-migration directory.
+by month, using Liquibase formatted SQL changesets. This keeps the history
+browsable while avoiding one large flat migration directory.
+
+The initial migration is:
+
+```text
+src/main/resources/rdbms/2026/06/28-001-core-create_graph_tables.sql
+```
+
+Until the Liquibase CLI is part of the local toolchain, RepoMap includes a
+small local schema loader in `repomap_kg.storage`. It discovers the
+Liquibase-formatted SQL files from `changelog.yaml` and applies them with
+`psql` in disposable Postgres integration tests. This is a test substitute for
+local verification, not a replacement for Liquibase as the migration format.
 
 ## Local Development
 

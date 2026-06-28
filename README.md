@@ -33,8 +33,9 @@ files, and command-line tools.
 ## Current Status
 
 RepoMap has an initial Python package skeleton with a minimal CLI identity
-surface, raw observation JSONL validation, and a first normalization boundary.
-The initial specs live under `docs/specs/`.
+surface, raw observation JSONL validation, first file and entrypoint queries,
+and initial Postgres storage schema scaffolding. The initial specs live under
+`docs/specs/`.
 
 ## Development
 
