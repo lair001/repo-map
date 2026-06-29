@@ -54,6 +54,12 @@ The shell extractor should identify:
 Shell edges should often be `heuristic` rather than `extracted`, especially when
 commands are dynamic.
 
+The initial shell extractor is intentionally conservative and dependency-free:
+it emits line-backed `shell.command` observations for simple command
+invocations, skips comments, shell control keywords, and assignment-only lines,
+and targets tools as `tool:<command>`. Parser-backed shell expansion remains a
+future slice.
+
 Candidate parser families include `mvdan/sh`, Tree-sitter Bash, and bashlex.
 The project should choose based on language coverage, structured AST quality,
 license compatibility, packaging, and testability.

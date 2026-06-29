@@ -2,7 +2,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from repomap_kg.discovery import classify_path, discover_repository
+from repomap_kg.discovery import (
+    classify_path,
+    discover_observations,
+    discover_repository,
+)
 
 
 class DiscoveryUnitTests(unittest.TestCase):
@@ -65,6 +69,28 @@ class DiscoveryUnitTests(unittest.TestCase):
         self.assertEqual(observation.metadata["language"], "python")
         self.assertEqual(observation.metadata["role"], "test")
         self.assertEqual(observation.metadata["content_hash"], file_info.content_hash)
+
+    def test_discover_observations_includes_shell_commands_for_shell_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            script = root / "bin" / "tool"
+            self.write(script, "#!/usr/bin/env bash\nnix build .#checks\n")
+            script.chmod(script.stat().st_mode | 0o111)
+
+            observations = discover_observations(root)
+
+        self.assertEqual(
+            [observation.kind for observation in observations],
+            [
+                "file",
+                "shell.command",
+            ],
+        )
+        command = observations[1]
+        self.assertEqual(command.path, "bin/tool")
+        self.assertEqual(command.name, "nix build")
+        self.assertEqual(command.target, "tool:nix")
+        self.assertEqual(command.start_line, 2)
 
     def test_unknown_language_and_role_fall_back_honestly(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -43,6 +43,14 @@ contains:
 - `executable`: whether the file has an executable bit.
 - `generated`: whether the path lives under a generated-output directory.
 
+The `repo-shell` extractor emits conservative `shell.command` observations for
+simple shell command invocations discovered from shell-family files. Their
+metadata contains:
+
+- `argv`: parsed command arguments after any leading environment assignments.
+- `command`: the command token before display-name normalization.
+- `raw`: the source line text for the command.
+
 ## Normalization Boundary
 
 The first normalizer maps raw observations into graph-shaped records without a

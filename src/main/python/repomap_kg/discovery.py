@@ -11,6 +11,7 @@ from typing import Any
 from repomap_kg import __version__
 from repomap_kg.observations import RawObservation
 from repomap_kg.profiles import ProjectProfile
+from repomap_kg.shell import extract_shell_command_observations
 
 
 IGNORED_DIR_NAMES = frozenset(
@@ -106,10 +107,25 @@ def discover_repository(
 def discover_observations(
     root: Path | str, *, profile: ProjectProfile | None = None
 ) -> list[RawObservation]:
-    return [
-        file_info.to_observation()
-        for file_info in discover_repository(root, profile=profile)
-    ]
+    repository_root = Path(root).resolve()
+    observations = []
+    for file_info in discover_repository(repository_root, profile=profile):
+        observations.append(file_info.to_observation())
+        if file_info.language == "shell":
+            observations.extend(
+                extract_shell_file_observations(repository_root, file_info.path)
+            )
+    return observations
+
+
+def extract_shell_file_observations(
+    repository_root: Path, relative_path: str
+) -> tuple[RawObservation, ...]:
+    try:
+        content = (repository_root / relative_path).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return ()
+    return extract_shell_command_observations(relative_path, content)
 
 
 def classify_path(

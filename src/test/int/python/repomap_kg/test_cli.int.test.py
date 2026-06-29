@@ -235,7 +235,7 @@ class CliIntegrationTests(unittest.TestCase):
             fixture = Path(tmpdir) / "fixture-repo"
             self.write_fixture(
                 fixture / "bin" / "tool",
-                "#!/usr/bin/env bash\necho ok\n",
+                "#!/usr/bin/env bash\nnix build .#checks\n",
             )
             (fixture / "bin" / "tool").chmod(
                 (fixture / "bin" / "tool").stat().st_mode | 0o111
@@ -257,9 +257,18 @@ class CliIntegrationTests(unittest.TestCase):
             )
 
         observations = [json.loads(line) for line in stdout.splitlines()]
-        paths = [observation["path"] for observation in observations]
+        file_observations = [
+            observation for observation in observations if observation["kind"] == "file"
+        ]
+        shell_observations = [
+            observation
+            for observation in observations
+            if observation["kind"] == "shell.command"
+        ]
+        paths = [observation["path"] for observation in file_observations]
         metadata_by_path = {
-            observation["path"]: observation["metadata"] for observation in observations
+            observation["path"]: observation["metadata"]
+            for observation in file_observations
         }
         self.assertEqual(exit_code, 0)
         self.assertEqual(stderr, "")
@@ -273,9 +282,17 @@ class CliIntegrationTests(unittest.TestCase):
                 "src/test/unit/python/app.unit.test.py",
             ],
         )
-        self.assertTrue(
-            all(observation["kind"] == "file" for observation in observations)
+        self.assertEqual(len(shell_observations), 1)
+        self.assertEqual(shell_observations[0]["path"], "bin/tool")
+        self.assertEqual(
+            shell_observations[0]["source_id"],
+            "bin/tool#call:2:nix-build",
         )
+        self.assertEqual(shell_observations[0]["name"], "nix build")
+        self.assertEqual(shell_observations[0]["target"], "tool:nix")
+        self.assertEqual(shell_observations[0]["start_line"], 2)
+        self.assertEqual(shell_observations[0]["end_line"], 2)
+        self.assertEqual(shell_observations[0]["confidence"], "heuristic")
         self.assertNotIn(".git/config", paths)
         self.assertEqual(metadata_by_path["bin/tool"]["language"], "shell")
         self.assertEqual(metadata_by_path["bin/tool"]["role"], "entrypoint")
