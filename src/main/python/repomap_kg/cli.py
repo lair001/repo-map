@@ -48,6 +48,7 @@ from repomap_kg.storage import (
     query_file_neighborhood,
     query_file_node_records,
     query_file_records,
+    query_host_mutator_records,
     query_neighborhood,
     query_node_records,
     query_storage_summary,
@@ -311,6 +312,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit stored edge records as JSON",
+    )
+    storage_host_mutators = storage_subcommands.add_parser(
+        "host-mutators",
+        help="list stored host-mutating commands from Postgres storage",
+    )
+    add_storage_root_argument(storage_host_mutators)
+    add_storage_connection_arguments(storage_host_mutators)
+    storage_host_mutators.add_argument(
+        "--json",
+        action="store_true",
+        help="emit stored host-mutator records as JSON",
     )
     storage_summary = storage_subcommands.add_parser(
         "summary",
@@ -595,6 +607,22 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(edge_records_to_jsonable(records), sort_keys=True))
         else:
             print(format_edge_table(records))
+        return 0
+
+    if args.command == "storage" and args.storage_command == "host-mutators":
+        try:
+            records = query_host_mutator_records(
+                psql_args_from_args(args),
+                root_path=args.root_path,
+                psql_command=args.psql_command,
+            )
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(host_mutators_to_jsonable(records), sort_keys=True))
+        else:
+            print(format_host_mutator_table(records))
         return 0
 
     if args.command == "storage" and args.storage_command == "summary":

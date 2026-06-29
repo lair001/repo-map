@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from repomap_kg.files import FileRecord, format_table_row, render_table_value
+from repomap_kg.host_mutators import HostMutatorRecord
 from repomap_kg.observations import RawObservation
 
 
@@ -470,6 +471,24 @@ def query_edge_records(
     return tuple(edge_record_from_storage_payload(item) for item in payload)
 
 
+def query_host_mutator_records(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    psql_command: str = "psql",
+) -> tuple[HostMutatorRecord, ...]:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_host_mutator_query_sql(root_path),
+    )
+    payload = parse_psql_json(result.stdout, "host-mutator records")
+    if not isinstance(payload, list):
+        raise StorageSchemaError(
+            "psql did not return host-mutator records as a JSON array"
+        )
+    return tuple(host_mutator_record_from_storage_payload(item) for item in payload)
+
+
 def query_storage_summary(
     psql_args: Sequence[str],
     *,
@@ -902,6 +921,36 @@ def build_edge_query_sql(
     )
 
 
+def build_host_mutator_query_sql(root_path: str) -> str:
+    return (
+        "SELECT COALESCE(json_agg(json_build_object("
+        "'path', COALESCE(files.path, ''), "
+        "'line', COALESCE(nodes.start_line, 0), "
+        "'name', nodes.name, "
+        "'target', dst.stable_key, "
+        "'category', COALESCE(nodes.metadata_json->>'category', 'unknown'), "
+        "'tool', COALESCE(nodes.metadata_json->>'tool', 'unknown'), "
+        "'privileged', COALESCE((nodes.metadata_json->>'privileged')::boolean, false), "
+        "'confidence', edges.confidence, "
+        "'reason', COALESCE(nodes.metadata_json->>'reason', ''), "
+        "'argv', COALESCE(nodes.metadata_json->'argv', '[]'::jsonb), "
+        "'effective_argv', "
+        "COALESCE(nodes.metadata_json->'effective_argv', '[]'::jsonb)"
+        ") ORDER BY COALESCE(files.path, ''), nodes.start_line, nodes.name), "
+        "'[]'::json)::text "
+        "FROM nodes "
+        "JOIN repositories ON repositories.id = nodes.repository_id "
+        "JOIN edges ON edges.repository_id = nodes.repository_id "
+        "AND edges.src_node_id = nodes.id "
+        "AND edges.kind = 'shell.host_mutation' "
+        "JOIN nodes dst ON dst.id = edges.dst_node_id "
+        "JOIN evidence ON evidence.id = edges.evidence_id "
+        "LEFT JOIN files ON files.id = evidence.file_id "
+        f"WHERE repositories.root_path = {sql_literal(root_path)} "
+        "AND nodes.kind = 'shell.host_mutation';"
+    )
+
+
 def build_storage_summary_query_sql(root_path: str) -> str:
     quoted_root = sql_literal(root_path)
     return (
@@ -1224,6 +1273,28 @@ def edge_record_from_storage_payload(payload: Any) -> EdgeRecord:
     )
 
 
+def host_mutator_record_from_storage_payload(payload: Any) -> HostMutatorRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed host-mutator record")
+    return HostMutatorRecord(
+        path=payload_text(payload, "path", label="host-mutator record"),
+        line=payload_int(payload, "line", label="host-mutator record"),
+        name=payload_text(payload, "name", label="host-mutator record"),
+        target=payload_text(payload, "target", label="host-mutator record"),
+        category=payload_text(payload, "category", label="host-mutator record"),
+        tool=payload_text(payload, "tool", label="host-mutator record"),
+        privileged=payload_bool(
+            payload, "privileged", label="host-mutator record"
+        ),
+        confidence=payload_text(payload, "confidence", label="host-mutator record"),
+        reason=payload_text(payload, "reason", label="host-mutator record"),
+        argv=payload_string_tuple(payload, "argv", label="host-mutator record"),
+        effective_argv=payload_string_tuple(
+            payload, "effective_argv", label="host-mutator record"
+        ),
+    )
+
+
 def node_record_from_storage_payload(payload: Any) -> NodeRecord:
     if not isinstance(payload, dict):
         raise StorageSchemaError("psql returned a malformed node record")
@@ -1506,11 +1577,24 @@ def payload_string(
     return value
 
 
-def payload_bool(payload: dict[str, Any], key: str) -> bool:
+def payload_bool(
+    payload: dict[str, Any], key: str, *, label: str = "file record"
+) -> bool:
     value = payload.get(key)
     if not isinstance(value, bool):
-        raise StorageSchemaError(f"psql returned a malformed file record: {key}")
+        raise StorageSchemaError(f"psql returned a malformed {label}: {key}")
     return value
+
+
+def payload_string_tuple(
+    payload: dict[str, Any], key: str, *, label: str
+) -> tuple[str, ...]:
+    value = payload.get(key)
+    if not isinstance(value, list):
+        raise StorageSchemaError(f"psql returned a malformed {label}: {key}")
+    if any(not isinstance(item, str) for item in value):
+        raise StorageSchemaError(f"psql returned a malformed {label}: {key}")
+    return tuple(value)
 
 
 def payload_int(payload: dict[str, Any], key: str, *, label: str) -> int:

@@ -192,6 +192,10 @@ Stored relationship edges can be read back with `repomap-kg storage edges`,
 optionally filtered by edge kind, source node stable key, or target node stable
 key, returning source node, target node, edge, evidence, kind, confidence, and
 stable key fields as table or JSON output.
+Stored host-mutating command rows can be read back with
+`repomap-kg storage host-mutators`, reconstructing the same table and JSON
+shape as the raw-JSONL `host-mutators` command from stored `shell.host_mutation`
+nodes, their host target edges, and evidence-backed file paths.
 Repository storage counts can be read back with `repomap-kg storage summary`,
 returning repository identity, latest run id, and counts for runs, files, nodes,
 edges, and evidence as table or JSON output.

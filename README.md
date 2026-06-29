@@ -41,7 +41,8 @@ extractor that emits simple command invocations, sourced-file includes, and
 environment variable reads/writes as raw observations during discovery, plus
 first-pass host-mutating command classifications for obvious package, service,
 system activation, and filesystem mutation commands with raw JSONL readback.
-The initial specs live under `docs/specs/`.
+Host-mutating facts can also be loaded into Postgres and read back through
+storage. The initial specs live under `docs/specs/`.
 
 ## Development
 
@@ -64,6 +65,7 @@ PYTHONPATH=src/main/python python3 -m repomap_kg storage nodes --root-path . --k
 PYTHONPATH=src/main/python python3 -m repomap_kg storage neighborhood --root-path . --node tool:nix --direction in --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage file-neighborhood --root-path . --path bin/tool --direction out --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage edges --root-path . --kind shell.command --target-node tool:nix --json
+PYTHONPATH=src/main/python python3 -m repomap_kg storage host-mutators --root-path . --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage summary --root-path . --json
 ```
 

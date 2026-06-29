@@ -18,6 +18,7 @@ from repomap_kg.storage import (
     build_neighborhood_query_sql,
     build_node_query_sql,
     build_storage_summary_query_sql,
+    build_host_mutator_query_sql,
     build_edge_query_sql,
     apply_migrations,
     build_file_ingest_sql,
@@ -39,6 +40,7 @@ from repomap_kg.storage import (
     query_neighborhood,
     query_node_records,
     query_storage_summary,
+    query_host_mutator_records,
     relationship_rows_from_observations,
     load_file_observations,
 )
@@ -848,6 +850,66 @@ SELECT 1;
         with patch("repomap_kg.storage.subprocess.run", return_value=completed):
             with self.assertRaisesRegex(StorageSchemaError, "edge records"):
                 query_edge_records(["-d", "postgres"], root_path="/tmp/fixture")
+
+    def test_query_host_mutator_records_returns_records(self):
+        completed = SimpleNamespace(
+            stdout=(
+                "["
+                '{"path":"scripts/maintain.sh","line":2,"name":"rm",'
+                '"target":"host:filesystem-mutation",'
+                '"category":"filesystem-mutation","tool":"rm",'
+                '"privileged":true,"confidence":"heuristic",'
+                '"reason":"rm host filesystem path",'
+                '"argv":["sudo","rm","-rf","/Library/Caches/example"],'
+                '"effective_argv":["rm","-rf","/Library/Caches/example"]}'
+                "]\n"
+            )
+        )
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+            records = query_host_mutator_records(
+                ["-d", "postgres"],
+                root_path="/tmp/fixture",
+                psql_command="/bin/psql",
+            )
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].path, "scripts/maintain.sh")
+        self.assertEqual(records[0].category, "filesystem-mutation")
+        self.assertTrue(records[0].privileged)
+        self.assertEqual(records[0].effective_argv, (
+            "rm",
+            "-rf",
+            "/Library/Caches/example",
+        ))
+        self.assertIn("-qAt", run.call_args.args[0])
+        self.assertIn(
+            "repositories.root_path = '/tmp/fixture'",
+            run.call_args.kwargs["input"],
+        )
+        self.assertIn(
+            "nodes.kind = 'shell.host_mutation'",
+            run.call_args.kwargs["input"],
+        )
+
+    def test_query_host_mutator_records_rejects_malformed_json(self):
+        completed = SimpleNamespace(stdout='{"path": "scripts/maintain.sh"}\n')
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(StorageSchemaError, "host-mutator records"):
+                query_host_mutator_records(
+                    ["-d", "postgres"],
+                    root_path="/tmp/fixture",
+                )
+
+    def test_build_host_mutator_query_sql_quotes_root_path(self):
+        sql = build_host_mutator_query_sql("/tmp/fixture's repo")
+
+        self.assertIn(
+            "repositories.root_path = '/tmp/fixture''s repo'",
+            sql,
+        )
+        self.assertIn("nodes.kind = 'shell.host_mutation'", sql)
 
     def test_query_storage_summary_returns_counts(self):
         completed = SimpleNamespace(

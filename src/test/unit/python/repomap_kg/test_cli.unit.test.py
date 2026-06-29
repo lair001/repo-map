@@ -10,6 +10,7 @@ from unittest.mock import patch
 from repomap_kg import __version__
 from repomap_kg.cli import build_parser, main
 from repomap_kg.files import FileRecord
+from repomap_kg.host_mutators import HostMutatorRecord
 from repomap_kg.observations import RawObservation, write_observations_jsonl
 from repomap_kg.storage import (
     EdgeRecord,
@@ -958,6 +959,72 @@ class CliUnitTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertIn("psql did not return edge records", stderr.getvalue())
+
+    def test_storage_host_mutators_prints_json_records(self):
+        records = (
+            HostMutatorRecord(
+                path="scripts/maintain.sh",
+                line=2,
+                name="rm",
+                target="host:filesystem-mutation",
+                category="filesystem-mutation",
+                tool="rm",
+                privileged=True,
+                confidence="heuristic",
+                reason="rm host filesystem path",
+                argv=("sudo", "rm", "-rf", "/Library/Caches/example"),
+                effective_argv=("rm", "-rf", "/Library/Caches/example"),
+            ),
+        )
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_host_mutator_records",
+            return_value=records,
+        ) as query:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "host-mutators",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--pg-database",
+                        "postgres",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload[0]["category"], "filesystem-mutation")
+        self.assertEqual(payload[0]["effective_argv"], [
+            "rm",
+            "-rf",
+            "/Library/Caches/example",
+        ])
+        self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
+        self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+
+    def test_storage_host_mutators_reports_query_errors(self):
+        stderr = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_host_mutator_records",
+            side_effect=StorageSchemaError("psql did not return host-mutators"),
+        ):
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "storage",
+                        "host-mutators",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("psql did not return host-mutators", stderr.getvalue())
 
     def test_storage_summary_prints_json_record(self):
         summary = StorageSummaryRecord(
