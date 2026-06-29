@@ -32,17 +32,22 @@ files, and command-line tools.
 
 ## Current Status
 
-RepoMap has an initial Python package skeleton with a minimal CLI identity
-surface, raw observation JSONL validation, first file and entrypoint queries,
-and initial Postgres schema-backed file ingestion with file nodes and evidence
-rows, relationship edges, storage-backed file-node plus edge readback, and
-compact storage summaries. It also includes a conservative first shell
-extractor that emits simple command invocations, sourced-file includes, and
-environment variable reads/writes as raw observations during discovery, plus
-first-pass host-mutating command classifications for obvious package, service,
-system activation, and filesystem mutation commands with raw JSONL readback.
-Host-mutating facts can also be loaded into Postgres and read back through
-storage. The initial specs live under `docs/specs/`.
+RepoMap has a working deterministic raw-observation pipeline, legacy
+observation-derived Postgres readback, and the first canonical graph storage
+path. Discovery emits file, entrypoint, shell command, sourced-file,
+environment, and host-mutation observations as JSONL. Legacy storage commands
+still read from the observation-derived `files`, `nodes`, `edges`, and
+`evidence` tables for compatibility.
+
+Canonicalization now runs as a tested pure layer before storage. Phase C1 added
+raw-observation retention plus `canonical_nodes`, `canonical_edges`,
+`canonical_evidence`, and evidence join tables, with developer-facing
+`storage load-canonical` for loading canonical fixtures. Phase C2 made
+`storage load-files` dual-write both legacy rows and canonical rows in one
+transaction while preserving existing public output and legacy readback
+behavior. Public canonical readback is planned separately in
+[ADR 0007](docs/adr/0007-canonical-readback-and-explain-query-contracts.md).
+The initial specs live under `docs/specs/`.
 
 ## Development
 
