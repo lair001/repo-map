@@ -11,7 +11,7 @@ from typing import Any
 from repomap_kg import __version__
 from repomap_kg.observations import RawObservation
 from repomap_kg.profiles import ProjectProfile
-from repomap_kg.shell import extract_shell_command_observations
+from repomap_kg.shell import extract_shell_observations
 
 
 IGNORED_DIR_NAMES = frozenset(
@@ -125,7 +125,7 @@ def extract_shell_file_observations(
         content = (repository_root / relative_path).read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return ()
-    return extract_shell_command_observations(relative_path, content)
+    return extract_shell_observations(relative_path, content)
 
 
 def classify_path(

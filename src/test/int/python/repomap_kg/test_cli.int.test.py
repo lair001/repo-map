@@ -306,6 +306,70 @@ class CliIntegrationTests(unittest.TestCase):
             "test",
         )
 
+    def test_discover_command_emits_shell_source_observations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "fixture-repo"
+            self.write_fixture(
+                fixture / "bin" / "tool",
+                "#!/usr/bin/env bash\nsource ../lib/common.sh\n",
+            )
+            self.write_fixture(fixture / "lib" / "common.sh", "echo common\n")
+
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "discover", str(fixture), "--jsonl"
+            )
+
+        observations = [json.loads(line) for line in stdout.splitlines()]
+        sources = [
+            observation
+            for observation in observations
+            if observation["kind"] == "shell.source"
+        ]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0]["path"], "bin/tool")
+        self.assertEqual(sources[0]["source_id"], "bin/tool#source:2:lib-common-sh")
+        self.assertEqual(sources[0]["name"], "../lib/common.sh")
+        self.assertEqual(sources[0]["target"], "file:lib/common.sh")
+        self.assertEqual(sources[0]["start_line"], 2)
+        self.assertEqual(sources[0]["metadata"]["resolved_path"], "lib/common.sh")
+
+    def test_discover_command_skips_dynamic_shell_source_observations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "fixture-repo"
+            self.write_fixture(
+                fixture / "bin" / "tool",
+                (
+                    "#!/usr/bin/env bash\n"
+                    "FOO=bar\n"
+                    "source \"$DYNAMIC\"\n"
+                    "if true; then\n"
+                    "  echo ok\n"
+                    "fi\n"
+                ),
+            )
+
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "discover", str(fixture), "--jsonl"
+            )
+
+        observations = [json.loads(line) for line in stdout.splitlines()]
+        sources = [
+            observation
+            for observation in observations
+            if observation["kind"] == "shell.source"
+        ]
+        commands = [
+            observation
+            for observation in observations
+            if observation["kind"] == "shell.command"
+        ]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(sources, [])
+        self.assertEqual([command["name"] for command in commands], ["echo ok"])
+
     def test_discover_command_applies_project_profile(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture = Path(tmpdir) / "fixture-repo"

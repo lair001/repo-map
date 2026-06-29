@@ -55,10 +55,12 @@ Shell edges should often be `heuristic` rather than `extracted`, especially when
 commands are dynamic.
 
 The initial shell extractor is intentionally conservative and dependency-free:
-it emits line-backed `shell.command` observations for simple command
-invocations, skips comments, shell control keywords, and assignment-only lines,
-and targets tools as `tool:<command>`. Parser-backed shell expansion remains a
-future slice.
+it emits line-backed `shell.command` observations for simple command invocations
+and `shell.source` observations for static `source` and `.` includes. It skips
+comments, shell control keywords, assignment-only lines, dynamic source paths,
+and absolute or repository-escaping source paths. Commands target tools as
+`tool:<command>`; sourced files target `file:<repo-relative-path>`.
+Parser-backed shell expansion remains a future slice.
 
 Candidate parser families include `mvdan/sh`, Tree-sitter Bash, and bashlex.
 The project should choose based on language coverage, structured AST quality,

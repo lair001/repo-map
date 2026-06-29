@@ -51,6 +51,15 @@ metadata contains:
 - `command`: the command token before display-name normalization.
 - `raw`: the source line text for the command.
 
+The same extractor emits `shell.source` observations for static `source` and
+`.` include statements. Dynamic source paths are skipped. Their metadata
+contains:
+
+- `argv`: parsed source/include arguments.
+- `source`: the original source path token.
+- `resolved_path`: the repository-relative path resolved from the current file.
+- `raw`: the source line text for the include.
+
 ## Normalization Boundary
 
 The first normalizer maps raw observations into graph-shaped records without a

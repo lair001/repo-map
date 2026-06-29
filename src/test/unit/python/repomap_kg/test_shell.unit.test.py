@@ -1,6 +1,9 @@
 import unittest
 
-from repomap_kg.shell import extract_shell_command_observations
+from repomap_kg.shell import (
+    extract_shell_command_observations,
+    extract_shell_observations,
+)
 
 
 class ShellExtractorUnitTests(unittest.TestCase):
@@ -38,6 +41,39 @@ class ShellExtractorUnitTests(unittest.TestCase):
 
         self.assertEqual([observation.name for observation in observations], ["echo ok"])
         self.assertEqual(observations[0].source_id, "scripts/check.sh#call:4:echo-ok")
+
+    def test_extract_shell_observations_emits_sourced_file_edges(self):
+        observations = extract_shell_observations(
+            "bin/tool",
+            (
+                "#!/usr/bin/env bash\n"
+                "source ../lib/common.sh\n"
+                ". ./helpers.sh\n"
+                "source \"$DYNAMIC\"\n"
+                "nix build .#checks\n"
+            ),
+        )
+
+        sources = [
+            observation
+            for observation in observations
+            if observation.kind == "shell.source"
+        ]
+        commands = [
+            observation
+            for observation in observations
+            if observation.kind == "shell.command"
+        ]
+        self.assertEqual([source.target for source in sources], [
+            "file:lib/common.sh",
+            "file:bin/helpers.sh",
+        ])
+        self.assertEqual(sources[0].source_id, "bin/tool#source:2:lib-common-sh")
+        self.assertEqual(sources[0].name, "../lib/common.sh")
+        self.assertEqual(sources[0].start_line, 2)
+        self.assertEqual(sources[0].confidence, "heuristic")
+        self.assertEqual(sources[0].metadata["resolved_path"], "lib/common.sh")
+        self.assertEqual([command.name for command in commands], ["nix build"])
 
 
 if __name__ == "__main__":
