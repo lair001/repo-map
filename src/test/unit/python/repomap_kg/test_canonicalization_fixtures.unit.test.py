@@ -18,6 +18,9 @@ class CanonicalizationFixtureTests(unittest.TestCase):
             "shell_executes_collapse",
             "shell_source_static",
             "shell_source_dynamic",
+            "shell_env_read",
+            "shell_env_write",
+            "shell_env_write_collapse",
         )
 
         for fixture_name in fixture_names:
