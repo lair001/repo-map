@@ -239,8 +239,6 @@ def _canonicalize_shell_command_observation(
 ) -> None:
     try:
         source_key = file_key(observation.path)
-        command = _shell_command_name(observation.metadata)
-        target_key = tool_key(command)
     except GraphKeyError as error:
         diagnostics.append(
             CanonicalizationDiagnostic(
@@ -256,7 +254,15 @@ def _canonicalize_shell_command_observation(
         )
         return
 
-    _append_raw_target_diagnostic(observation, ordinal, diagnostics)
+    target_key, target_display_name, edge_metadata = _shell_command_target(
+        observation, ordinal, diagnostics
+    )
+    _append_raw_target_diagnostic(
+        observation,
+        ordinal,
+        diagnostics,
+        placeholder_key=None if target_key.startswith("tool:") else target_key,
+    )
 
     evidence_record = _evidence_from_observation(observation, ordinal)
     evidence.append(evidence_record)
@@ -272,8 +278,8 @@ def _canonicalize_shell_command_observation(
     _upsert_node(
         nodes,
         canonical_key=target_key,
-        kind="tool",
-        display_name=command,
+        kind=_node_kind_from_key(target_key),
+        display_name=target_display_name,
         metadata={},
         confidence=observation.confidence,
     )
@@ -307,7 +313,7 @@ def _canonicalize_shell_command_observation(
         kind="executes",
         target_key=target_key,
         identity_metadata=identity_metadata,
-        metadata=_shell_command_edge_metadata(observation.metadata),
+        metadata=edge_metadata,
         confidence=observation.confidence,
     )
     edge_evidence_links.append(
@@ -680,7 +686,7 @@ def _file_node_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
     return {key: metadata[key] for key in FILE_METADATA_KEYS if key in metadata}
 
 
-def _shell_command_name(metadata: Mapping[str, Any]) -> str:
+def _shell_command_name(metadata: Mapping[str, Any]) -> str | None:
     command = metadata.get("command")
     if isinstance(command, str) and command.strip():
         return command
@@ -693,13 +699,98 @@ def _shell_command_name(metadata: Mapping[str, Any]) -> str:
         and argv[0].strip()
     ):
         return argv[0]
-    raise GraphKeyError("shell.command requires command metadata or argv[0]")
+    return None
 
 
-def _shell_command_edge_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+def _shell_command_target(
+    observation: RawObservation,
+    ordinal: int,
+    diagnostics: list[CanonicalizationDiagnostic],
+) -> tuple[str, str, dict[str, Any]]:
+    command = _shell_command_name(observation.metadata)
+    if command is not None:
+        return (
+            tool_key(command),
+            command,
+            _shell_command_edge_metadata(observation.metadata, command=command),
+        )
+
+    dynamic_reason, dynamic_field, dynamic_value = _shell_command_dynamic_reason(
+        observation
+    )
+    if dynamic_reason is not None:
+        placeholder_key = dynamic_key("tool", dynamic_reason)
+        diagnostics.append(
+            CanonicalizationDiagnostic(
+                severity="info",
+                category="dynamic_target",
+                message="dynamic shell command represented by placeholder",
+                raw_observation_ordinal=ordinal,
+                raw_source_id=observation.source_id,
+                path=observation.path,
+                field=dynamic_field,
+                value=dynamic_value,
+                placeholder_key=placeholder_key,
+            )
+        )
+        return (
+            placeholder_key,
+            dynamic_reason,
+            _shell_command_edge_metadata(
+                observation.metadata, dynamic_reason=dynamic_reason
+            ),
+        )
+
+    placeholder_key = unknown_key("tool", "missing-command")
+    diagnostics.append(
+        CanonicalizationDiagnostic(
+            severity="warning",
+            category="missing_required_metadata",
+            message="shell.command is missing metadata.command or metadata.argv[0]",
+            raw_observation_ordinal=ordinal,
+            raw_source_id=observation.source_id,
+            path=observation.path,
+            field="metadata.command",
+            value=None,
+            placeholder_key=placeholder_key,
+        )
+    )
+    return placeholder_key, "missing-command", {}
+
+
+def _shell_command_dynamic_reason(
+    observation: RawObservation,
+) -> tuple[str, str, Any] | tuple[None, None, None]:
+    dynamic_reason = observation.metadata.get("dynamic_reason")
+    if isinstance(dynamic_reason, str) and dynamic_reason.strip():
+        return dynamic_reason, "metadata.dynamic_reason", dynamic_reason
+    if observation.target is None:
+        return None, None, None
+    try:
+        parsed_target = parse_key(observation.target)
+    except GraphKeyError:
+        return None, None, None
+    if (
+        parsed_target.namespace == "dynamic"
+        and len(parsed_target.segments) == 2
+        and parsed_target.segments[0] == "tool"
+        and parsed_target.segments[1].strip()
+    ):
+        return parsed_target.segments[1], "target", observation.target
+    return None, None, None
+
+
+def _shell_command_edge_metadata(
+    metadata: Mapping[str, Any],
+    *,
+    command: str | None = None,
+    dynamic_reason: str | None = None,
+) -> dict[str, Any]:
     summary: dict[str, Any] = {}
-    command = _shell_command_name(metadata)
-    summary["commands"] = [command]
+    if command is not None:
+        summary["commands"] = [command]
+    if dynamic_reason is not None:
+        summary["dynamic_reasons"] = [dynamic_reason]
     argv = metadata.get("argv")
     if isinstance(argv, Sequence) and not isinstance(argv, (str, bytes)):
         summary["argv_examples"] = [list(argv)]

@@ -422,6 +422,101 @@ class CanonicalizationUnitTests(unittest.TestCase):
             {"argv_examples": [["nix", "develop"]], "commands": ["nix"]},
         )
 
+    def test_shell_command_dynamic_target_uses_placeholder(self):
+        observation = RawObservation(
+            kind="shell.command",
+            source_id="bin/tool#call:4:dynamic",
+            path="bin/tool",
+            start_line=4,
+            end_line=4,
+            target="dynamic:tool:shell-variable-command",
+            confidence="heuristic",
+            extractor="repo-shell",
+            extractor_version="0.1.0",
+            metadata={
+                "dynamic_reason": "shell-variable-command",
+                "raw": '"$COMMAND" --help',
+            },
+        )
+
+        result = canonicalize_observations([observation])
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["summary"]["infos"], 1)
+        self.assertEqual(payload["diagnostics"][0]["category"], "dynamic_target")
+        self.assertEqual(payload["diagnostics"][0]["field"], "metadata.dynamic_reason")
+        self.assertEqual(
+            payload["diagnostics"][0]["placeholder_key"],
+            "dynamic:tool:shell-variable-command",
+        )
+        self.assertEqual(
+            payload["edges"][0]["target_key"],
+            "dynamic:tool:shell-variable-command",
+        )
+        self.assertEqual(
+            payload["edges"][0]["metadata"],
+            {"dynamic_reasons": ["shell-variable-command"]},
+        )
+
+    def test_shell_command_dynamic_reason_without_target_uses_placeholder(self):
+        observation = RawObservation(
+            kind="shell.command",
+            source_id="bin/tool#call:5:dynamic",
+            path="bin/tool",
+            start_line=5,
+            end_line=5,
+            confidence="heuristic",
+            extractor="repo-shell",
+            extractor_version="0.1.0",
+            metadata={"dynamic_reason": "shell-variable-command"},
+        )
+
+        result = canonicalize_observations([observation])
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["summary"]["infos"], 1)
+        self.assertEqual(
+            payload["diagnostics"][0]["placeholder_key"],
+            "dynamic:tool:shell-variable-command",
+        )
+        self.assertEqual(
+            payload["edges"][0]["target_key"],
+            "dynamic:tool:shell-variable-command",
+        )
+
+    def test_shell_command_missing_command_uses_unknown_placeholder(self):
+        observation = RawObservation(
+            kind="shell.command",
+            source_id="bin/tool#call:6:missing",
+            path="bin/tool",
+            start_line=6,
+            end_line=6,
+            confidence="heuristic",
+            extractor="repo-shell",
+            extractor_version="0.1.0",
+            metadata={},
+        )
+
+        result = canonicalize_observations([observation])
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["summary"]["warnings"], 1)
+        self.assertEqual(
+            payload["diagnostics"][0]["category"], "missing_required_metadata"
+        )
+        self.assertEqual(payload["diagnostics"][0]["field"], "metadata.command")
+        self.assertEqual(
+            payload["diagnostics"][0]["placeholder_key"],
+            "unknown:tool:missing-command",
+        )
+        self.assertEqual(
+            payload["edges"][0]["target_key"], "unknown:tool:missing-command"
+        )
+        self.assertEqual(payload["summary"]["edge_evidence_links"], 1)
+
     def test_shell_command_with_bad_path_reports_error_without_evidence(self):
         observation = RawObservation(
             kind="shell.command",

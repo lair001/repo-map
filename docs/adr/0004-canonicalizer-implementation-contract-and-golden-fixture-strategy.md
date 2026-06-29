@@ -451,6 +451,23 @@ Initial diagnostic categories:
 - `graph_key_version_mismatch`
 - `canonicalization_bug`
 
+Accepted category refinements for the first implementation:
+
+- `unsupported_operation`: a supported raw observation kind has an operation
+  value outside the implemented vocabulary, such as a `shell.env` operation
+  other than `read` or `write`;
+- `unregistered_category`: a supported raw observation kind has a category
+  value outside the current registry, such as an unknown
+  `shell.host_mutation` category; and
+- `secret_prone_value`: an environment variable value was intentionally
+  redacted from summary/evidence metadata because the variable name is
+  secret-prone.
+
+These refinements are deliberately narrower than
+`missing_required_metadata` or `unknown_target`. They let diagnostics explain
+why the canonicalizer skipped, placeholdered, or redacted an otherwise
+well-formed observation without overloading broader categories.
+
 ### Behavior Rules
 
 Fail the entire result when:

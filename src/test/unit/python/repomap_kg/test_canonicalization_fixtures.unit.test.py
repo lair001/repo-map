@@ -28,6 +28,7 @@ class CanonicalizationFixtureTests(unittest.TestCase):
             "shell_source_repo_escape",
             "shell_env_missing_variable",
             "unsupported_kind",
+            "future_python_stub",
         )
 
         for fixture_name in fixture_names:
