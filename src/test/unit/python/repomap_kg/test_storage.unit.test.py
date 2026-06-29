@@ -736,11 +736,12 @@ SELECT 1;
         self.assertIn("source_key", table)
         self.assertIn("edge_kind", table)
         self.assertIn("target_key", table)
+        self.assertIn("identity_metadata_hash", table)
         self.assertIn("first_seen_run_id", table)
         self.assertIn("file:bin/tool", table)
         self.assertIn("tool:nix", table)
+        self.assertIn(hash_text, table)
         self.assertIn("12", table)
-        self.assertNotIn("metadata", table)
         self.assertNotIn("omitted", table)
 
     def test_canonical_record_payload_helpers_reject_malformed_payloads(self):

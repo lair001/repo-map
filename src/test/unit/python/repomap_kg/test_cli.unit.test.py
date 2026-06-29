@@ -1120,8 +1120,10 @@ class CliUnitTests(unittest.TestCase):
         output = stdout.getvalue()
         self.assertIn("source_key", output)
         self.assertIn("file:bin/tool", output)
+        self.assertIn("identity_metadata_hash", output)
+        self.assertIn(hash_text, output)
         self.assertIn("last_seen_run_id", output)
-        self.assertNotIn("metadata", output)
+        self.assertNotIn("commands", output)
 
     def test_storage_canonical_edges_validates_source_key(self):
         stderr = io.StringIO()

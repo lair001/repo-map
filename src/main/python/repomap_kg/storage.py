@@ -2351,6 +2351,7 @@ def format_canonical_edge_table(records: Sequence[CanonicalEdgeRecord]) -> str:
         "source_key",
         "edge_kind",
         "target_key",
+        "identity_metadata_hash",
         "confidence",
         "conflict",
         "first_seen_run_id",

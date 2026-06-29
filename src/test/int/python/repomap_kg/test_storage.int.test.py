@@ -829,8 +829,10 @@ FROM canonical_edges;
         self.assertEqual(text_exit_code, 0, text_stderr)
         self.assertIn("source_key", text_stdout)
         self.assertIn("file:bin/tool", text_stdout)
+        self.assertIn("identity_metadata_hash", text_stdout)
+        self.assertIn(edge["identity_metadata_hash"], text_stdout)
         self.assertIn("last_seen_run_id", text_stdout)
-        self.assertNotIn("metadata", text_stdout)
+        self.assertNotIn("commands", text_stdout)
 
     def test_storage_load_files_retains_unsupported_future_observation(self):
         require_postgres_binaries()
