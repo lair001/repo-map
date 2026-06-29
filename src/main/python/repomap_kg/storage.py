@@ -207,6 +207,35 @@ class CanonicalEdgeRecord:
 
 
 @dataclass(frozen=True)
+class CanonicalEdgeEvidenceRecord:
+    evidence_key: str
+    link_kind: str
+    raw_observation: dict[str, Any]
+    path: str
+    start_line: int | None
+    end_line: int | None
+    extractor: str
+    extractor_version: str
+    confidence: str
+    metadata: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class CanonicalEdgeExplanationRecord:
+    edge: CanonicalEdgeRecord | None
+    evidence: tuple[CanonicalEdgeEvidenceRecord, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "edge": self.edge.to_dict() if self.edge is not None else None,
+            "evidence": [record.to_dict() for record in self.evidence],
+        }
+
+
+@dataclass(frozen=True)
 class FileNodeRecord:
     path: str
     node_kind: str
@@ -830,8 +859,34 @@ def query_canonical_edge_records(
     if not isinstance(payload, list):
         raise StorageSchemaError(
             "psql did not return canonical edge records as a JSON array"
-        )
+    )
     return tuple(canonical_edge_record_from_storage_payload(item) for item in payload)
+
+
+def query_canonical_edge_explanation(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    source_key: str,
+    kind: str,
+    target_key: str,
+    identity_metadata_hash: str,
+    graph_key_version: int = 1,
+    psql_command: str = "psql",
+) -> CanonicalEdgeExplanationRecord:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_explain_canonical_edge_query_sql(
+            root_path,
+            source_key=source_key,
+            kind=kind,
+            target_key=target_key,
+            identity_metadata_hash=identity_metadata_hash,
+            graph_key_version=graph_key_version,
+        ),
+    )
+    payload = parse_psql_json(result.stdout, "canonical edge explanation")
+    return canonical_edge_explanation_from_storage_payload(payload)
 
 
 def query_host_mutator_records(
@@ -1505,6 +1560,92 @@ def build_canonical_edge_query_sql(
     )
 
 
+def build_explain_canonical_edge_query_sql(
+    root_path: str,
+    *,
+    source_key: str,
+    kind: str,
+    target_key: str,
+    identity_metadata_hash: str,
+    graph_key_version: int = 1,
+) -> str:
+    require_supported_graph_key_version(graph_key_version)
+    filters = [
+        f"repositories.root_path = {sql_literal(root_path)}",
+        f"canonical_edges.graph_key_version = {graph_key_version}",
+        "canonical_edges.source_canonical_key = "
+        f"{sql_literal(source_key)}",
+        f"canonical_edges.edge_kind = {sql_literal(kind)}",
+        "canonical_edges.target_canonical_key = "
+        f"{sql_literal(target_key)}",
+        "canonical_edges.identity_metadata_hash = "
+        f"{sql_literal(identity_metadata_hash)}",
+    ]
+    where_sql = " AND ".join(filters)
+    return (
+        "WITH matching_edge AS ("
+        "SELECT canonical_edges.* "
+        "FROM canonical_edges "
+        "JOIN repositories ON repositories.id = canonical_edges.repository_id "
+        f"WHERE {where_sql} "
+        "LIMIT 1"
+        "), "
+        "edge_payload AS ("
+        "SELECT json_build_object("
+        "'source_key', matching_edge.source_canonical_key, "
+        "'edge_kind', matching_edge.edge_kind, "
+        "'target_key', matching_edge.target_canonical_key, "
+        "'graph_key_version', matching_edge.graph_key_version, "
+        "'identity_metadata', matching_edge.identity_metadata_json, "
+        "'identity_metadata_hash', matching_edge.identity_metadata_hash, "
+        "'metadata', matching_edge.metadata_json, "
+        "'confidence', matching_edge.confidence, "
+        "'conflict', matching_edge.conflict, "
+        "'first_seen_run_id', matching_edge.first_seen_run_id, "
+        "'last_seen_run_id', matching_edge.last_seen_run_id"
+        ") AS edge "
+        "FROM matching_edge"
+        "), "
+        "evidence_payload AS ("
+        "SELECT COALESCE(json_agg(json_build_object("
+        "'evidence_key', canonical_evidence.evidence_key, "
+        "'link_kind', canonical_edge_evidence.link_kind, "
+        "'raw_observation', json_build_object("
+        "'run_id', canonical_evidence.run_id, "
+        "'ordinal', canonical_evidence.raw_observation_ordinal, "
+        "'payload_hash', raw_observations.payload_hash, "
+        "'kind', COALESCE(raw_observations.kind, canonical_evidence.raw_kind), "
+        "'source_id', COALESCE("
+        "raw_observations.source_id, canonical_evidence.raw_source_id"
+        ")"
+        "), "
+        "'path', canonical_evidence.path, "
+        "'start_line', canonical_evidence.start_line, "
+        "'end_line', canonical_evidence.end_line, "
+        "'extractor', canonical_evidence.extractor, "
+        "'extractor_version', canonical_evidence.extractor_version, "
+        "'confidence', canonical_evidence.confidence, "
+        "'metadata', canonical_evidence.metadata_json"
+        ") ORDER BY canonical_evidence.run_id, "
+        "canonical_evidence.raw_observation_ordinal, "
+        "canonical_evidence.evidence_key, "
+        "canonical_edge_evidence.link_kind), '[]'::json) AS evidence "
+        "FROM matching_edge "
+        "JOIN canonical_edge_evidence "
+        "ON canonical_edge_evidence.canonical_edge_id = matching_edge.id "
+        "JOIN canonical_evidence "
+        "ON canonical_evidence.id = "
+        "canonical_edge_evidence.canonical_evidence_id "
+        "LEFT JOIN raw_observations "
+        "ON raw_observations.id = canonical_evidence.raw_observation_id"
+        ") "
+        "SELECT json_build_object("
+        "'edge', (SELECT edge FROM edge_payload), "
+        "'evidence', (SELECT evidence FROM evidence_payload)"
+        ")::text;"
+    )
+
+
 def build_host_mutator_query_sql(
     root_path: str,
     *,
@@ -2119,6 +2260,108 @@ def canonical_edge_record_from_storage_payload(payload: Any) -> CanonicalEdgeRec
     )
 
 
+def canonical_edge_explanation_from_storage_payload(
+    payload: Any,
+) -> CanonicalEdgeExplanationRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed canonical edge explanation")
+    edge_payload = payload.get("edge")
+    if edge_payload is None:
+        edge = None
+    elif isinstance(edge_payload, dict):
+        edge = canonical_edge_record_from_storage_payload(edge_payload)
+    else:
+        raise StorageSchemaError(
+            "psql returned a malformed canonical edge explanation: edge"
+        )
+    evidence_payload = payload.get("evidence")
+    if not isinstance(evidence_payload, list):
+        raise StorageSchemaError(
+            "psql returned a malformed canonical edge explanation: evidence"
+        )
+    return CanonicalEdgeExplanationRecord(
+        edge=edge,
+        evidence=tuple(
+            canonical_edge_evidence_record_from_storage_payload(item)
+            for item in evidence_payload
+        ),
+    )
+
+
+def canonical_edge_evidence_record_from_storage_payload(
+    payload: Any,
+) -> CanonicalEdgeEvidenceRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError(
+            "psql returned a malformed canonical edge evidence record"
+        )
+    return CanonicalEdgeEvidenceRecord(
+        evidence_key=payload_text(
+            payload, "evidence_key", label="canonical edge evidence record"
+        ),
+        link_kind=payload_text(
+            payload, "link_kind", label="canonical edge evidence record"
+        ),
+        raw_observation=raw_observation_reference_from_storage_payload(
+            payload.get("raw_observation")
+        ),
+        path=payload_text(payload, "path", label="canonical edge evidence record"),
+        start_line=payload_optional_int(
+            payload, "start_line", label="canonical edge evidence record"
+        ),
+        end_line=payload_optional_int(
+            payload, "end_line", label="canonical edge evidence record"
+        ),
+        extractor=payload_text(
+            payload, "extractor", label="canonical edge evidence record"
+        ),
+        extractor_version=payload_text(
+            payload, "extractor_version", label="canonical edge evidence record"
+        ),
+        confidence=payload_text(
+            payload, "confidence", label="canonical edge evidence record"
+        ),
+        metadata=payload_json_object(
+            payload, "metadata", label="canonical edge evidence record"
+        ),
+    )
+
+
+def raw_observation_reference_from_storage_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError(
+            "psql returned a malformed canonical edge evidence record: "
+            "raw_observation"
+        )
+    return {
+        "run_id": payload_int(
+            payload,
+            "run_id",
+            label="canonical edge evidence raw observation reference",
+        ),
+        "ordinal": payload_int(
+            payload,
+            "ordinal",
+            label="canonical edge evidence raw observation reference",
+        ),
+        "payload_hash": payload_optional_text(
+            payload,
+            "payload_hash",
+            label="canonical edge evidence raw observation reference",
+        ),
+        "kind": payload_text(
+            payload,
+            "kind",
+            label="canonical edge evidence raw observation reference",
+        ),
+        "source_id": payload_text(
+            payload,
+            "source_id",
+            label="canonical edge evidence raw observation reference",
+        ),
+    }
+
+
 def host_mutator_record_from_storage_payload(payload: Any) -> HostMutatorRecord:
     if not isinstance(payload, dict):
         raise StorageSchemaError("psql returned a malformed host-mutator record")
@@ -2256,6 +2499,12 @@ def canonical_edge_records_to_jsonable(
     return [record.to_dict() for record in records]
 
 
+def canonical_edge_explanation_to_jsonable(
+    record: CanonicalEdgeExplanationRecord,
+) -> dict[str, Any]:
+    return record.to_dict()
+
+
 def edge_records_to_jsonable(records: Sequence[EdgeRecord]) -> list[dict[str, Any]]:
     return [record.to_dict() for record in records]
 
@@ -2369,6 +2618,73 @@ def format_canonical_edge_table(records: Sequence[CanonicalEdgeRecord]) -> str:
     for row in rendered_rows:
         lines.append(format_table_row(row, columns, widths))
     return "\n".join(lines)
+
+
+def format_canonical_edge_explanation_table(
+    record: CanonicalEdgeExplanationRecord,
+) -> str:
+    if record.edge is None:
+        edge_lines = ["edge: <not found>"]
+    else:
+        edge_row = record.edge.to_dict()
+        edge_columns = (
+            "source_key",
+            "edge_kind",
+            "target_key",
+            "identity_metadata_hash",
+            "confidence",
+            "conflict",
+        )
+        edge_lines = ["edge:"]
+        for column in edge_columns:
+            edge_lines.append(f"{column}: {render_table_value(edge_row[column])}")
+
+    evidence_columns = (
+        "raw_observation.run_id",
+        "raw_observation.ordinal",
+        "raw_observation.kind",
+        "raw_observation.source_id",
+        "path",
+        "start_line",
+        "end_line",
+        "extractor",
+        "extractor_version",
+        "confidence",
+    )
+    evidence_rows = [
+        {
+            "raw_observation.run_id": evidence_record.raw_observation["run_id"],
+            "raw_observation.ordinal": evidence_record.raw_observation["ordinal"],
+            "raw_observation.kind": evidence_record.raw_observation["kind"],
+            "raw_observation.source_id": evidence_record.raw_observation["source_id"],
+            "path": evidence_record.path,
+            "start_line": evidence_record.start_line,
+            "end_line": evidence_record.end_line,
+            "extractor": evidence_record.extractor,
+            "extractor_version": evidence_record.extractor_version,
+            "confidence": evidence_record.confidence,
+        }
+        for evidence_record in record.evidence
+    ]
+    rendered_evidence_rows = [
+        {key: render_table_value(row[key]) for key in evidence_columns}
+        for row in evidence_rows
+    ]
+    widths = {
+        key: max([len(key), *(len(row[key]) for row in rendered_evidence_rows)])
+        for key in evidence_columns
+    }
+    evidence_lines = [
+        "evidence:",
+        format_table_row(
+            dict(zip(evidence_columns, evidence_columns, strict=True)),
+            evidence_columns,
+            widths,
+        ),
+    ]
+    for row in rendered_evidence_rows:
+        evidence_lines.append(format_table_row(row, evidence_columns, widths))
+    return "\n".join([*edge_lines, "", *evidence_lines])
 
 
 def format_edge_table(records: Sequence[EdgeRecord]) -> str:

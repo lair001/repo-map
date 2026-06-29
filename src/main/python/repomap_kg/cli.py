@@ -37,11 +37,13 @@ from repomap_kg.profiles import ProfileValidationError, load_profile
 from repomap_kg.project_identity import PROJECT_IDENTITY
 from repomap_kg.storage import (
     StorageSchemaError,
+    canonical_edge_explanation_to_jsonable,
     canonical_edge_records_to_jsonable,
     canonical_node_records_to_jsonable,
     edge_records_to_jsonable,
     file_neighborhood_to_jsonable,
     file_node_records_to_jsonable,
+    format_canonical_edge_explanation_table,
     format_canonical_edge_table,
     format_canonical_node_table,
     format_edge_table,
@@ -50,10 +52,12 @@ from repomap_kg.storage import (
     format_neighborhood_table,
     format_node_table,
     format_storage_summary_table,
+    identity_metadata_hash,
     load_canonical_observations,
     load_file_observations,
     neighborhood_to_jsonable,
     node_records_to_jsonable,
+    query_canonical_edge_explanation,
     query_canonical_node_records,
     query_canonical_edge_records,
     query_edge_records,
@@ -295,6 +299,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit stored canonical edge records as JSON",
+    )
+    storage_explain_canonical_edge = storage_subcommands.add_parser(
+        "explain-canonical-edge",
+        help="explain one stored canonical graph edge from Postgres storage",
+    )
+    add_storage_root_argument(storage_explain_canonical_edge)
+    storage_explain_canonical_edge.add_argument("--source-key", required=True)
+    storage_explain_canonical_edge.add_argument("--kind", required=True)
+    storage_explain_canonical_edge.add_argument("--target-key", required=True)
+    storage_explain_canonical_edge.add_argument(
+        "--identity-metadata-json",
+        default="{}",
+        help="canonical edge identity metadata JSON object; default {}",
+    )
+    storage_explain_canonical_edge.add_argument(
+        "--graph-key-version",
+        type=int,
+        default=GRAPH_KEY_VERSION,
+        help="canonical graph key version; only 1 is currently supported",
+    )
+    add_storage_connection_arguments(storage_explain_canonical_edge)
+    storage_explain_canonical_edge.add_argument(
+        "--json",
+        action="store_true",
+        help="emit canonical edge explanation as JSON",
     )
     storage_files = storage_subcommands.add_parser(
         "files",
@@ -747,6 +776,38 @@ def main(argv: list[str] | None = None) -> int:
             print(format_canonical_edge_table(records))
         return 0
 
+    if (
+        args.command == "storage"
+        and args.storage_command == "explain-canonical-edge"
+    ):
+        try:
+            canonical_edge_filters_from_args(args)
+            identity_metadata = canonical_edge_identity_metadata_from_args(args)
+            identity_hash = identity_metadata_hash(identity_metadata)
+            record = query_canonical_edge_explanation(
+                psql_args_from_args(args),
+                root_path=args.root_path,
+                source_key=args.source_key,
+                kind=args.kind,
+                target_key=args.target_key,
+                identity_metadata_hash=identity_hash,
+                graph_key_version=args.graph_key_version,
+                psql_command=args.psql_command,
+            )
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(
+                json.dumps(
+                    canonical_edge_explanation_to_jsonable(record),
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(format_canonical_edge_explanation_table(record))
+        return 0
+
     if args.command == "storage" and args.storage_command == "files":
         try:
             records = query_file_records(
@@ -981,6 +1042,18 @@ def canonical_edge_filters_from_args(args) -> None:
         if not validation.valid:
             detail = f": {validation.error}" if validation.error else ""
             raise StorageSchemaError(f"invalid {option} canonical key{detail}")
+
+
+def canonical_edge_identity_metadata_from_args(args) -> dict[str, object]:
+    try:
+        payload = json.loads(args.identity_metadata_json)
+    except json.JSONDecodeError as error:
+        raise StorageSchemaError(
+            "identity-metadata-json must be a JSON object"
+        ) from error
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("identity-metadata-json must be a JSON object")
+    return payload
 
 
 def psql_args_from_args(args) -> list[str]:
