@@ -2250,6 +2250,12 @@ def canonical_node_records_to_jsonable(
     return [record.to_dict() for record in records]
 
 
+def canonical_edge_records_to_jsonable(
+    records: Sequence[CanonicalEdgeRecord],
+) -> list[dict[str, Any]]:
+    return [record.to_dict() for record in records]
+
+
 def edge_records_to_jsonable(records: Sequence[EdgeRecord]) -> list[dict[str, Any]]:
     return [record.to_dict() for record in records]
 
@@ -2320,6 +2326,31 @@ def format_canonical_node_table(records: Sequence[CanonicalNodeRecord]) -> str:
         "canonical_key",
         "kind",
         "display_name",
+        "confidence",
+        "conflict",
+        "first_seen_run_id",
+        "last_seen_run_id",
+    )
+    rendered_rows = [
+        {key: render_table_value(row[key]) for key in columns}
+        for row in rows
+    ]
+    widths = {
+        key: max([len(key), *(len(row[key]) for row in rendered_rows)])
+        for key in columns
+    }
+    lines = [format_table_row(dict(zip(columns, columns, strict=True)), columns, widths)]
+    for row in rendered_rows:
+        lines.append(format_table_row(row, columns, widths))
+    return "\n".join(lines)
+
+
+def format_canonical_edge_table(records: Sequence[CanonicalEdgeRecord]) -> str:
+    rows = [record.to_dict() for record in records]
+    columns = (
+        "source_key",
+        "edge_kind",
+        "target_key",
         "confidence",
         "conflict",
         "first_seen_run_id",

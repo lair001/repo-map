@@ -37,10 +37,12 @@ from repomap_kg.profiles import ProfileValidationError, load_profile
 from repomap_kg.project_identity import PROJECT_IDENTITY
 from repomap_kg.storage import (
     StorageSchemaError,
+    canonical_edge_records_to_jsonable,
     canonical_node_records_to_jsonable,
     edge_records_to_jsonable,
     file_neighborhood_to_jsonable,
     file_node_records_to_jsonable,
+    format_canonical_edge_table,
     format_canonical_node_table,
     format_edge_table,
     format_file_neighborhood_table,
@@ -53,6 +55,7 @@ from repomap_kg.storage import (
     neighborhood_to_jsonable,
     node_records_to_jsonable,
     query_canonical_node_records,
+    query_canonical_edge_records,
     query_edge_records,
     query_file_neighborhood,
     query_file_node_records,
@@ -62,6 +65,22 @@ from repomap_kg.storage import (
     query_node_records,
     query_storage_summary,
     storage_summary_to_jsonable,
+)
+
+CANONICAL_EDGE_KINDS = frozenset(
+    (
+        "defines",
+        "executes",
+        "sources",
+        "reads_env",
+        "writes_env",
+        "mutates_host",
+        "imports",
+        "exposes_script",
+        "depends_on",
+        "wraps",
+        "tests",
+    )
 )
 
 
@@ -247,6 +266,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit stored canonical node records as JSON",
+    )
+    storage_canonical_edges = storage_subcommands.add_parser(
+        "canonical-edges",
+        help="list stored canonical graph edges from Postgres storage",
+    )
+    add_storage_root_argument(storage_canonical_edges)
+    storage_canonical_edges.add_argument(
+        "--kind",
+        help="include only canonical edges with this ADR 0002 edge kind",
+    )
+    storage_canonical_edges.add_argument(
+        "--source-key",
+        help="include only canonical edges from this source key",
+    )
+    storage_canonical_edges.add_argument(
+        "--target-key",
+        help="include only canonical edges to this target key",
+    )
+    storage_canonical_edges.add_argument(
+        "--graph-key-version",
+        type=int,
+        default=GRAPH_KEY_VERSION,
+        help="canonical graph key version; only 1 is currently supported",
+    )
+    add_storage_connection_arguments(storage_canonical_edges)
+    storage_canonical_edges.add_argument(
+        "--json",
+        action="store_true",
+        help="emit stored canonical edge records as JSON",
     )
     storage_files = storage_subcommands.add_parser(
         "files",
@@ -673,6 +721,32 @@ def main(argv: list[str] | None = None) -> int:
             print(format_canonical_node_table(records))
         return 0
 
+    if args.command == "storage" and args.storage_command == "canonical-edges":
+        try:
+            canonical_edge_filters_from_args(args)
+            records = query_canonical_edge_records(
+                psql_args_from_args(args),
+                root_path=args.root_path,
+                kind=args.kind,
+                source_key=args.source_key,
+                target_key=args.target_key,
+                graph_key_version=args.graph_key_version,
+                psql_command=args.psql_command,
+            )
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(
+                json.dumps(
+                    canonical_edge_records_to_jsonable(records),
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(format_canonical_edge_table(records))
+        return 0
+
     if args.command == "storage" and args.storage_command == "files":
         try:
             records = query_file_records(
@@ -887,6 +961,26 @@ def canonical_node_kind_from_args(args) -> str | None:
             raise StorageSchemaError("path-prefix only applies to file canonical nodes")
         kind = "file"
     return kind
+
+
+def canonical_edge_filters_from_args(args) -> None:
+    if args.graph_key_version != GRAPH_KEY_VERSION:
+        raise StorageSchemaError("unsupported graph key version")
+    if args.kind is not None and args.kind not in CANONICAL_EDGE_KINDS:
+        values = ", ".join(sorted(CANONICAL_EDGE_KINDS))
+        raise StorageSchemaError(
+            f"unsupported canonical edge kind: {args.kind}; expected one of {values}"
+        )
+    for option, value in (
+        ("source", args.source_key),
+        ("target", args.target_key),
+    ):
+        if value is None:
+            continue
+        validation = validate_key(value)
+        if not validation.valid:
+            detail = f": {validation.error}" if validation.error else ""
+            raise StorageSchemaError(f"invalid {option} canonical key{detail}")
 
 
 def psql_args_from_args(args) -> list[str]:

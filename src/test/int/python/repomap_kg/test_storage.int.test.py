@@ -718,6 +718,120 @@ FROM canonical_edges;
         self.assertIn("last_seen_run_id", text_stdout)
         self.assertNotIn("metadata", text_stdout)
 
+    def test_storage_canonical_edges_cli_reads_c2_loaded_rows_and_filters(self):
+        require_postgres_binaries()
+        raw_jsonl = canonicalization_fixture(
+            "shell_executes_collapse",
+            "raw_observations.jsonl",
+        )
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            load_exit_code, _load_stdout, load_stderr = run_repo_map_in_process(
+                "storage",
+                "load-files",
+                str(raw_jsonl),
+                "--repository-name",
+                "fixture",
+                "--root-path",
+                "/tmp/fixture",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+                "--json",
+            )
+
+            def run_canonical_edges(*extra_args):
+                return run_repo_map_in_process(
+                    "storage",
+                    "canonical-edges",
+                    "--root-path",
+                    "/tmp/fixture",
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                    *extra_args,
+                )
+
+            all_exit_code, all_stdout, all_stderr = run_canonical_edges("--json")
+            kind_exit_code, kind_stdout, kind_stderr = run_canonical_edges(
+                "--kind",
+                "executes",
+                "--json",
+            )
+            source_exit_code, source_stdout, source_stderr = run_canonical_edges(
+                "--source-key",
+                "file:bin/tool",
+                "--json",
+            )
+            target_exit_code, target_stdout, target_stderr = run_canonical_edges(
+                "--target-key",
+                "tool:nix",
+                "--json",
+            )
+            text_exit_code, text_stdout, text_stderr = run_canonical_edges(
+                "--kind",
+                "executes",
+            )
+
+        self.assertEqual(load_exit_code, 0, load_stderr)
+
+        self.assertEqual(all_exit_code, 0, all_stderr)
+        all_payload = json.loads(all_stdout)
+        self.assertEqual(len(all_payload), 1)
+        edge = all_payload[0]
+        self.assertEqual(edge["source_key"], "file:bin/tool")
+        self.assertEqual(edge["edge_kind"], "executes")
+        self.assertEqual(edge["target_key"], "tool:nix")
+        self.assertEqual(edge["graph_key_version"], 1)
+        self.assertEqual(edge["identity_metadata"], {})
+        self.assertEqual(len(edge["identity_metadata_hash"]), 64)
+        self.assertIn("metadata", edge)
+        self.assertIn("first_seen_run_id", edge)
+        self.assertIn("last_seen_run_id", edge)
+
+        self.assertEqual(kind_exit_code, 0, kind_stderr)
+        self.assertEqual(
+            [record["edge_kind"] for record in json.loads(kind_stdout)],
+            ["executes"],
+        )
+
+        self.assertEqual(source_exit_code, 0, source_stderr)
+        self.assertEqual(
+            [record["source_key"] for record in json.loads(source_stdout)],
+            ["file:bin/tool"],
+        )
+
+        self.assertEqual(target_exit_code, 0, target_stderr)
+        self.assertEqual(
+            [record["target_key"] for record in json.loads(target_stdout)],
+            ["tool:nix"],
+        )
+
+        self.assertEqual(text_exit_code, 0, text_stderr)
+        self.assertIn("source_key", text_stdout)
+        self.assertIn("file:bin/tool", text_stdout)
+        self.assertIn("last_seen_run_id", text_stdout)
+        self.assertNotIn("metadata", text_stdout)
+
     def test_storage_load_files_retains_unsupported_future_observation(self):
         require_postgres_binaries()
         raw_jsonl = canonicalization_fixture(

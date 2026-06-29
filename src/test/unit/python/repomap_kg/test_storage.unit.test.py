@@ -56,9 +56,11 @@ from repomap_kg.storage import (
     identity_metadata_hash,
     raw_observation_payload_hash,
     raw_observation_rows_from_observations,
+    canonical_edge_records_to_jsonable,
     canonical_node_records_to_jsonable,
     canonical_edge_record_from_storage_payload,
     canonical_node_record_from_storage_payload,
+    format_canonical_edge_table,
     format_canonical_node_table,
     query_canonical_edge_records,
     query_canonical_node_records,
@@ -649,6 +651,43 @@ SELECT 1;
             ],
         )
 
+    def test_canonical_edge_records_to_jsonable_preserves_public_fields(self):
+        hash_text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        records = (
+            CanonicalEdgeRecord(
+                source_key="file:bin/tool",
+                edge_kind="executes",
+                target_key="tool:nix",
+                graph_key_version=1,
+                identity_metadata={},
+                identity_metadata_hash=hash_text,
+                metadata={"commands": ["nix"]},
+                confidence="extracted",
+                conflict=False,
+                first_seen_run_id=10,
+                last_seen_run_id=12,
+            ),
+        )
+
+        self.assertEqual(
+            canonical_edge_records_to_jsonable(records),
+            [
+                {
+                    "source_key": "file:bin/tool",
+                    "edge_kind": "executes",
+                    "target_key": "tool:nix",
+                    "graph_key_version": 1,
+                    "identity_metadata": {},
+                    "identity_metadata_hash": hash_text,
+                    "metadata": {"commands": ["nix"]},
+                    "confidence": "extracted",
+                    "conflict": False,
+                    "first_seen_run_id": 10,
+                    "last_seen_run_id": 12,
+                }
+            ],
+        )
+
     def test_format_canonical_node_table_uses_contract_columns(self):
         records = (
             CanonicalNodeRecord(
@@ -669,6 +708,36 @@ SELECT 1;
         self.assertIn("canonical_key", table)
         self.assertIn("display_name", table)
         self.assertIn("first_seen_run_id", table)
+        self.assertIn("tool:nix", table)
+        self.assertIn("12", table)
+        self.assertNotIn("metadata", table)
+        self.assertNotIn("omitted", table)
+
+    def test_format_canonical_edge_table_uses_contract_columns(self):
+        hash_text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        records = (
+            CanonicalEdgeRecord(
+                source_key="file:bin/tool",
+                edge_kind="executes",
+                target_key="tool:nix",
+                graph_key_version=1,
+                identity_metadata={},
+                identity_metadata_hash=hash_text,
+                metadata={"omitted": True},
+                confidence="extracted",
+                conflict=False,
+                first_seen_run_id=None,
+                last_seen_run_id=12,
+            ),
+        )
+
+        table = format_canonical_edge_table(records)
+
+        self.assertIn("source_key", table)
+        self.assertIn("edge_kind", table)
+        self.assertIn("target_key", table)
+        self.assertIn("first_seen_run_id", table)
+        self.assertIn("file:bin/tool", table)
         self.assertIn("tool:nix", table)
         self.assertIn("12", table)
         self.assertNotIn("metadata", table)
