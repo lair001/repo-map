@@ -230,7 +230,7 @@ CREATE TABLE canonical_edges (
             'imports',
             'exposes_script',
             'depends_on',
-            'invokes',
+            'wraps',
             'tests'
         )
     ),
