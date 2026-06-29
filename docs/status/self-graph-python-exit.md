@@ -98,25 +98,31 @@ It emitted 1,490 raw observations:
 
 ## Verification
 
-The unit suite passed with the new Python extractor and canonicalization
-coverage:
+The temporary Postgres IPC issue was resolved before final S1 verification.
+These commands passed:
 
 ```sh
 python3 tools/run_tests.py --suite unit
-```
-
-The integration suite could not complete in this run because the host had
-orphaned shared-memory segments that caused temporary Postgres `initdb` to fail
-with `could not create shared memory segment`. The S1 integration test is in
-place and should be rerun after IPC cleanup or reboot:
-
-```sh
 python3 tools/run_tests.py --suite int
+python3 tools/run_tests.py --suite all
+PYTHONPYCACHEPREFIX=/private/tmp/repo-map-pycache python3 -m compileall -q src/main/python tools
+git diff --check
+git diff --cached --check
 ```
 
 ## Decision
 
-Phase S1 has a Python AST extractor, discovery integration, canonical mapping,
-golden fixtures, and storage readback coverage for Python facts. The remaining
-external verification dependency is a clean temporary-Postgres environment for
-the integration suite.
+Phase S1 is complete.
+
+RepoMap can now produce a useful Python-level canonical graph of itself. The
+final self-discovery run produced 1,490 raw observations, including 39
+`python.module` observations, 519 `python.import` observations, and the other
+recorded counts in the table above.
+
+## Known Gaps
+
+- Imports inside functions/classes are not yet extracted.
+- Nested classes/functions are not yet extracted as separate stable symbols.
+- Dynamic imports are not yet modeled.
+- Nix extraction has not started.
+- MCP has not started.
