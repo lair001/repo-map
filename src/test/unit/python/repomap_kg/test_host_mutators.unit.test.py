@@ -2,9 +2,12 @@ import unittest
 
 from repomap_kg.host_mutators import (
     filter_host_mutator_records,
+    format_host_mutator_summary_table,
     format_host_mutator_table,
     host_mutator_records_from_observations,
+    host_mutator_summaries_to_jsonable,
     host_mutators_to_jsonable,
+    summarize_host_mutator_records,
 )
 from repomap_kg.observations import RawObservation
 
@@ -180,6 +183,104 @@ class HostMutatorUnitTests(unittest.TestCase):
                     "tool": "launchctl",
                 }
             ],
+        )
+
+    def test_summarize_host_mutator_records_groups_category_and_tool(self):
+        records = host_mutator_records_from_observations(
+            [
+                host_mutation_observation(
+                    source_id="scripts/maintain.sh#host-mutation:4:rm",
+                    path="scripts/maintain.sh",
+                    line=4,
+                    name="rm",
+                    target="host:filesystem-mutation",
+                    category="filesystem-mutation",
+                    tool="rm",
+                    privileged=True,
+                    reason="rm host filesystem path",
+                    argv=["sudo", "rm", "-rf", "/Library/Caches/example"],
+                    effective_argv=["rm", "-rf", "/Library/Caches/example"],
+                ),
+                host_mutation_observation(
+                    source_id="scripts/maintain.sh#host-mutation:5:rm",
+                    path="scripts/maintain.sh",
+                    line=5,
+                    name="rm",
+                    target="host:filesystem-mutation",
+                    category="filesystem-mutation",
+                    tool="rm",
+                    privileged=False,
+                    reason="rm host filesystem path",
+                    argv=["rm", "-rf", "~/Library/Caches/example"],
+                    effective_argv=["rm", "-rf", "~/Library/Caches/example"],
+                ),
+                host_mutation_observation(
+                    source_id="scripts/maintain.sh#host-mutation:2:package",
+                    path="scripts/maintain.sh",
+                    line=2,
+                    name="brew install",
+                    target="host:package-management",
+                    category="package-management",
+                    tool="brew",
+                    privileged=False,
+                    reason="brew install",
+                    argv=["brew", "install", "postgresql"],
+                    effective_argv=["brew", "install", "postgresql"],
+                ),
+            ]
+        )
+
+        summaries = summarize_host_mutator_records(records)
+
+        self.assertEqual(
+            host_mutator_summaries_to_jsonable(summaries),
+            [
+                {
+                    "category": "filesystem-mutation",
+                    "count": 2,
+                    "privileged_count": 1,
+                    "tool": "rm",
+                },
+                {
+                    "category": "package-management",
+                    "count": 1,
+                    "privileged_count": 0,
+                    "tool": "brew",
+                },
+            ],
+        )
+
+    def test_format_host_mutator_summary_table_uses_count_columns(self):
+        records = host_mutator_records_from_observations(
+            [
+                host_mutation_observation(
+                    source_id="scripts/maintain.sh#host-mutation:4:rm",
+                    path="scripts/maintain.sh",
+                    line=4,
+                    name="rm",
+                    target="host:filesystem-mutation",
+                    category="filesystem-mutation",
+                    tool="rm",
+                    privileged=True,
+                    reason="rm host filesystem path",
+                    argv=["sudo", "rm", "-rf", "/Library/Caches/example"],
+                    effective_argv=["rm", "-rf", "/Library/Caches/example"],
+                )
+            ]
+        )
+
+        table = format_host_mutator_summary_table(
+            summarize_host_mutator_records(records)
+        )
+
+        self.assertEqual(
+            table,
+            "\n".join(
+                [
+                    "category             tool  count  privileged_count",
+                    "filesystem-mutation  rm    1      1",
+                ]
+            ),
         )
 
 

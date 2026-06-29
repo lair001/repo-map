@@ -31,6 +31,17 @@ class HostMutatorRecord:
         return payload
 
 
+@dataclass(frozen=True)
+class HostMutatorSummaryRecord:
+    category: str
+    tool: str
+    count: int
+    privileged_count: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def host_mutator_records_from_observations(
     observations: Iterable[RawObservation],
 ) -> tuple[HostMutatorRecord, ...]:
@@ -60,6 +71,25 @@ def filter_host_mutator_records(
     return tuple(filtered)
 
 
+def summarize_host_mutator_records(
+    records: Iterable[HostMutatorRecord],
+) -> tuple[HostMutatorSummaryRecord, ...]:
+    counts: dict[tuple[str, str], tuple[int, int]] = {}
+    for record in records:
+        key = (record.category, record.tool)
+        count, privileged_count = counts.get(key, (0, 0))
+        counts[key] = (count + 1, privileged_count + int(record.privileged))
+    return tuple(
+        HostMutatorSummaryRecord(
+            category=category,
+            tool=tool,
+            count=count,
+            privileged_count=privileged_count,
+        )
+        for (category, tool), (count, privileged_count) in sorted(counts.items())
+    )
+
+
 def record_from_observation(observation: RawObservation) -> HostMutatorRecord:
     metadata = observation.metadata
     return HostMutatorRecord(
@@ -83,6 +113,12 @@ def host_mutators_to_jsonable(
     return [record.to_dict() for record in records]
 
 
+def host_mutator_summaries_to_jsonable(
+    records: Iterable[HostMutatorSummaryRecord],
+) -> list[dict[str, Any]]:
+    return [record.to_dict() for record in records]
+
+
 def format_host_mutator_table(records: Iterable[HostMutatorRecord]) -> str:
     rows = [record.to_dict() for record in records]
     columns = ("path", "line", "category", "tool", "privileged", "name")
@@ -94,7 +130,30 @@ def format_host_mutator_table(records: Iterable[HostMutatorRecord]) -> str:
         key: max([len(key), *(len(row[key]) for row in rendered_rows)])
         for key in columns
     }
-    lines = [format_table_row(dict(zip(columns, columns, strict=True)), columns, widths)]
+    lines = [
+        format_table_row(dict(zip(columns, columns, strict=True)), columns, widths)
+    ]
+    for row in rendered_rows:
+        lines.append(format_table_row(row, columns, widths))
+    return "\n".join(lines)
+
+
+def format_host_mutator_summary_table(
+    records: Iterable[HostMutatorSummaryRecord],
+) -> str:
+    rows = [record.to_dict() for record in records]
+    columns = ("category", "tool", "count", "privileged_count")
+    rendered_rows = [
+        {key: render_table_value(row[key]) for key in columns}
+        for row in rows
+    ]
+    widths = {
+        key: max([len(key), *(len(row[key]) for row in rendered_rows)])
+        for key in columns
+    }
+    lines = [
+        format_table_row(dict(zip(columns, columns, strict=True)), columns, widths)
+    ]
     for row in rendered_rows:
         lines.append(format_table_row(row, columns, widths))
     return "\n".join(lines)

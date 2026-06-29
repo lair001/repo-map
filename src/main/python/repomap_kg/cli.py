@@ -23,9 +23,12 @@ from repomap_kg.files import (
 )
 from repomap_kg.host_mutators import (
     filter_host_mutator_records,
+    format_host_mutator_summary_table,
     format_host_mutator_table,
     host_mutator_records_from_observations,
+    host_mutator_summaries_to_jsonable,
     host_mutators_to_jsonable,
+    summarize_host_mutator_records,
 )
 from repomap_kg.normalization import normalize_observations
 from repomap_kg.observations import ObservationValidationError, read_observations_jsonl
@@ -113,6 +116,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     host_mutators.add_argument("--category", help="include only this category")
     host_mutators.add_argument("--tool", help="include only this tool")
+
+    host_mutators_summary = subparsers.add_parser(
+        "host-mutators-summary",
+        help="summarize host-mutating commands from raw observation JSONL",
+    )
+    host_mutators_summary.add_argument(
+        "jsonl_path",
+        help="raw observation JSONL path, or - for stdin",
+    )
+    host_mutators_summary.add_argument(
+        "--json",
+        action="store_true",
+        help="emit host-mutator summary records as JSON",
+    )
+    host_mutators_summary.add_argument(
+        "--category",
+        help="include only this category",
+    )
+    host_mutators_summary.add_argument("--tool", help="include only this tool")
 
     files = subparsers.add_parser(
         "files",
@@ -335,6 +357,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="emit stored host-mutator records as JSON",
     )
+    storage_host_mutators_summary = storage_subcommands.add_parser(
+        "host-mutators-summary",
+        help="summarize stored host-mutating commands from Postgres storage",
+    )
+    add_storage_root_argument(storage_host_mutators_summary)
+    storage_host_mutators_summary.add_argument(
+        "--category",
+        help="include only this host mutation category",
+    )
+    storage_host_mutators_summary.add_argument(
+        "--tool",
+        help="include only this host mutation tool",
+    )
+    add_storage_connection_arguments(storage_host_mutators_summary)
+    storage_host_mutators_summary.add_argument(
+        "--json",
+        action="store_true",
+        help="emit stored host-mutator summary records as JSON",
+    )
     storage_summary = storage_subcommands.add_parser(
         "summary",
         help="summarize stored repository graph counts from Postgres storage",
@@ -442,6 +483,30 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(host_mutators_to_jsonable(records), sort_keys=True))
         else:
             print(format_host_mutator_table(records))
+        return 0
+
+    if args.command == "host-mutators-summary":
+        try:
+            observations = read_observations_argument(args.jsonl_path)
+        except ObservationValidationError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        records = host_mutator_records_from_observations(observations)
+        records = filter_host_mutator_records(
+            records,
+            category=args.category,
+            tool=args.tool,
+        )
+        summaries = summarize_host_mutator_records(records)
+        if args.json:
+            print(
+                json.dumps(
+                    host_mutator_summaries_to_jsonable(summaries),
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(format_host_mutator_summary_table(summaries))
         return 0
 
     if args.command == "observations" and args.observation_command == "normalize":
@@ -641,6 +706,30 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(host_mutators_to_jsonable(records), sort_keys=True))
         else:
             print(format_host_mutator_table(records))
+        return 0
+
+    if args.command == "storage" and args.storage_command == "host-mutators-summary":
+        try:
+            records = query_host_mutator_records(
+                psql_args_from_args(args),
+                root_path=args.root_path,
+                category=args.category,
+                tool=args.tool,
+                psql_command=args.psql_command,
+            )
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        summaries = summarize_host_mutator_records(records)
+        if args.json:
+            print(
+                json.dumps(
+                    host_mutator_summaries_to_jsonable(summaries),
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(format_host_mutator_summary_table(summaries))
         return 0
 
     if args.command == "storage" and args.storage_command == "summary":

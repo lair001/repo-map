@@ -740,6 +740,109 @@ script_dirs = ["scripts"]
             "system/com.example.agent",
         ])
 
+    def test_host_mutators_summary_command_prints_discovered_counts_as_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "fixture-repo"
+            raw_jsonl = Path(tmpdir) / "raw-observations.jsonl"
+            self.write_fixture(
+                fixture / "scripts" / "maintain.sh",
+                (
+                    "#!/usr/bin/env bash\n"
+                    "brew install postgresql\n"
+                    "sudo launchctl bootout system/com.example.agent\n"
+                    "nix build .#checks\n"
+                ),
+            )
+
+            discover_exit, discover_stdout, discover_stderr = (
+                self.run_module_entrypoint("discover", str(fixture), "--jsonl")
+            )
+            raw_jsonl.write_text(discover_stdout)
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "host-mutators-summary",
+                str(raw_jsonl),
+                "--json",
+            )
+
+        payload = json.loads(stdout)
+        self.assertEqual(discover_exit, 0, discover_stderr)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(payload, [
+            {
+                "category": "package-management",
+                "count": 1,
+                "privileged_count": 0,
+                "tool": "brew",
+            },
+            {
+                "category": "service-management",
+                "count": 1,
+                "privileged_count": 1,
+                "tool": "launchctl",
+            },
+        ])
+
+    def test_host_mutators_summary_command_prints_raw_jsonl_as_table(self):
+        observations = [
+            RawObservation(
+                kind="shell.host_mutation",
+                source_id="scripts/maintain.sh#host-mutation:2:package",
+                path="scripts/maintain.sh",
+                start_line=2,
+                end_line=2,
+                name="brew install",
+                target="host:package-management",
+                confidence="heuristic",
+                extractor="fixture-shell",
+                extractor_version="0.1.0",
+                metadata={
+                    "argv": ["brew", "install", "postgresql"],
+                    "category": "package-management",
+                    "effective_argv": ["brew", "install", "postgresql"],
+                    "privileged": False,
+                    "reason": "brew install",
+                    "tool": "brew",
+                },
+            ),
+            RawObservation(
+                kind="shell.host_mutation",
+                source_id="scripts/maintain.sh#host-mutation:3:service",
+                path="scripts/maintain.sh",
+                start_line=3,
+                end_line=3,
+                name="launchctl bootout",
+                target="host:service-management",
+                confidence="heuristic",
+                extractor="fixture-shell",
+                extractor_version="0.1.0",
+                metadata={
+                    "argv": ["sudo", "launchctl", "bootout", "system/example"],
+                    "category": "service-management",
+                    "effective_argv": ["launchctl", "bootout", "system/example"],
+                    "privileged": True,
+                    "reason": "launchctl bootout",
+                    "tool": "launchctl",
+                },
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_jsonl = Path(tmpdir) / "raw-observations.jsonl"
+            write_observations_jsonl(observations, raw_jsonl)
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "host-mutators-summary",
+                str(raw_jsonl),
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("category", stdout)
+        self.assertIn("privileged_count", stdout)
+        self.assertIn("package-management", stdout)
+        self.assertIn("service-management", stdout)
+        self.assertIn("launchctl", stdout)
+        self.assertEqual(stderr, "")
+
     def test_host_mutators_command_prints_raw_jsonl_as_table(self):
         observation = RawObservation(
             kind="shell.host_mutation",

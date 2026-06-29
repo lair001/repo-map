@@ -98,6 +98,8 @@ class CliUnitTests(unittest.TestCase):
                 ["--root-path", "/tmp/fixture", "--path", "bin/tool"],
             ),
             ("edges", ["--root-path", "/tmp/fixture"]),
+            ("host-mutators", ["--root-path", "/tmp/fixture"]),
+            ("host-mutators-summary", ["--root-path", "/tmp/fixture"]),
             ("summary", ["--root-path", "/tmp/fixture"]),
         )
 
@@ -376,6 +378,95 @@ class CliUnitTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual([record["name"] for record in payload], [
             "launchctl bootout",
+        ])
+
+    def test_host_mutators_summary_prints_json_view(self):
+        privileged_rm = RawObservation(
+            kind="shell.host_mutation",
+            source_id="scripts/maintain.sh#host-mutation:4:rm",
+            path="scripts/maintain.sh",
+            start_line=4,
+            end_line=4,
+            name="rm",
+            target="host:filesystem-mutation",
+            confidence="heuristic",
+            extractor="fixture-shell",
+            extractor_version="0.1.0",
+            metadata={
+                "argv": ["sudo", "rm", "-rf", "/Library/Caches/example"],
+                "category": "filesystem-mutation",
+                "effective_argv": ["rm", "-rf", "/Library/Caches/example"],
+                "privileged": True,
+                "reason": "rm host filesystem path",
+                "tool": "rm",
+            },
+        )
+        user_rm = RawObservation(
+            kind="shell.host_mutation",
+            source_id="scripts/maintain.sh#host-mutation:5:rm",
+            path="scripts/maintain.sh",
+            start_line=5,
+            end_line=5,
+            name="rm",
+            target="host:filesystem-mutation",
+            confidence="heuristic",
+            extractor="fixture-shell",
+            extractor_version="0.1.0",
+            metadata={
+                "argv": ["rm", "-rf", "~/Library/Caches/example"],
+                "category": "filesystem-mutation",
+                "effective_argv": ["rm", "-rf", "~/Library/Caches/example"],
+                "privileged": False,
+                "reason": "rm host filesystem path",
+                "tool": "rm",
+            },
+        )
+        brew = RawObservation(
+            kind="shell.host_mutation",
+            source_id="scripts/maintain.sh#host-mutation:2:package",
+            path="scripts/maintain.sh",
+            start_line=2,
+            end_line=2,
+            name="brew install",
+            target="host:package-management",
+            confidence="heuristic",
+            extractor="fixture-shell",
+            extractor_version="0.1.0",
+            metadata={
+                "argv": ["brew", "install", "postgresql"],
+                "category": "package-management",
+                "effective_argv": ["brew", "install", "postgresql"],
+                "privileged": False,
+                "reason": "brew install",
+                "tool": "brew",
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl_path = Path(tmpdir) / "raw-observations.jsonl"
+            write_observations_jsonl([privileged_rm, user_rm, brew], jsonl_path)
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "host-mutators-summary",
+                        str(jsonl_path),
+                        "--category",
+                        "filesystem-mutation",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload, [
+            {
+                "category": "filesystem-mutation",
+                "count": 2,
+                "privileged_count": 1,
+                "tool": "rm",
+            }
         ])
 
     def test_host_mutators_reports_validation_errors(self):
@@ -1093,6 +1184,96 @@ class CliUnitTests(unittest.TestCase):
                     [
                         "storage",
                         "host-mutators",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("psql did not return host-mutators", stderr.getvalue())
+
+    def test_storage_host_mutators_summary_prints_json_records(self):
+        records = (
+            HostMutatorRecord(
+                path="scripts/maintain.sh",
+                line=4,
+                name="rm",
+                target="host:filesystem-mutation",
+                category="filesystem-mutation",
+                tool="rm",
+                privileged=True,
+                confidence="heuristic",
+                reason="rm host filesystem path",
+                argv=("sudo", "rm", "-rf", "/Library/Caches/example"),
+                effective_argv=("rm", "-rf", "/Library/Caches/example"),
+            ),
+            HostMutatorRecord(
+                path="scripts/maintain.sh",
+                line=5,
+                name="rm",
+                target="host:filesystem-mutation",
+                category="filesystem-mutation",
+                tool="rm",
+                privileged=False,
+                confidence="heuristic",
+                reason="rm host filesystem path",
+                argv=("rm", "-rf", "~/Library/Caches/example"),
+                effective_argv=("rm", "-rf", "~/Library/Caches/example"),
+            ),
+        )
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_host_mutator_records",
+            return_value=records,
+        ) as query:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "host-mutators-summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--category",
+                        "filesystem-mutation",
+                        "--tool",
+                        "rm",
+                        "--pg-database",
+                        "postgres",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload, [
+            {
+                "category": "filesystem-mutation",
+                "count": 2,
+                "privileged_count": 1,
+                "tool": "rm",
+            }
+        ])
+        self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
+        self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+        self.assertEqual(
+            query.call_args.kwargs["category"],
+            "filesystem-mutation",
+        )
+        self.assertEqual(query.call_args.kwargs["tool"], "rm")
+
+    def test_storage_host_mutators_summary_reports_query_errors(self):
+        stderr = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_host_mutator_records",
+            side_effect=StorageSchemaError("psql did not return host-mutators"),
+        ):
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "storage",
+                        "host-mutators-summary",
                         "--root-path",
                         "/tmp/fixture",
                     ]

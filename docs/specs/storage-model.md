@@ -196,7 +196,11 @@ Stored host-mutating command rows can be read back with
 `repomap-kg storage host-mutators`, reconstructing the same table and JSON
 shape as the raw-JSONL `host-mutators` command from stored `shell.host_mutation`
 nodes, their host target edges, and evidence-backed file paths. Both raw and
-storage host-mutator readback support `--category` and `--tool` filters.
+storage host-mutator readback support `--category` and `--tool` filters. Raw
+and storage host-mutator summaries can be read back with
+`repomap-kg host-mutators-summary` and
+`repomap-kg storage host-mutators-summary`, returning counts by category and
+tool with privileged counts.
 Repository storage counts can be read back with `repomap-kg storage summary`,
 returning repository identity, latest run id, and counts for runs, files, nodes,
 edges, and evidence as table or JSON output.
