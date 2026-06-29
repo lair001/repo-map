@@ -59,12 +59,15 @@ it emits line-backed `shell.command` observations for simple command invocations
 and `shell.source` observations for static `source` and `.` includes, and
 `shell.env` observations for static environment variable reads/writes. It also
 emits first-pass `shell.host_mutation` observations for obvious package
-management, service management, and system activation command shapes. It skips
-comments, shell control keywords, invalid shell syntax, dynamic source paths,
-and absolute or repository-escaping source paths. Commands target tools as
-`tool:<command>`; sourced files target `file:<repo-relative-path>`; environment
-facts target `env:<VARIABLE>`; host mutations target `host:<category>`.
-Parser-backed shell expansion remains a future slice.
+management, service management, system activation, and filesystem mutation
+command shapes. Filesystem mutation classification is intentionally limited to
+obvious `rm`, `mv`, and `cp` shapes that touch host paths such as `/...` or
+`~...`, or use a recognized privilege wrapper. It skips comments, shell control
+keywords, invalid shell syntax, dynamic source paths, and absolute or
+repository-escaping source paths. Commands target tools as `tool:<command>`;
+sourced files target `file:<repo-relative-path>`; environment facts target
+`env:<VARIABLE>`; host mutations target `host:<category>`. Parser-backed shell
+expansion remains a future slice.
 
 Candidate parser families include `mvdan/sh`, Tree-sitter Bash, and bashlex.
 The project should choose based on language coverage, structured AST quality,

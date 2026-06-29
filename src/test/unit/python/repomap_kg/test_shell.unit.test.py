@@ -267,6 +267,73 @@ class ShellExtractorUnitTests(unittest.TestCase):
         )
         self.assertEqual(mutations[2].metadata["argv"][0], "sudo")
 
+    def test_extract_shell_observations_classifies_host_filesystem_mutations(self):
+        observations = extract_shell_observations(
+            "scripts/maintain.sh",
+            (
+                "#!/usr/bin/env bash\n"
+                "sudo rm -rf /Library/Caches/example\n"
+                "mv build/tool /usr/local/bin/tool\n"
+                "cp scripts/tool ~/.local/bin/tool\n"
+                "rm build/output\n"
+                "cp /etc/hosts ./hosts.copy\n"
+            ),
+        )
+
+        mutations = [
+            observation
+            for observation in observations
+            if observation.kind == "shell.host_mutation"
+        ]
+        self.assertEqual(
+            [
+                (
+                    observation.name,
+                    observation.target,
+                    observation.metadata["category"],
+                    observation.metadata["tool"],
+                    observation.metadata["privileged"],
+                    observation.metadata["reason"],
+                )
+                for observation in mutations
+            ],
+            [
+                (
+                    "rm",
+                    "host:filesystem-mutation",
+                    "filesystem-mutation",
+                    "rm",
+                    True,
+                    "rm host filesystem path",
+                ),
+                (
+                    "mv",
+                    "host:filesystem-mutation",
+                    "filesystem-mutation",
+                    "mv",
+                    False,
+                    "mv host filesystem path",
+                ),
+                (
+                    "cp",
+                    "host:filesystem-mutation",
+                    "filesystem-mutation",
+                    "cp",
+                    False,
+                    "cp host filesystem path",
+                ),
+            ],
+        )
+        self.assertEqual(
+            mutations[0].source_id,
+            "scripts/maintain.sh#host-mutation:2:filesystem-mutation-rm",
+        )
+        self.assertEqual(
+            mutations[0].metadata["effective_argv"],
+            ["rm", "-rf", "/Library/Caches/example"],
+        )
+        self.assertEqual(mutations[0].metadata["argv"][0], "sudo")
+
     def test_extract_shell_observations_skips_non_mutating_commands(self):
         observations = extract_shell_observations(
             "scripts/check.sh",

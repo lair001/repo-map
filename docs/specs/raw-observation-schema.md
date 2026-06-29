@@ -77,14 +77,16 @@ The same extractor emits `shell.host_mutation` observations for conservative
 first-pass classification of obvious host-mutating command shapes. The initial
 classifier recognizes package-management commands such as `brew install` and
 `nix profile install`, service-management commands such as `launchctl bootout`,
-and system activation through `darwin-rebuild switch`. Their metadata contains:
+system activation through `darwin-rebuild switch`, and filesystem mutations
+through obvious `rm`, `mv`, and `cp` shapes that touch host paths such as `/...`
+or `~...`. Their metadata contains:
 
 - `argv`: parsed original command arguments.
 - `effective_argv`: command arguments after a recognized wrapper such as
   `sudo` is removed.
 - `tool`: the effective tool name.
 - `category`: host mutation category such as `package-management`,
-  `service-management`, or `system-activation`.
+  `service-management`, `system-activation`, or `filesystem-mutation`.
 - `privileged`: whether a recognized privilege wrapper was present.
 - `reason`: the matched command shape.
 - `raw`: the source line text for the command.

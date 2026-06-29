@@ -40,8 +40,8 @@ compact storage summaries. It also includes a conservative first shell
 extractor that emits simple command invocations, sourced-file includes, and
 environment variable reads/writes as raw observations during discovery, plus
 first-pass host-mutating command classifications for obvious package, service,
-and system activation commands with raw JSONL readback. The initial specs live
-under `docs/specs/`.
+system activation, and filesystem mutation commands with raw JSONL readback.
+The initial specs live under `docs/specs/`.
 
 ## Development
 

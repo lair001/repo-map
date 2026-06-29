@@ -487,6 +487,11 @@ class CliIntegrationTests(unittest.TestCase):
                     "nix profile install nixpkgs#ripgrep\n"
                     "sudo launchctl bootout system/com.example.agent\n"
                     "darwin-rebuild switch --flake ~/.flakes/nix-darwin\n"
+                    "sudo rm -rf /Library/Caches/example\n"
+                    "mv build/tool /usr/local/bin/tool\n"
+                    "cp scripts/tool ~/.local/bin/tool\n"
+                    "rm build/output\n"
+                    "cp /etc/hosts ./hosts.copy\n"
                     "nix build .#checks\n"
                 ),
             )
@@ -517,11 +522,18 @@ class CliIntegrationTests(unittest.TestCase):
                 ("nix profile install", "host:package-management", False),
                 ("launchctl bootout", "host:service-management", True),
                 ("darwin-rebuild switch", "host:system-activation", False),
+                ("rm", "host:filesystem-mutation", True),
+                ("mv", "host:filesystem-mutation", False),
+                ("cp", "host:filesystem-mutation", False),
             ],
         )
         self.assertEqual(
             mutations[2]["metadata"]["effective_argv"],
             ["launchctl", "bootout", "system/com.example.agent"],
+        )
+        self.assertEqual(
+            mutations[4]["metadata"]["effective_argv"],
+            ["rm", "-rf", "/Library/Caches/example"],
         )
 
     def test_discover_command_applies_project_profile(self):

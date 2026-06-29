@@ -61,6 +61,8 @@ LAUNCHCTL_MUTATING_VERBS = frozenset(
         "unload",
     }
 )
+FILESYSTEM_MUTATING_TOOLS = frozenset({"cp", "mv", "rm"})
+FILESYSTEM_TARGET_DIRECTORY_OPTIONS = frozenset({"-t", "--target-directory"})
 SUDO_OPTIONS_WITH_VALUES = frozenset({"-C", "-g", "-h", "-p", "-T", "-u"})
 
 
@@ -376,6 +378,16 @@ def classify_host_mutation(argv: tuple[str, ...]) -> HostMutation | None:
             effective_argv=effective_argv,
             privileged=privileged,
         )
+    if tool in FILESYSTEM_MUTATING_TOOLS and filesystem_mutates_host(
+        tool, effective_argv, privileged
+    ):
+        return HostMutation(
+            category="filesystem-mutation",
+            reason=f"{tool} host filesystem path",
+            tool=tool,
+            effective_argv=effective_argv,
+            privileged=privileged,
+        )
     return None
 
 
@@ -391,7 +403,60 @@ def effective_host_argv(argv: tuple[str, ...]) -> tuple[tuple[str, ...], bool]:
     return tuple(argv[index:]), True
 
 
+def filesystem_mutates_host(
+    tool: str, effective_argv: tuple[str, ...], privileged: bool
+) -> bool:
+    operands, target_dirs = filesystem_operands(effective_argv)
+    if not operands and not target_dirs:
+        return False
+    if privileged:
+        return True
+    if tool == "cp":
+        destinations = target_dirs
+        if not destinations and len(operands) > 1:
+            destinations = (operands[-1],)
+        return any(is_obvious_host_path(path) for path in destinations)
+    if tool == "mv":
+        return any(is_obvious_host_path(path) for path in (*operands, *target_dirs))
+    if tool == "rm":
+        return any(is_obvious_host_path(path) for path in operands)
+    return False
+
+
+def filesystem_operands(
+    argv: tuple[str, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    operands = []
+    target_dirs = []
+    index = 1
+    while index < len(argv):
+        word = argv[index]
+        if word == "--":
+            operands.extend(argv[index + 1 :])
+            break
+        if word in FILESYSTEM_TARGET_DIRECTORY_OPTIONS and index + 1 < len(argv):
+            target_dirs.append(argv[index + 1])
+            index += 2
+            continue
+        if word.startswith("--target-directory="):
+            target_dirs.append(word.split("=", 1)[1])
+            index += 1
+            continue
+        if word.startswith("-"):
+            index += 1
+            continue
+        operands.append(word)
+        index += 1
+    return tuple(operands), tuple(target_dirs)
+
+
+def is_obvious_host_path(path: str) -> bool:
+    return path.startswith("/") or path.startswith("~")
+
+
 def host_mutation_name(mutation: HostMutation) -> str:
+    if mutation.category == "filesystem-mutation":
+        return mutation.tool
     if (
         mutation.tool == "nix"
         and len(mutation.effective_argv) > 2
