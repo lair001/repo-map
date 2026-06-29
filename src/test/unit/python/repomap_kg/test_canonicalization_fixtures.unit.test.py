@@ -14,6 +14,7 @@ class CanonicalizationFixtureTests(unittest.TestCase):
     def test_golden_fixtures_match_exact_json(self):
         fixture_names = (
             "files_basic",
+            "files_conflict",
             "shell_executes_nix",
             "shell_executes_collapse",
             "shell_source_static",

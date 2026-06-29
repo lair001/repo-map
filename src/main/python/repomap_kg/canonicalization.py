@@ -35,6 +35,15 @@ FILE_METADATA_KEYS = (
     "generated",
 )
 
+FILE_CONFLICT_METADATA_KEYS = frozenset(
+    (
+        "language",
+        "content_hash",
+        "executable",
+        "generated",
+    )
+)
+
 SECRET_PRONE_ENV_MARKERS = (
     "SECRET",
     "TOKEN",
@@ -184,14 +193,25 @@ def _canonicalize_file_observation(
         )
         return
 
-    if canonical_key not in nodes:
-        _upsert_node(
-            nodes,
-            canonical_key=canonical_key,
-            kind="file",
-            display_name=observation.path,
-            metadata=_file_node_metadata(observation.metadata),
-            confidence=observation.confidence,
+    conflict_fields = _upsert_file_node(
+        nodes,
+        canonical_key=canonical_key,
+        display_name=observation.path,
+        metadata=_file_node_metadata(observation.metadata),
+        confidence=observation.confidence,
+    )
+    for field in conflict_fields:
+        diagnostics.append(
+            CanonicalizationDiagnostic(
+                severity="warning",
+                category="conflicting_evidence",
+                message=f"file metadata has conflicting evidence for {field}",
+                raw_observation_ordinal=ordinal,
+                raw_source_id=observation.source_id,
+                path=observation.path,
+                field=f"metadata.{field}",
+                value=observation.metadata.get(field),
+            )
         )
 
     evidence_record = _evidence_from_observation(observation, ordinal)
@@ -943,6 +963,68 @@ def _upsert_node(
     )
 
 
+def _upsert_file_node(
+    nodes: dict[str, CanonicalNode],
+    *,
+    canonical_key: str,
+    display_name: str,
+    metadata: Mapping[str, Any],
+    confidence: str,
+) -> tuple[str, ...]:
+    existing = nodes.get(canonical_key)
+    if existing is None:
+        nodes[canonical_key] = CanonicalNode(
+            canonical_key=canonical_key,
+            graph_key_version=GRAPH_KEY_VERSION,
+            kind="file",
+            display_name=display_name,
+            metadata=dict(metadata),
+            confidence=confidence,
+            conflict=False,
+        )
+        return ()
+
+    merged_metadata, conflict_fields = _merge_file_node_metadata(
+        existing.metadata, metadata
+    )
+    nodes[canonical_key] = CanonicalNode(
+        canonical_key=existing.canonical_key,
+        graph_key_version=existing.graph_key_version,
+        kind=existing.kind,
+        display_name=existing.display_name,
+        metadata=merged_metadata,
+        confidence=_stronger_confidence(existing.confidence, confidence),
+        conflict=existing.conflict or bool(conflict_fields),
+    )
+    return tuple(conflict_fields)
+
+
+def _merge_file_node_metadata(
+    existing: Mapping[str, Any], incoming: Mapping[str, Any]
+) -> tuple[dict[str, Any], list[str]]:
+    merged = dict(existing)
+    conflict_fields: list[str] = []
+    for key, value in incoming.items():
+        if key not in merged:
+            merged[key] = value
+            continue
+
+        current_values = _metadata_value_list(merged[key])
+        incoming_values = _metadata_value_list(value)
+        new_values = [
+            incoming_value
+            for incoming_value in incoming_values
+            if incoming_value not in current_values
+        ]
+        if not new_values:
+            continue
+
+        merged[key] = _append_distinct_json_values(current_values, incoming_values)
+        if key in FILE_CONFLICT_METADATA_KEYS:
+            conflict_fields.append(key)
+    return merged, conflict_fields
+
+
 def _upsert_edge(
     edges: dict[str, CanonicalEdge],
     *,
@@ -1012,6 +1094,12 @@ def _append_distinct_json_values(
         if value not in merged:
             merged.append(value)
     return merged
+
+
+def _metadata_value_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return list(value)
+    return [value]
 
 
 def _stronger_confidence(first: str, second: str) -> str:

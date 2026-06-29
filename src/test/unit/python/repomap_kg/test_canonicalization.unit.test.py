@@ -130,6 +130,100 @@ class CanonicalizationUnitTests(unittest.TestCase):
         self.assertEqual(payload["diagnostics"][0]["category"], "invalid_canonical_key")
         self.assertEqual(payload["diagnostics"][0]["value"], "/tmp/secret.txt")
 
+    def test_file_observations_with_conflicting_hashes_set_node_conflict(self):
+        observations = [
+            RawObservation(
+                kind="file",
+                source_id="src/app.py:first",
+                path="src/app.py",
+                confidence="heuristic",
+                extractor="repo-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "python",
+                    "role": "source",
+                    "content_hash": "sha256:first",
+                    "executable": False,
+                    "generated": False,
+                },
+            ),
+            RawObservation(
+                kind="file",
+                source_id="src/app.py:second",
+                path="src/app.py",
+                confidence="manual",
+                extractor="repo-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "python",
+                    "role": "source",
+                    "content_hash": "sha256:second",
+                    "executable": False,
+                    "generated": False,
+                },
+            ),
+        ]
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["summary"]["warnings"], 1)
+        self.assertEqual(payload["diagnostics"][0]["category"], "conflicting_evidence")
+        self.assertEqual(payload["diagnostics"][0]["field"], "metadata.content_hash")
+        self.assertEqual(payload["nodes"][0]["confidence"], "manual")
+        self.assertTrue(payload["nodes"][0]["conflict"])
+        self.assertEqual(
+            payload["nodes"][0]["metadata"]["content_hash"],
+            ["sha256:first", "sha256:second"],
+        )
+        self.assertEqual(payload["summary"]["evidence"], 2)
+        self.assertEqual(payload["summary"]["node_evidence_links"], 2)
+
+    def test_file_observations_with_multiple_roles_merge_without_conflict(self):
+        observations = [
+            RawObservation(
+                kind="file",
+                source_id="bin/tool:first",
+                path="bin/tool",
+                confidence="heuristic",
+                extractor="repo-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "shell",
+                    "role": "entrypoint",
+                    "content_hash": "sha256:same",
+                    "executable": True,
+                    "generated": False,
+                },
+            ),
+            RawObservation(
+                kind="file",
+                source_id="bin/tool:second",
+                path="bin/tool",
+                confidence="heuristic",
+                extractor="repo-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "shell",
+                    "role": "script",
+                    "content_hash": "sha256:same",
+                    "executable": True,
+                    "generated": False,
+                },
+            ),
+        ]
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["diagnostics"], [])
+        self.assertFalse(payload["nodes"][0]["conflict"])
+        self.assertEqual(
+            payload["nodes"][0]["metadata"]["role"], ["entrypoint", "script"]
+        )
+
     def test_unsupported_observation_kind_is_warning_and_skipped(self):
         observation = RawObservation(
             kind="python.import",
