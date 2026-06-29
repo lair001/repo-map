@@ -34,9 +34,6 @@ algorithm needs that are awkward in SQL.
 
 Extractor output is written as newline-delimited JSON. Raw observations are
 useful for debugging, reproducible tests, and future import/export workflows.
-Storage loads retain the original raw observation payloads per indexing run in
-Postgres so future canonicalizers can replay older extractor output into newer
-canonical graph versions.
 
 ### Normalized Graph
 
@@ -72,18 +69,6 @@ runs(
   finished_at,
   status,
   tool_versions_json
-)
-
-raw_observations(
-  id,
-  repository_id,
-  run_id,
-  ordinal,
-  kind,
-  source_id,
-  path,
-  observation_json,
-  schema_version
 )
 
 files(
@@ -163,7 +148,6 @@ src/main/resources/rdbms/2026/06/28-001-core-create_graph_tables.sql
 src/main/resources/rdbms/2026/06/28-002-core-add_file_run_tracking.sql
 src/main/resources/rdbms/2026/06/28-003-core-add_evidence_stable_key.sql
 src/main/resources/rdbms/2026/06/28-004-core-add_edge_stable_key.sql
-src/main/resources/rdbms/2026/06/29-001-core-create_raw_observations_table.sql
 ```
 
 Until the Liquibase CLI is part of the local toolchain, RepoMap includes a
@@ -175,11 +159,9 @@ local verification, not a replacement for Liquibase as the migration format.
 The first ingestion path loads raw discovery `file` observations into Postgres
 by creating or updating a repository, recording an indexing run, upserting file
 rows with `last_seen_run_id` pointing back to the run that observed them, and
-retaining every input raw observation with its run-local ordinal and full JSON
-payload. The same transaction also upserts normalized file nodes plus evidence
-rows with stable keys. Targeted non-file observations, such as `shell.command`,
-also persist source nodes, target nodes, evidence, and stable-keyed relationship
-edges.
+upserting normalized file nodes plus evidence rows with stable keys. Targeted
+non-file observations, such as `shell.command`, also persist source nodes,
+target nodes, evidence, and stable-keyed relationship edges.
 The CLI exposes this path as `repomap-kg storage load-files`, accepting raw
 observation JSONL plus repository identity fields and optional `psql` connection
 arguments.

@@ -63,16 +63,6 @@ class RelationshipRow:
 
 
 @dataclass(frozen=True)
-class RawObservationRow:
-    ordinal: int
-    kind: str
-    source_id: str
-    path: str
-    schema_version: int
-    observation_json: dict[str, Any]
-
-
-@dataclass(frozen=True)
 class LoadSummary:
     repository_id: int
     run_id: int
@@ -323,22 +313,6 @@ def relationship_rows_from_observations(
     return tuple(sorted(rows, key=lambda row: row.edge_stable_key))
 
 
-def raw_observation_rows_from_observations(
-    observations: Sequence[RawObservation],
-) -> tuple[RawObservationRow, ...]:
-    return tuple(
-        RawObservationRow(
-            ordinal=ordinal,
-            kind=observation.kind,
-            source_id=observation.source_id,
-            path=observation.path,
-            schema_version=observation.schema_version,
-            observation_json=observation.to_dict(),
-        )
-        for ordinal, observation in enumerate(observations)
-    )
-
-
 def load_file_observations(
     psql_args: Sequence[str],
     observations: Sequence[RawObservation],
@@ -350,11 +324,9 @@ def load_file_observations(
 ) -> LoadSummary:
     rows = file_rows_from_observations(observations)
     relationship_rows = relationship_rows_from_observations(observations)
-    raw_observation_rows = raw_observation_rows_from_observations(observations)
     sql = build_file_ingest_sql(
         rows,
         relationship_rows=relationship_rows,
-        raw_observation_rows=raw_observation_rows,
         repository_name=repository_name,
         root_path=root_path,
         git_commit=git_commit,
@@ -542,7 +514,6 @@ def build_file_ingest_sql(
     rows: Sequence[FileRow],
     *,
     relationship_rows: Sequence[RelationshipRow] = (),
-    raw_observation_rows: Sequence[RawObservationRow] = (),
     repository_name: str,
     root_path: str,
     git_commit: str | None = None,
@@ -563,9 +534,6 @@ def build_file_ingest_sql(
         ),
         "\\gset run_",
     ]
-    statements.extend(
-        raw_observation_insert_sql(row) for row in raw_observation_rows
-    )
     statements.extend(file_upsert_sql(row) for row in rows)
     statements.extend(file_node_upsert_sql(row) for row in rows)
     statements.extend(file_evidence_upsert_sql(row) for row in rows)
@@ -1063,28 +1031,6 @@ def file_upsert_sql(row: FileRow) -> str:
         "executable = EXCLUDED.executable, "
         "generated = EXCLUDED.generated, "
         "metadata_json = EXCLUDED.metadata_json;"
-    )
-
-
-def raw_observation_insert_sql(row: RawObservationRow) -> str:
-    return (
-        "INSERT INTO raw_observations("
-        "repository_id, run_id, ordinal, kind, source_id, path, "
-        "observation_json, schema_version"
-        ") VALUES ("
-        ":repo_id, :run_id, "
-        f"{row.ordinal}, "
-        f"{sql_literal(row.kind)}, "
-        f"{sql_literal(row.source_id)}, "
-        f"{sql_literal(row.path)}, "
-        f"{sql_literal(json.dumps(row.observation_json, sort_keys=True))}::jsonb, "
-        f"{row.schema_version}"
-        ") ON CONFLICT (run_id, ordinal) DO UPDATE SET "
-        "kind = EXCLUDED.kind, "
-        "source_id = EXCLUDED.source_id, "
-        "path = EXCLUDED.path, "
-        "observation_json = EXCLUDED.observation_json, "
-        "schema_version = EXCLUDED.schema_version;"
     )
 
 
