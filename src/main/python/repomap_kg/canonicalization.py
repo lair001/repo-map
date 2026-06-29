@@ -21,6 +21,7 @@ from repomap_kg.graph_keys import (
     env_key,
     file_key,
     host_category_key,
+    parse_key,
     tool_key,
     unknown_key,
 )
@@ -254,6 +255,8 @@ def _canonicalize_shell_command_observation(
             )
         )
         return
+
+    _append_raw_target_diagnostic(observation, ordinal, diagnostics)
 
     evidence_record = _evidence_from_observation(observation, ordinal)
     evidence.append(evidence_record)
@@ -748,6 +751,11 @@ def _shell_source_target_key(
         return placeholder_key
 
     placeholder_key = unknown_key("file", "unresolved-shell-source")
+    if _append_raw_target_diagnostic(
+        observation, ordinal, diagnostics, placeholder_key=placeholder_key
+    ):
+        return placeholder_key
+
     diagnostics.append(
         CanonicalizationDiagnostic(
             severity="warning",
@@ -1102,6 +1110,35 @@ def _metadata_value_list(value: Any) -> list[Any]:
     return [value]
 
 
+def _append_raw_target_diagnostic(
+    observation: RawObservation,
+    ordinal: int,
+    diagnostics: list[CanonicalizationDiagnostic],
+    *,
+    placeholder_key: str | None = None,
+) -> bool:
+    if observation.target is None:
+        return False
+    try:
+        parse_key(observation.target)
+    except GraphKeyError as error:
+        diagnostics.append(
+            CanonicalizationDiagnostic(
+                severity="warning",
+                category=_graph_key_error_category(error),
+                message=f"raw target is not a valid canonical key: {error}",
+                raw_observation_ordinal=ordinal,
+                raw_source_id=observation.source_id,
+                path=observation.path,
+                field="target",
+                value=observation.target,
+                placeholder_key=placeholder_key,
+            )
+        )
+        return True
+    return False
+
+
 def _stronger_confidence(first: str, second: str) -> str:
     if CONFIDENCE_RANKS[second] > CONFIDENCE_RANKS[first]:
         return second
@@ -1109,6 +1146,8 @@ def _stronger_confidence(first: str, second: str) -> str:
 
 
 def _graph_key_error_category(error: GraphKeyError) -> str:
+    if "percent" in str(error):
+        return "malformed_percent_escape"
     if "escape" in str(error):
         return "repo_escaping_path"
     return "invalid_canonical_key"

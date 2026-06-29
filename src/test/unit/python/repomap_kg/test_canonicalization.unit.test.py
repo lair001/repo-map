@@ -496,6 +496,32 @@ class CanonicalizationUnitTests(unittest.TestCase):
             {"argv_examples": [["nix", "build"]], "commands": ["nix"]},
         )
 
+    def test_shell_command_with_malformed_target_rebuilds_from_metadata(self):
+        observation = RawObservation(
+            kind="shell.command",
+            source_id="bin/tool#call:1:nix",
+            path="bin/tool",
+            start_line=1,
+            end_line=1,
+            target="tool:nix%2",
+            confidence="heuristic",
+            extractor="repo-shell",
+            extractor_version="0.1.0",
+            metadata={"command": "nix", "argv": ["nix", "build"]},
+        )
+
+        result = canonicalize_observations([observation])
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["summary"]["warnings"], 1)
+        self.assertEqual(
+            payload["diagnostics"][0]["category"], "malformed_percent_escape"
+        )
+        self.assertEqual(payload["diagnostics"][0]["field"], "target")
+        self.assertEqual(payload["diagnostics"][0]["value"], "tool:nix%2")
+        self.assertEqual(payload["edges"][0]["target_key"], "tool:nix")
+
     def test_shell_source_static_repo_path_creates_sources_edge(self):
         observation = RawObservation(
             kind="shell.source",
@@ -669,6 +695,39 @@ class CanonicalizationUnitTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(payload["summary"]["warnings"], 1)
         self.assertEqual(payload["diagnostics"][0]["category"], "unknown_target")
+        self.assertEqual(
+            payload["diagnostics"][0]["placeholder_key"],
+            "unknown:file:unresolved-shell-source",
+        )
+        self.assertEqual(
+            payload["edges"][0]["target_key"],
+            "unknown:file:unresolved-shell-source",
+        )
+
+    def test_shell_source_with_malformed_target_uses_unknown_placeholder(self):
+        observation = RawObservation(
+            kind="shell.source",
+            source_id="scripts/build.sh#source:7:malformed",
+            path="scripts/build.sh",
+            start_line=7,
+            end_line=7,
+            target="file:bad%2",
+            confidence="heuristic",
+            extractor="repo-shell",
+            extractor_version="0.1.0",
+            metadata={"source": "$maybe_common"},
+        )
+
+        result = canonicalize_observations([observation])
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["summary"]["warnings"], 1)
+        self.assertEqual(
+            payload["diagnostics"][0]["category"], "malformed_percent_escape"
+        )
+        self.assertEqual(payload["diagnostics"][0]["field"], "target")
+        self.assertEqual(payload["diagnostics"][0]["value"], "file:bad%2")
         self.assertEqual(
             payload["diagnostics"][0]["placeholder_key"],
             "unknown:file:unresolved-shell-source",

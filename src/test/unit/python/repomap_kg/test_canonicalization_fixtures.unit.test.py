@@ -23,6 +23,8 @@ class CanonicalizationFixtureTests(unittest.TestCase):
             "shell_env_write",
             "shell_env_write_collapse",
             "shell_host_mutation_package",
+            "malformed_target_rebuilt",
+            "malformed_target_placeholder",
             "shell_source_repo_escape",
             "shell_env_missing_variable",
             "unsupported_kind",
