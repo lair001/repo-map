@@ -39,12 +39,14 @@ from repomap_kg.storage import (
     StorageSchemaError,
     canonical_edge_explanation_to_jsonable,
     canonical_edge_records_to_jsonable,
+    canonical_neighborhood_to_jsonable,
     canonical_node_records_to_jsonable,
     edge_records_to_jsonable,
     file_neighborhood_to_jsonable,
     file_node_records_to_jsonable,
     format_canonical_edge_explanation_table,
     format_canonical_edge_table,
+    format_canonical_neighborhood_table,
     format_canonical_node_table,
     format_edge_table,
     format_file_neighborhood_table,
@@ -58,6 +60,7 @@ from repomap_kg.storage import (
     neighborhood_to_jsonable,
     node_records_to_jsonable,
     query_canonical_edge_explanation,
+    query_canonical_neighborhood,
     query_canonical_node_records,
     query_canonical_edge_records,
     query_edge_records,
@@ -299,6 +302,40 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit stored canonical edge records as JSON",
+    )
+    storage_canonical_neighborhood = storage_subcommands.add_parser(
+        "canonical-neighborhood",
+        help="show a depth-1 stored canonical graph neighborhood",
+    )
+    add_storage_root_argument(storage_canonical_neighborhood)
+    storage_canonical_neighborhood.add_argument(
+        "--node",
+        required=True,
+        help="center canonical node key",
+    )
+    storage_canonical_neighborhood.add_argument(
+        "--direction",
+        choices=("both", "in", "out"),
+        default="both",
+        help="edge direction to traverse; default both",
+    )
+    storage_canonical_neighborhood.add_argument(
+        "--depth",
+        type=int,
+        default=1,
+        help="neighborhood depth; only 1 is currently supported",
+    )
+    storage_canonical_neighborhood.add_argument(
+        "--graph-key-version",
+        type=int,
+        default=GRAPH_KEY_VERSION,
+        help="canonical graph key version; only 1 is currently supported",
+    )
+    add_storage_connection_arguments(storage_canonical_neighborhood)
+    storage_canonical_neighborhood.add_argument(
+        "--json",
+        action="store_true",
+        help="emit stored canonical neighborhood as JSON",
     )
     storage_explain_canonical_edge = storage_subcommands.add_parser(
         "explain-canonical-edge",
@@ -778,6 +815,35 @@ def main(argv: list[str] | None = None) -> int:
 
     if (
         args.command == "storage"
+        and args.storage_command == "canonical-neighborhood"
+    ):
+        try:
+            canonical_neighborhood_filters_from_args(args)
+            record = query_canonical_neighborhood(
+                psql_args_from_args(args),
+                root_path=args.root_path,
+                node=args.node,
+                direction=args.direction,
+                depth=args.depth,
+                graph_key_version=args.graph_key_version,
+                psql_command=args.psql_command,
+            )
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(
+                json.dumps(
+                    canonical_neighborhood_to_jsonable(record),
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(format_canonical_neighborhood_table(record))
+        return 0
+
+    if (
+        args.command == "storage"
         and args.storage_command == "explain-canonical-edge"
     ):
         try:
@@ -1042,6 +1108,17 @@ def canonical_edge_filters_from_args(args) -> None:
         if not validation.valid:
             detail = f": {validation.error}" if validation.error else ""
             raise StorageSchemaError(f"invalid {option} canonical key{detail}")
+
+
+def canonical_neighborhood_filters_from_args(args) -> None:
+    if args.graph_key_version != GRAPH_KEY_VERSION:
+        raise StorageSchemaError("unsupported graph key version")
+    if args.depth != 1:
+        raise StorageSchemaError("storage canonical-neighborhood only supports depth 1")
+    validation = validate_key(args.node)
+    if not validation.valid:
+        detail = f": {validation.error}" if validation.error else ""
+        raise StorageSchemaError(f"invalid node canonical key{detail}")
 
 
 def canonical_edge_identity_metadata_from_args(args) -> dict[str, object]:

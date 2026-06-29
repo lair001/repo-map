@@ -834,6 +834,184 @@ FROM canonical_edges;
         self.assertIn("last_seen_run_id", text_stdout)
         self.assertNotIn("commands", text_stdout)
 
+    def test_storage_canonical_neighborhood_cli_reads_c2_loaded_rows(self):
+        require_postgres_binaries()
+        raw_jsonl = canonicalization_fixture(
+            "shell_executes_collapse",
+            "raw_observations.jsonl",
+        )
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            load_exit_code, _load_stdout, load_stderr = run_repo_map_in_process(
+                "storage",
+                "load-files",
+                str(raw_jsonl),
+                "--repository-name",
+                "fixture",
+                "--root-path",
+                "/tmp/fixture",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+                "--json",
+            )
+
+            def run_neighborhood(*extra_args):
+                return run_repo_map_in_process(
+                    "storage",
+                    "canonical-neighborhood",
+                    "--root-path",
+                    "/tmp/fixture",
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                    *extra_args,
+                )
+
+            in_exit_code, in_stdout, in_stderr = run_neighborhood(
+                "--node",
+                "tool:nix",
+                "--direction",
+                "in",
+                "--json",
+            )
+            out_exit_code, out_stdout, out_stderr = run_neighborhood(
+                "--node",
+                "file:bin/tool",
+                "--direction",
+                "out",
+                "--json",
+            )
+            both_exit_code, both_stdout, both_stderr = run_neighborhood(
+                "--node",
+                "file:bin/tool",
+                "--direction",
+                "both",
+                "--json",
+            )
+            text_exit_code, text_stdout, text_stderr = run_neighborhood(
+                "--node",
+                "tool:nix",
+                "--direction",
+                "in",
+            )
+            missing_exit_code, missing_stdout, missing_stderr = run_neighborhood(
+                "--node",
+                "tool:missing",
+                "--json",
+            )
+
+        self.assertEqual(load_exit_code, 0, load_stderr)
+
+        self.assertEqual(in_exit_code, 0, in_stderr)
+        in_payload = json.loads(in_stdout)
+        self.assertEqual(in_payload["center"]["canonical_key"], "tool:nix")
+        self.assertEqual(
+            [record["canonical_key"] for record in in_payload["nodes"]],
+            ["file:bin/tool"],
+        )
+        self.assertEqual(len(in_payload["edges"]), 1)
+        self.assertEqual(in_payload["edges"][0]["source_key"], "file:bin/tool")
+        self.assertEqual(in_payload["edges"][0]["edge_kind"], "executes")
+        self.assertEqual(in_payload["edges"][0]["target_key"], "tool:nix")
+        self.assertEqual(len(in_payload["edges"][0]["identity_metadata_hash"]), 64)
+
+        self.assertEqual(out_exit_code, 0, out_stderr)
+        out_payload = json.loads(out_stdout)
+        self.assertEqual(out_payload["center"]["canonical_key"], "file:bin/tool")
+        self.assertEqual(
+            [record["canonical_key"] for record in out_payload["nodes"]],
+            ["tool:nix"],
+        )
+        self.assertEqual([edge["target_key"] for edge in out_payload["edges"]], [
+            "tool:nix",
+        ])
+
+        self.assertEqual(both_exit_code, 0, both_stderr)
+        both_payload = json.loads(both_stdout)
+        self.assertEqual(both_payload["center"]["canonical_key"], "file:bin/tool")
+        self.assertEqual(
+            [record["canonical_key"] for record in both_payload["nodes"]],
+            ["tool:nix"],
+        )
+        self.assertEqual(len(both_payload["edges"]), 1)
+
+        self.assertEqual(text_exit_code, 0, text_stderr)
+        self.assertIn("center: tool:nix", text_stdout)
+        self.assertIn("Nodes:", text_stdout)
+        self.assertIn("file:bin/tool", text_stdout)
+        self.assertIn("Edges:", text_stdout)
+        self.assertIn("identity_metadata_hash", text_stdout)
+        self.assertIn(in_payload["edges"][0]["identity_metadata_hash"], text_stdout)
+        self.assertNotIn("commands", text_stdout)
+
+        self.assertEqual(missing_exit_code, 0, missing_stderr)
+        self.assertEqual(
+            json.loads(missing_stdout),
+            {"center": None, "nodes": [], "edges": []},
+        )
+
+    def test_storage_canonical_neighborhood_cli_validates_arguments(self):
+        invalid_key_exit, _invalid_key_stdout, invalid_key_stderr = (
+            run_repo_map_in_process(
+                "storage",
+                "canonical-neighborhood",
+                "--root-path",
+                "/tmp/fixture",
+                "--node",
+                "tool:nix#line:12",
+                "--json",
+            )
+        )
+        version_exit, _version_stdout, version_stderr = run_repo_map_in_process(
+            "storage",
+            "canonical-neighborhood",
+            "--root-path",
+            "/tmp/fixture",
+            "--node",
+            "tool:nix",
+            "--graph-key-version",
+            "2",
+            "--json",
+        )
+        depth_exit, _depth_stdout, depth_stderr = run_repo_map_in_process(
+            "storage",
+            "canonical-neighborhood",
+            "--root-path",
+            "/tmp/fixture",
+            "--node",
+            "tool:nix",
+            "--depth",
+            "2",
+            "--json",
+        )
+
+        self.assertEqual(invalid_key_exit, 1)
+        self.assertIn("invalid node canonical key", invalid_key_stderr)
+        self.assertEqual(version_exit, 1)
+        self.assertIn("unsupported graph key version", version_stderr)
+        self.assertEqual(depth_exit, 1)
+        self.assertIn("canonical-neighborhood only supports depth 1", depth_stderr)
+
     def test_storage_explain_canonical_edge_cli_reads_c2_loaded_evidence(self):
         require_postgres_binaries()
         raw_jsonl = canonicalization_fixture(

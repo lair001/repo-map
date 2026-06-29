@@ -13,6 +13,7 @@ from repomap_kg.storage import (
     CanonicalEdgeRecord,
     CanonicalEdgeEvidenceRecord,
     CanonicalEdgeExplanationRecord,
+    CanonicalNeighborhoodRecord,
     CanonicalNodeRecord,
     EdgeRecord,
     FileNodeRecord,
@@ -25,6 +26,7 @@ from repomap_kg.storage import (
     build_explain_canonical_edge_query_sql,
     build_canonical_edge_query_sql,
     build_canonical_node_query_sql,
+    build_canonical_neighborhood_query_sql,
     build_neighborhood_query_sql,
     build_node_query_sql,
     build_storage_summary_query_sql,
@@ -62,12 +64,16 @@ from repomap_kg.storage import (
     canonical_edge_explanation_to_jsonable,
     canonical_edge_records_to_jsonable,
     canonical_edge_explanation_from_storage_payload,
+    canonical_neighborhood_from_storage_payload,
+    canonical_neighborhood_to_jsonable,
     canonical_node_records_to_jsonable,
     canonical_edge_record_from_storage_payload,
     canonical_node_record_from_storage_payload,
     format_canonical_edge_table,
     format_canonical_edge_explanation_table,
+    format_canonical_neighborhood_table,
     format_canonical_node_table,
+    query_canonical_neighborhood,
     query_canonical_edge_explanation,
     query_canonical_edge_records,
     query_canonical_node_records,
@@ -511,6 +517,47 @@ SELECT 1;
         self.assertIn("canonical_edges.target_canonical_key = 'tool:nix'", sql)
         self.assertIn(f"canonical_edges.identity_metadata_hash = '{hash_text}'", sql)
 
+    def test_build_canonical_neighborhood_query_sql_filters_and_orders(self):
+        sql = build_canonical_neighborhood_query_sql(
+            "/tmp/fixture",
+            node="tool:nix",
+            direction="both",
+            graph_key_version=1,
+        )
+
+        self.assertIn("FROM canonical_nodes", sql)
+        self.assertIn("FROM canonical_edges", sql)
+        self.assertIn("repositories.root_path = '/tmp/fixture'", sql)
+        self.assertIn("canonical_nodes.graph_key_version = 1", sql)
+        self.assertIn("canonical_nodes.canonical_key = 'tool:nix'", sql)
+        self.assertIn("canonical_edges.source_canonical_key = 'tool:nix'", sql)
+        self.assertIn("canonical_edges.target_canonical_key = 'tool:nix'", sql)
+        self.assertIn("ORDER BY canonical_nodes.canonical_key", sql)
+        self.assertIn(
+            "ORDER BY canonical_edges.source_canonical_key, "
+            "canonical_edges.edge_kind, "
+            "canonical_edges.target_canonical_key, "
+            "canonical_edges.identity_metadata_hash",
+            sql,
+        )
+
+    def test_build_canonical_neighborhood_query_sql_honors_direction(self):
+        in_sql = build_canonical_neighborhood_query_sql(
+            "/tmp/fixture",
+            node="tool:nix",
+            direction="in",
+        )
+        out_sql = build_canonical_neighborhood_query_sql(
+            "/tmp/fixture",
+            node="tool:nix",
+            direction="out",
+        )
+
+        self.assertIn("canonical_edges.target_canonical_key = 'tool:nix'", in_sql)
+        self.assertNotIn("canonical_edges.source_canonical_key = 'tool:nix'", in_sql)
+        self.assertIn("canonical_edges.source_canonical_key = 'tool:nix'", out_sql)
+        self.assertNotIn("canonical_edges.target_canonical_key = 'tool:nix'", out_sql)
+
     def test_canonical_node_record_from_storage_payload_preserves_public_fields(self):
         record = canonical_node_record_from_storage_payload(
             {
@@ -666,6 +713,120 @@ SELECT 1;
         self.assertEqual(
             canonical_edge_explanation_to_jsonable(record)["edge"]["source_key"],
             "file:bin/tool",
+        )
+
+    def test_canonical_neighborhood_from_storage_payload_preserves_public_fields(
+        self,
+    ):
+        hash_text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+        record = canonical_neighborhood_from_storage_payload(
+            {
+                "center": {
+                    "canonical_key": "tool:nix",
+                    "graph_key_version": 1,
+                    "kind": "tool",
+                    "display_name": "nix",
+                    "confidence": "extracted",
+                    "conflict": False,
+                    "metadata": {},
+                    "first_seen_run_id": 10,
+                    "last_seen_run_id": 12,
+                },
+                "nodes": [
+                    {
+                        "canonical_key": "file:bin/tool",
+                        "graph_key_version": 1,
+                        "kind": "file",
+                        "display_name": "bin/tool",
+                        "confidence": "extracted",
+                        "conflict": False,
+                        "metadata": {"role": "entrypoint"},
+                        "first_seen_run_id": 10,
+                        "last_seen_run_id": 12,
+                    }
+                ],
+                "edges": [
+                    {
+                        "source_key": "file:bin/tool",
+                        "edge_kind": "executes",
+                        "target_key": "tool:nix",
+                        "graph_key_version": 1,
+                        "identity_metadata": {},
+                        "identity_metadata_hash": hash_text,
+                        "metadata": {"commands": ["nix"]},
+                        "confidence": "extracted",
+                        "conflict": False,
+                        "first_seen_run_id": 10,
+                        "last_seen_run_id": 12,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(
+            record,
+            CanonicalNeighborhoodRecord(
+                center=CanonicalNodeRecord(
+                    canonical_key="tool:nix",
+                    graph_key_version=1,
+                    kind="tool",
+                    display_name="nix",
+                    confidence="extracted",
+                    conflict=False,
+                    metadata={},
+                    first_seen_run_id=10,
+                    last_seen_run_id=12,
+                ),
+                nodes=(
+                    CanonicalNodeRecord(
+                        canonical_key="file:bin/tool",
+                        graph_key_version=1,
+                        kind="file",
+                        display_name="bin/tool",
+                        confidence="extracted",
+                        conflict=False,
+                        metadata={"role": "entrypoint"},
+                        first_seen_run_id=10,
+                        last_seen_run_id=12,
+                    ),
+                ),
+                edges=(
+                    CanonicalEdgeRecord(
+                        source_key="file:bin/tool",
+                        edge_kind="executes",
+                        target_key="tool:nix",
+                        graph_key_version=1,
+                        identity_metadata={},
+                        identity_metadata_hash=hash_text,
+                        metadata={"commands": ["nix"]},
+                        confidence="extracted",
+                        conflict=False,
+                        first_seen_run_id=10,
+                        last_seen_run_id=12,
+                    ),
+                ),
+            ),
+        )
+        self.assertEqual(
+            canonical_neighborhood_to_jsonable(record)["center"]["canonical_key"],
+            "tool:nix",
+        )
+
+    def test_canonical_neighborhood_from_storage_payload_accepts_missing_center(
+        self,
+    ):
+        record = canonical_neighborhood_from_storage_payload(
+            {"center": None, "nodes": [], "edges": []}
+        )
+
+        self.assertEqual(
+            record,
+            CanonicalNeighborhoodRecord(center=None, nodes=(), edges=()),
+        )
+        self.assertEqual(
+            canonical_neighborhood_to_jsonable(record),
+            {"center": None, "nodes": [], "edges": []},
         )
 
     def test_canonical_edge_explanation_from_storage_payload_accepts_missing_edge(
@@ -879,6 +1040,71 @@ SELECT 1;
         self.assertIn("12", table)
         self.assertNotIn("omitted", table)
 
+    def test_format_canonical_neighborhood_table_uses_contract_sections(self):
+        hash_text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        record = CanonicalNeighborhoodRecord(
+            center=CanonicalNodeRecord(
+                canonical_key="tool:nix",
+                graph_key_version=1,
+                kind="tool",
+                display_name="nix",
+                confidence="manual",
+                conflict=False,
+                metadata={"omitted": True},
+                first_seen_run_id=None,
+                last_seen_run_id=12,
+            ),
+            nodes=(
+                CanonicalNodeRecord(
+                    canonical_key="file:bin/tool",
+                    graph_key_version=1,
+                    kind="file",
+                    display_name="bin/tool",
+                    confidence="extracted",
+                    conflict=False,
+                    metadata={},
+                    first_seen_run_id=10,
+                    last_seen_run_id=12,
+                ),
+            ),
+            edges=(
+                CanonicalEdgeRecord(
+                    source_key="file:bin/tool",
+                    edge_kind="executes",
+                    target_key="tool:nix",
+                    graph_key_version=1,
+                    identity_metadata={},
+                    identity_metadata_hash=hash_text,
+                    metadata={"commands": ["nix"]},
+                    confidence="extracted",
+                    conflict=False,
+                    first_seen_run_id=10,
+                    last_seen_run_id=12,
+                ),
+            ),
+        )
+
+        table = format_canonical_neighborhood_table(record)
+
+        self.assertIn("center: tool:nix", table)
+        self.assertIn("Nodes:", table)
+        self.assertIn("canonical_key", table)
+        self.assertIn("file:bin/tool", table)
+        self.assertIn("Edges:", table)
+        self.assertIn("identity_metadata_hash", table)
+        self.assertIn(hash_text, table)
+        self.assertNotIn("omitted", table)
+        self.assertNotIn("commands", table)
+
+    def test_format_canonical_neighborhood_table_reports_missing_center(self):
+        table = format_canonical_neighborhood_table(
+            CanonicalNeighborhoodRecord(center=None, nodes=(), edges=())
+        )
+
+        self.assertIn("center: <not found>", table)
+        self.assertIn("Nodes:", table)
+        self.assertIn("Edges:", table)
+
     def test_format_canonical_edge_explanation_table_uses_contract_sections(self):
         hash_text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         record = CanonicalEdgeExplanationRecord(
@@ -1051,6 +1277,85 @@ SELECT 1;
         sql = run.call_args.kwargs["input"]
         self.assertIn("canonical_edges", sql)
         self.assertIn(f"canonical_edges.identity_metadata_hash = '{hash_text}'", sql)
+
+    def test_query_canonical_neighborhood_parses_psql_json_object(self):
+        hash_text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        payload = json.dumps(
+            {
+                "center": {
+                    "canonical_key": "tool:nix",
+                    "graph_key_version": 1,
+                    "kind": "tool",
+                    "display_name": "nix",
+                    "confidence": "extracted",
+                    "conflict": False,
+                    "metadata": {},
+                    "first_seen_run_id": 10,
+                    "last_seen_run_id": 12,
+                },
+                "nodes": [
+                    {
+                        "canonical_key": "file:bin/tool",
+                        "graph_key_version": 1,
+                        "kind": "file",
+                        "display_name": "bin/tool",
+                        "confidence": "extracted",
+                        "conflict": False,
+                        "metadata": {},
+                        "first_seen_run_id": 10,
+                        "last_seen_run_id": 12,
+                    }
+                ],
+                "edges": [
+                    {
+                        "source_key": "file:bin/tool",
+                        "edge_kind": "executes",
+                        "target_key": "tool:nix",
+                        "graph_key_version": 1,
+                        "identity_metadata": {},
+                        "identity_metadata_hash": hash_text,
+                        "metadata": {},
+                        "confidence": "extracted",
+                        "conflict": False,
+                        "first_seen_run_id": 10,
+                        "last_seen_run_id": 12,
+                    }
+                ],
+            }
+        )
+
+        with patch("repomap_kg.storage.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(
+                ["psql"],
+                0,
+                stdout=payload + "\n",
+            )
+
+            record = query_canonical_neighborhood(
+                ["-d", "postgres"],
+                root_path="/tmp/fixture",
+                node="tool:nix",
+                direction="in",
+            )
+
+        self.assertEqual(record.center.canonical_key, "tool:nix")
+        self.assertEqual(record.nodes[0].canonical_key, "file:bin/tool")
+        self.assertEqual(record.edges[0].target_key, "tool:nix")
+        sql = run.call_args.kwargs["input"]
+        self.assertIn("canonical_nodes", sql)
+        self.assertIn("canonical_edges", sql)
+
+    def test_query_canonical_neighborhood_rejects_depth_above_one(self):
+        with self.assertRaisesRegex(
+            StorageSchemaError,
+            "canonical-neighborhood only supports depth 1",
+        ):
+            query_canonical_neighborhood(
+                [],
+                root_path="/tmp/fixture",
+                node="tool:nix",
+                depth=2,
+            )
 
     def test_build_file_ingest_sql_quotes_values_and_sets_run(self):
         rows = file_rows_from_observations(

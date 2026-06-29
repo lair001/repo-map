@@ -236,6 +236,20 @@ class CanonicalEdgeExplanationRecord:
 
 
 @dataclass(frozen=True)
+class CanonicalNeighborhoodRecord:
+    center: CanonicalNodeRecord | None
+    nodes: tuple[CanonicalNodeRecord, ...]
+    edges: tuple[CanonicalEdgeRecord, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "center": self.center.to_dict() if self.center is not None else None,
+            "nodes": [node.to_dict() for node in self.nodes],
+            "edges": [edge.to_dict() for edge in self.edges],
+        }
+
+
+@dataclass(frozen=True)
 class FileNodeRecord:
     path: str
     node_kind: str
@@ -861,6 +875,32 @@ def query_canonical_edge_records(
             "psql did not return canonical edge records as a JSON array"
     )
     return tuple(canonical_edge_record_from_storage_payload(item) for item in payload)
+
+
+def query_canonical_neighborhood(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    node: str,
+    direction: str = "both",
+    depth: int = 1,
+    graph_key_version: int = 1,
+    psql_command: str = "psql",
+) -> CanonicalNeighborhoodRecord:
+    if depth != 1:
+        raise StorageSchemaError("storage canonical-neighborhood only supports depth 1")
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_canonical_neighborhood_query_sql(
+            root_path,
+            node=node,
+            direction=direction,
+            graph_key_version=graph_key_version,
+        ),
+    )
+    return canonical_neighborhood_from_storage_payload(
+        parse_psql_json(result.stdout, "canonical neighborhood")
+    )
 
 
 def query_canonical_edge_explanation(
@@ -1557,6 +1597,108 @@ def build_canonical_edge_query_sql(
         "FROM canonical_edges "
         "JOIN repositories ON repositories.id = canonical_edges.repository_id "
         f"WHERE {where_sql};"
+    )
+
+
+def build_canonical_neighborhood_query_sql(
+    root_path: str,
+    *,
+    node: str,
+    direction: str = "both",
+    graph_key_version: int = 1,
+) -> str:
+    require_supported_graph_key_version(graph_key_version)
+    if direction not in {"both", "in", "out"}:
+        raise StorageSchemaError(
+            "canonical-neighborhood direction must be one of both, in, out"
+        )
+    quoted_root = sql_literal(root_path)
+    quoted_node = sql_literal(node)
+    edge_filters = []
+    if direction in {"both", "out"}:
+        edge_filters.append(f"canonical_edges.source_canonical_key = {quoted_node}")
+    if direction in {"both", "in"}:
+        edge_filters.append(f"canonical_edges.target_canonical_key = {quoted_node}")
+    edge_filter_sql = " OR ".join(edge_filters)
+    return (
+        "WITH repo AS ("
+        "SELECT id FROM repositories "
+        f"WHERE repositories.root_path = {quoted_root}"
+        "), "
+        "center AS ("
+        "SELECT canonical_nodes.* FROM canonical_nodes "
+        "JOIN repo ON repo.id = canonical_nodes.repository_id "
+        f"WHERE canonical_nodes.graph_key_version = {graph_key_version} "
+        f"AND canonical_nodes.canonical_key = {quoted_node}"
+        "), "
+        "neighborhood_edges AS ("
+        "SELECT canonical_edges.* FROM canonical_edges "
+        "JOIN repo ON repo.id = canonical_edges.repository_id "
+        "JOIN center ON TRUE "
+        f"WHERE canonical_edges.graph_key_version = {graph_key_version} "
+        f"AND ({edge_filter_sql})"
+        "), "
+        "neighbor_keys AS ("
+        "SELECT source_canonical_key AS canonical_key FROM neighborhood_edges "
+        "UNION "
+        "SELECT target_canonical_key AS canonical_key FROM neighborhood_edges"
+        "), "
+        "node_rows AS ("
+        "SELECT canonical_nodes.* FROM canonical_nodes "
+        "JOIN repo ON repo.id = canonical_nodes.repository_id "
+        "JOIN neighbor_keys "
+        "ON neighbor_keys.canonical_key = canonical_nodes.canonical_key "
+        f"WHERE canonical_nodes.graph_key_version = {graph_key_version} "
+        f"AND canonical_nodes.canonical_key <> {quoted_node}"
+        ") "
+        "SELECT json_build_object("
+        "'center', ("
+        "SELECT json_build_object("
+        "'canonical_key', canonical_nodes.canonical_key, "
+        "'graph_key_version', canonical_nodes.graph_key_version, "
+        "'kind', canonical_nodes.kind, "
+        "'display_name', canonical_nodes.display_name, "
+        "'confidence', canonical_nodes.confidence, "
+        "'conflict', canonical_nodes.conflict, "
+        "'metadata', canonical_nodes.metadata_json, "
+        "'first_seen_run_id', canonical_nodes.first_seen_run_id, "
+        "'last_seen_run_id', canonical_nodes.last_seen_run_id"
+        ") FROM center canonical_nodes"
+        "), "
+        "'nodes', COALESCE(("
+        "SELECT json_agg(json_build_object("
+        "'canonical_key', canonical_nodes.canonical_key, "
+        "'graph_key_version', canonical_nodes.graph_key_version, "
+        "'kind', canonical_nodes.kind, "
+        "'display_name', canonical_nodes.display_name, "
+        "'confidence', canonical_nodes.confidence, "
+        "'conflict', canonical_nodes.conflict, "
+        "'metadata', canonical_nodes.metadata_json, "
+        "'first_seen_run_id', canonical_nodes.first_seen_run_id, "
+        "'last_seen_run_id', canonical_nodes.last_seen_run_id"
+        ") ORDER BY canonical_nodes.canonical_key) "
+        "FROM node_rows canonical_nodes"
+        "), '[]'::json), "
+        "'edges', COALESCE(("
+        "SELECT json_agg(json_build_object("
+        "'source_key', canonical_edges.source_canonical_key, "
+        "'edge_kind', canonical_edges.edge_kind, "
+        "'target_key', canonical_edges.target_canonical_key, "
+        "'graph_key_version', canonical_edges.graph_key_version, "
+        "'identity_metadata', canonical_edges.identity_metadata_json, "
+        "'identity_metadata_hash', canonical_edges.identity_metadata_hash, "
+        "'metadata', canonical_edges.metadata_json, "
+        "'confidence', canonical_edges.confidence, "
+        "'conflict', canonical_edges.conflict, "
+        "'first_seen_run_id', canonical_edges.first_seen_run_id, "
+        "'last_seen_run_id', canonical_edges.last_seen_run_id"
+        ") ORDER BY canonical_edges.source_canonical_key, "
+        "canonical_edges.edge_kind, "
+        "canonical_edges.target_canonical_key, "
+        "canonical_edges.identity_metadata_hash) "
+        "FROM neighborhood_edges canonical_edges"
+        "), '[]'::json)"
+        ")::text;"
     )
 
 
@@ -2288,6 +2430,43 @@ def canonical_edge_explanation_from_storage_payload(
     )
 
 
+def canonical_neighborhood_from_storage_payload(
+    payload: Any,
+) -> CanonicalNeighborhoodRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed canonical neighborhood")
+    center_payload = payload.get("center")
+    if center_payload is None:
+        center = None
+    elif isinstance(center_payload, dict):
+        center = canonical_node_record_from_storage_payload(center_payload)
+    else:
+        raise StorageSchemaError(
+            "psql returned a malformed canonical neighborhood: center"
+        )
+    nodes_payload = payload.get("nodes")
+    edges_payload = payload.get("edges")
+    if not isinstance(nodes_payload, list):
+        raise StorageSchemaError(
+            "psql returned a malformed canonical neighborhood: nodes"
+        )
+    if not isinstance(edges_payload, list):
+        raise StorageSchemaError(
+            "psql returned a malformed canonical neighborhood: edges"
+        )
+    return CanonicalNeighborhoodRecord(
+        center=center,
+        nodes=tuple(
+            canonical_node_record_from_storage_payload(node_payload)
+            for node_payload in nodes_payload
+        ),
+        edges=tuple(
+            canonical_edge_record_from_storage_payload(edge_payload)
+            for edge_payload in edges_payload
+        ),
+    )
+
+
 def canonical_edge_evidence_record_from_storage_payload(
     payload: Any,
 ) -> CanonicalEdgeEvidenceRecord:
@@ -2505,6 +2684,12 @@ def canonical_edge_explanation_to_jsonable(
     return record.to_dict()
 
 
+def canonical_neighborhood_to_jsonable(
+    record: CanonicalNeighborhoodRecord,
+) -> dict[str, Any]:
+    return record.to_dict()
+
+
 def edge_records_to_jsonable(records: Sequence[EdgeRecord]) -> list[dict[str, Any]]:
     return [record.to_dict() for record in records]
 
@@ -2617,6 +2802,71 @@ def format_canonical_edge_table(records: Sequence[CanonicalEdgeRecord]) -> str:
     lines = [format_table_row(dict(zip(columns, columns, strict=True)), columns, widths)]
     for row in rendered_rows:
         lines.append(format_table_row(row, columns, widths))
+    return "\n".join(lines)
+
+
+def format_canonical_neighborhood_table(record: CanonicalNeighborhoodRecord) -> str:
+    center_key = (
+        record.center.canonical_key
+        if record.center is not None
+        else "<not found>"
+    )
+    node_columns = (
+        "canonical_key",
+        "kind",
+        "display_name",
+        "confidence",
+        "conflict",
+    )
+    edge_columns = (
+        "source_key",
+        "edge_kind",
+        "target_key",
+        "identity_metadata_hash",
+        "confidence",
+        "conflict",
+    )
+    node_rows = [
+        {key: render_table_value(row[key]) for key in node_columns}
+        for row in (node.to_dict() for node in record.nodes)
+    ]
+    edge_rows = [
+        {key: render_table_value(row[key]) for key in edge_columns}
+        for row in (edge.to_dict() for edge in record.edges)
+    ]
+    node_widths = {
+        key: max([len(key), *(len(row[key]) for row in node_rows)])
+        for key in node_columns
+    }
+    edge_widths = {
+        key: max([len(key), *(len(row[key]) for row in edge_rows)])
+        for key in edge_columns
+    }
+    lines = [
+        f"center: {center_key}",
+        "",
+        "Nodes:",
+        format_table_row(
+            dict(zip(node_columns, node_columns, strict=True)),
+            node_columns,
+            node_widths,
+        ),
+    ]
+    for row in node_rows:
+        lines.append(format_table_row(row, node_columns, node_widths))
+    lines.extend(
+        [
+            "",
+            "Edges:",
+            format_table_row(
+                dict(zip(edge_columns, edge_columns, strict=True)),
+                edge_columns,
+                edge_widths,
+            ),
+        ]
+    )
+    for row in edge_rows:
+        lines.append(format_table_row(row, edge_columns, edge_widths))
     return "\n".join(lines)
 
 
