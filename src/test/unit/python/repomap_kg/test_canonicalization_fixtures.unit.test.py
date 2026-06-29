@@ -11,14 +11,23 @@ FIXTURE_ROOT = (
 
 
 class CanonicalizationFixtureTests(unittest.TestCase):
-    def test_files_basic_golden_fixture_matches_exact_json(self):
-        fixture_dir = FIXTURE_ROOT / "files_basic"
-        observations = read_observations_jsonl(fixture_dir / "raw_observations.jsonl")
-        expected = (fixture_dir / "expected_canonical_graph.json").read_text()
+    def test_golden_fixtures_match_exact_json(self):
+        fixture_names = (
+            "files_basic",
+            "shell_executes_nix",
+            "shell_executes_collapse",
+        )
 
-        result = canonicalize_observations(observations)
+        for fixture_name in fixture_names:
+            with self.subTest(fixture_name=fixture_name):
+                fixture_dir = FIXTURE_ROOT / fixture_name
+                observations = read_observations_jsonl(
+                    fixture_dir / "raw_observations.jsonl"
+                )
+                expected = (fixture_dir / "expected_canonical_graph.json").read_text()
+                result = canonicalize_observations(observations)
 
-        self.assertEqual(result.to_json(), expected)
+                self.assertEqual(result.to_json(), expected)
 
 
 if __name__ == "__main__":
