@@ -45,7 +45,8 @@ raw-observation retention plus `canonical_nodes`, `canonical_edges`,
 `storage load-canonical` for loading canonical fixtures. Phase C2 made
 `storage load-files` dual-write both legacy rows and canonical rows in one
 transaction while preserving existing public output and legacy readback
-behavior. Public canonical readback is planned separately in
+behavior. Phase D added public canonical readback commands for canonical nodes,
+canonical edges, edge explanations, and depth-1 canonical neighborhoods under
 [ADR 0007](docs/adr/0007-canonical-readback-and-explain-query-contracts.md).
 The initial specs live under `docs/specs/`.
 
@@ -74,6 +75,10 @@ PYTHONPATH=src/main/python python3 -m repomap_kg storage edges --root-path . --k
 PYTHONPATH=src/main/python python3 -m repomap_kg storage host-mutators --root-path . --category filesystem-mutation --tool rm --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage host-mutators-summary --root-path . --category filesystem-mutation --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage summary --root-path . --json
+PYTHONPATH=src/main/python python3 -m repomap_kg storage canonical-nodes --root-path . --kind file --json
+PYTHONPATH=src/main/python python3 -m repomap_kg storage canonical-edges --root-path . --kind executes --target-key tool:nix --json
+PYTHONPATH=src/main/python python3 -m repomap_kg storage explain-canonical-edge --root-path . --source-key file:bin/tool --kind executes --target-key tool:nix --json
+PYTHONPATH=src/main/python python3 -m repomap_kg storage canonical-neighborhood --root-path . --node tool:nix --direction in --json
 ```
 
 Run the host-safe test suites with coverage gates:
