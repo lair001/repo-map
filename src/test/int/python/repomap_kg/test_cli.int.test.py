@@ -476,6 +476,54 @@ class CliIntegrationTests(unittest.TestCase):
             ],
         )
 
+    def test_discover_command_emits_shell_host_mutation_observations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "fixture-repo"
+            self.write_fixture(
+                fixture / "scripts" / "maintain.sh",
+                (
+                    "#!/usr/bin/env bash\n"
+                    "brew install postgresql\n"
+                    "nix profile install nixpkgs#ripgrep\n"
+                    "sudo launchctl bootout system/com.example.agent\n"
+                    "darwin-rebuild switch --flake ~/.flakes/nix-darwin\n"
+                    "nix build .#checks\n"
+                ),
+            )
+
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "discover", str(fixture), "--jsonl"
+            )
+
+        observations = [json.loads(line) for line in stdout.splitlines()]
+        mutations = [
+            observation
+            for observation in observations
+            if observation["kind"] == "shell.host_mutation"
+        ]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            [
+                (
+                    observation["name"],
+                    observation["target"],
+                    observation["metadata"]["privileged"],
+                )
+                for observation in mutations
+            ],
+            [
+                ("brew install", "host:package-management", False),
+                ("nix profile install", "host:package-management", False),
+                ("launchctl bootout", "host:service-management", True),
+                ("darwin-rebuild switch", "host:system-activation", False),
+            ],
+        )
+        self.assertEqual(
+            mutations[2]["metadata"]["effective_argv"],
+            ["launchctl", "bootout", "system/com.example.agent"],
+        )
+
     def test_discover_command_applies_project_profile(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture = Path(tmpdir) / "fixture-repo"

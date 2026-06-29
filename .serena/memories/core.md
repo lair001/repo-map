@@ -7,4 +7,4 @@
 - Raw observations are the fixture/debug/interchange boundary. See `mem:conventions` for stable-key and confidence expectations.
 - Storage uses Postgres relational property-graph tables plus JSONB metadata. See `mem:tech_stack` and `mem:task_completion` before touching DB-backed code.
 - CLI entrypoint is `repomap_kg.cli:main`; package import name is `repomap_kg`; distribution and command name are `repomap-kg`.
-- Current roadmap: Phase 3 shell extractor is underway. Current discovery emits simple `shell.command`, static `shell.source`, and static `shell.env` observations; shell facts should remain deterministic and evidence-backed.
+- Current roadmap: Phase 3 shell extractor is underway. Current discovery emits simple `shell.command`, static `shell.source`, static `shell.env`, and first-pass `shell.host_mutation` observations; shell facts should remain deterministic and evidence-backed.

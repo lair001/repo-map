@@ -11,8 +11,8 @@ Each line is one JSON object with `schema_version` set to `1`.
 
 Required fields:
 
-- `kind`: observation family, such as `file`, `shell.command`, `shell.env`, or
-  `python.import`.
+- `kind`: observation family, such as `file`, `shell.command`, `shell.env`,
+  `shell.host_mutation`, or `python.import`.
 - `source_id`: extractor-stable source identity for the observed fact.
 - `path`: repository-relative path where the fact was observed.
 - `confidence`: one of `extracted`, `heuristic`, `manual`, or `unknown`.
@@ -72,6 +72,22 @@ contains:
 - `value`: for writes, the assignment value parsed from the assignment word.
 - `scope`: for writes, `shell` for assignment-only lines or `command` for
   leading command-local assignments.
+
+The same extractor emits `shell.host_mutation` observations for conservative
+first-pass classification of obvious host-mutating command shapes. The initial
+classifier recognizes package-management commands such as `brew install` and
+`nix profile install`, service-management commands such as `launchctl bootout`,
+and system activation through `darwin-rebuild switch`. Their metadata contains:
+
+- `argv`: parsed original command arguments.
+- `effective_argv`: command arguments after a recognized wrapper such as
+  `sudo` is removed.
+- `tool`: the effective tool name.
+- `category`: host mutation category such as `package-management`,
+  `service-management`, or `system-activation`.
+- `privileged`: whether a recognized privilege wrapper was present.
+- `reason`: the matched command shape.
+- `raw`: the source line text for the command.
 
 ## Normalization Boundary
 

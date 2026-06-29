@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import posixpath
 import re
 import shlex
@@ -42,6 +43,34 @@ CONTROL_WORDS = frozenset(
 )
 SOURCE_COMMANDS = frozenset({"source", "."})
 DYNAMIC_SOURCE_CHARS = frozenset("$`*?[")
+BREW_MUTATING_VERBS = frozenset(
+    {"install", "reinstall", "uninstall", "upgrade", "tap", "untap"}
+)
+NIX_PROFILE_MUTATING_VERBS = frozenset({"install", "remove", "upgrade"})
+LAUNCHCTL_MUTATING_VERBS = frozenset(
+    {
+        "bootstrap",
+        "bootout",
+        "disable",
+        "enable",
+        "kickstart",
+        "load",
+        "remove",
+        "start",
+        "stop",
+        "unload",
+    }
+)
+SUDO_OPTIONS_WITH_VALUES = frozenset({"-C", "-g", "-h", "-p", "-T", "-u"})
+
+
+@dataclass(frozen=True)
+class HostMutation:
+    category: str
+    reason: str
+    tool: str
+    effective_argv: tuple[str, ...]
+    privileged: bool
 
 
 def extract_shell_command_observations(
@@ -77,6 +106,11 @@ def extract_shell_observations(path: str, content: str) -> tuple[RawObservation,
             observations.append(
                 shell_command_observation(path, line_number, raw_line, argv)
             )
+            mutation = shell_host_mutation_observation(
+                path, line_number, raw_line, argv
+            )
+            if mutation is not None:
+                observations.append(mutation)
     return tuple(observations)
 
 
@@ -200,6 +234,39 @@ def shell_env_observation(
     )
 
 
+def shell_host_mutation_observation(
+    path: str, line_number: int, raw_line: str, argv: tuple[str, ...]
+) -> RawObservation | None:
+    mutation = classify_host_mutation(argv)
+    if mutation is None:
+        return None
+    name = host_mutation_name(mutation)
+    return RawObservation(
+        kind="shell.host_mutation",
+        source_id=(
+            f"{path}#host-mutation:{line_number}:"
+            f"{slug(f'{mutation.category}-{name}')}"
+        ),
+        path=path,
+        start_line=line_number,
+        end_line=line_number,
+        name=name,
+        target=f"host:{mutation.category}",
+        confidence="heuristic",
+        extractor="repo-shell",
+        extractor_version=__version__,
+        metadata={
+            "argv": list(argv),
+            "category": mutation.category,
+            "effective_argv": list(mutation.effective_argv),
+            "privileged": mutation.privileged,
+            "reason": mutation.reason,
+            "raw": raw_line.strip(),
+            "tool": mutation.tool,
+        },
+    )
+
+
 def command_argv(raw_line: str) -> tuple[str, ...]:
     line = command_line(raw_line)
     if not line:
@@ -264,6 +331,74 @@ def variable_reads(line: str) -> tuple[str, ...]:
             variables.append(variable)
             seen.add(variable)
     return tuple(variables)
+
+
+def classify_host_mutation(argv: tuple[str, ...]) -> HostMutation | None:
+    effective_argv, privileged = effective_host_argv(argv)
+    if not effective_argv:
+        return None
+    tool = tool_name(effective_argv[0])
+    verb = effective_argv[1] if len(effective_argv) > 1 else ""
+    if tool == "brew" and verb in BREW_MUTATING_VERBS:
+        return HostMutation(
+            category="package-management",
+            reason=f"brew {verb}",
+            tool=tool,
+            effective_argv=effective_argv,
+            privileged=privileged,
+        )
+    if (
+        tool == "nix"
+        and len(effective_argv) > 2
+        and effective_argv[1] == "profile"
+        and effective_argv[2] in NIX_PROFILE_MUTATING_VERBS
+    ):
+        return HostMutation(
+            category="package-management",
+            reason=f"nix profile {effective_argv[2]}",
+            tool=tool,
+            effective_argv=effective_argv,
+            privileged=privileged,
+        )
+    if tool == "launchctl" and verb in LAUNCHCTL_MUTATING_VERBS:
+        return HostMutation(
+            category="service-management",
+            reason=f"launchctl {verb}",
+            tool=tool,
+            effective_argv=effective_argv,
+            privileged=privileged,
+        )
+    if tool == "darwin-rebuild" and verb == "switch":
+        return HostMutation(
+            category="system-activation",
+            reason="darwin-rebuild switch",
+            tool=tool,
+            effective_argv=effective_argv,
+            privileged=privileged,
+        )
+    return None
+
+
+def effective_host_argv(argv: tuple[str, ...]) -> tuple[tuple[str, ...], bool]:
+    if not argv or tool_name(argv[0]) != "sudo":
+        return argv, False
+    index = 1
+    while index < len(argv) and argv[index].startswith("-"):
+        option = argv[index]
+        index += 1
+        if option in SUDO_OPTIONS_WITH_VALUES and index < len(argv):
+            index += 1
+    return tuple(argv[index:]), True
+
+
+def host_mutation_name(mutation: HostMutation) -> str:
+    if (
+        mutation.tool == "nix"
+        and len(mutation.effective_argv) > 2
+        and mutation.effective_argv[1] == "profile"
+    ):
+        return f"nix profile {mutation.effective_argv[2]}"
+    return command_display_name(mutation.tool, mutation.effective_argv)
 
 
 def tool_name(command: str) -> str:

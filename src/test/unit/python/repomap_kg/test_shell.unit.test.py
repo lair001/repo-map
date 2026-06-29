@@ -197,6 +197,96 @@ class ShellExtractorUnitTests(unittest.TestCase):
 
         self.assertEqual(observations, ())
 
+    def test_extract_shell_observations_classifies_host_mutating_commands(self):
+        observations = extract_shell_observations(
+            "scripts/maintain.sh",
+            (
+                "#!/usr/bin/env bash\n"
+                "brew install postgresql\n"
+                "nix profile install nixpkgs#ripgrep\n"
+                "sudo launchctl bootout system/com.example.agent\n"
+                "darwin-rebuild switch --flake ~/.flakes/nix-darwin\n"
+                "nix build .#checks\n"
+            ),
+        )
+
+        mutations = [
+            observation
+            for observation in observations
+            if observation.kind == "shell.host_mutation"
+        ]
+        self.assertEqual(
+            [
+                (
+                    observation.name,
+                    observation.target,
+                    observation.metadata["category"],
+                    observation.metadata["tool"],
+                    observation.metadata["privileged"],
+                )
+                for observation in mutations
+            ],
+            [
+                (
+                    "brew install",
+                    "host:package-management",
+                    "package-management",
+                    "brew",
+                    False,
+                ),
+                (
+                    "nix profile install",
+                    "host:package-management",
+                    "package-management",
+                    "nix",
+                    False,
+                ),
+                (
+                    "launchctl bootout",
+                    "host:service-management",
+                    "service-management",
+                    "launchctl",
+                    True,
+                ),
+                (
+                    "darwin-rebuild switch",
+                    "host:system-activation",
+                    "system-activation",
+                    "darwin-rebuild",
+                    False,
+                ),
+            ],
+        )
+        self.assertEqual(
+            mutations[0].source_id,
+            "scripts/maintain.sh#host-mutation:2:package-management-brew-install",
+        )
+        self.assertEqual(
+            mutations[2].metadata["effective_argv"],
+            ["launchctl", "bootout", "system/com.example.agent"],
+        )
+        self.assertEqual(mutations[2].metadata["argv"][0], "sudo")
+
+    def test_extract_shell_observations_skips_non_mutating_commands(self):
+        observations = extract_shell_observations(
+            "scripts/check.sh",
+            (
+                "#!/usr/bin/env bash\n"
+                "nix build .#checks\n"
+                "git status --short\n"
+                "echo ok\n"
+            ),
+        )
+
+        self.assertEqual(
+            [
+                observation
+                for observation in observations
+                if observation.kind == "shell.host_mutation"
+            ],
+            [],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
