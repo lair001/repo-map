@@ -16,6 +16,8 @@ class CanonicalizationFixtureTests(unittest.TestCase):
             "files_basic",
             "shell_executes_nix",
             "shell_executes_collapse",
+            "shell_source_static",
+            "shell_source_dynamic",
         )
 
         for fixture_name in fixture_names:
