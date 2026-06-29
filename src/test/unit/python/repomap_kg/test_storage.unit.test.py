@@ -51,6 +51,7 @@ from repomap_kg.storage import (
     relationship_rows_from_observations,
     load_file_observations,
     build_canonical_ingest_sql,
+    canonical_file_path_prefix,
     canonical_rows_from_result,
     identity_metadata_hash,
     raw_observation_payload_hash,
@@ -413,6 +414,46 @@ SELECT 1;
         self.assertIn("canonical_nodes.canonical_key LIKE 'file:bin/%'", sql)
         self.assertIn("ORDER BY canonical_nodes.canonical_key", sql)
         self.assertIn("'metadata', canonical_nodes.metadata_json", sql)
+
+    def test_canonical_file_path_prefix_uses_subtree_semantics(self):
+        self.assertEqual(
+            canonical_file_path_prefix("bin"),
+            canonical_file_path_prefix("bin/"),
+        )
+        self.assertEqual(canonical_file_path_prefix("bin"), "file:bin/")
+
+        sql = build_canonical_node_query_sql(
+            "/tmp/fixture",
+            kind="file",
+            path_prefix="bin",
+        )
+
+        self.assertIn("canonical_nodes.canonical_key LIKE 'file:bin/%'", sql)
+
+    def test_canonical_file_path_prefix_does_not_match_sibling_file_prefixes(self):
+        prefix = canonical_file_path_prefix("bin")
+
+        self.assertTrue("file:bin/tool".startswith(prefix))
+        self.assertFalse("file:binary".startswith(prefix))
+
+    def test_canonical_file_path_prefix_rejects_repo_escaping_prefix(self):
+        with self.assertRaisesRegex(
+            StorageSchemaError,
+            "invalid canonical file path prefix",
+        ):
+            canonical_file_path_prefix("../bin")
+
+    def test_canonical_file_path_prefix_root_matches_all_file_nodes(self):
+        self.assertEqual(canonical_file_path_prefix("."), "file:")
+        self.assertEqual(canonical_file_path_prefix(""), "file:")
+
+        sql = build_canonical_node_query_sql(
+            "/tmp/fixture",
+            kind="file",
+            path_prefix=".",
+        )
+
+        self.assertIn("canonical_nodes.canonical_key LIKE 'file:%'", sql)
 
     def test_build_canonical_edge_query_sql_filters_and_orders(self):
         sql = build_canonical_edge_query_sql(

@@ -2592,10 +2592,13 @@ def require_supported_graph_key_version(graph_key_version: int) -> None:
 def canonical_file_path_prefix(path_prefix: str) -> str:
     try:
         normalized = path_prefix.replace("\\", "/")
-        if normalized.endswith("/"):
-            stripped = normalized.rstrip("/")
-            return file_key(stripped or ".") + "/"
-        return file_key(normalized)
+        stripped = normalized.rstrip("/")
+        if stripped in ("", "."):
+            return "file:"
+        key = file_key(stripped)
+        if key == "file:.":
+            return "file:"
+        return key + "/"
     except GraphKeyError as error:
         raise StorageSchemaError("invalid canonical file path prefix") from error
 
