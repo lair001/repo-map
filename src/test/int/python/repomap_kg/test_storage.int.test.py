@@ -34,6 +34,7 @@ FROM information_schema.tables
 WHERE table_schema = 'public'
   AND table_name IN (
     'repositories',
+    'raw_observations',
     'runs',
     'files',
     'nodes',
@@ -108,7 +109,7 @@ SELECT path FROM files WHERE role = 'entrypoint';
 
         self.assertEqual(
             tables,
-            "edges,evidence,files,nodes,repositories,runs",
+            "edges,evidence,files,nodes,raw_observations,repositories,runs",
         )
         self.assertEqual(inserted_path, "bin/tool")
 
@@ -273,6 +274,78 @@ WHERE edges.kind = 'shell.command';
             "shell.command|node:bin/tool:shell.command:bin/tool#call:nix-build|"
             "tool|tool:nix|shell.command|heuristic|"
             "evidence:bin/tool:2-2:fixture-shell:bin/tool#call:nix-build",
+        )
+
+    def test_load_file_observations_retains_raw_observations_for_run(self):
+        require_postgres_binaries()
+        observations = [
+            RawObservation(
+                kind="file",
+                source_id="bin/tool",
+                path="bin/tool",
+                confidence="manual",
+                extractor="fixture-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "shell",
+                    "role": "entrypoint",
+                    "content_hash": "f" * 64,
+                    "generated": False,
+                    "executable": True,
+                },
+            ),
+            RawObservation(
+                kind="shell.command",
+                source_id="bin/tool#call:nix",
+                path="bin/tool",
+                start_line=2,
+                end_line=2,
+                name="nix build",
+                target="tool:nix",
+                confidence="heuristic",
+                extractor="fixture-shell",
+                extractor_version="0.1.0",
+                metadata={"argv": ["nix", "build"]},
+            ),
+        ]
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            summary = load_file_observations(
+                postgres.psql_args,
+                observations,
+                repository_name="fixture",
+                root_path="/tmp/fixture",
+                psql_command=postgres.psql_command,
+            )
+            retained_rows = postgres.psql_scalar(
+                f"""
+SELECT string_agg(
+    raw_observations.ordinal::text
+    || '|'
+    || raw_observations.kind
+    || '|'
+    || raw_observations.source_id
+    || '|'
+    || raw_observations.path
+    || '|'
+    || COALESCE(raw_observations.observation_json->>'target', ''),
+    ';'
+    ORDER BY raw_observations.ordinal
+)
+FROM raw_observations
+WHERE raw_observations.run_id = {summary.run_id};
+"""
+            )
+
+        self.assertEqual(
+            retained_rows,
+            "0|file|bin/tool|bin/tool|;"
+            "1|shell.command|bin/tool#call:nix|bin/tool|tool:nix",
         )
 
     def test_storage_load_files_cli_loads_discovery_jsonl(self):

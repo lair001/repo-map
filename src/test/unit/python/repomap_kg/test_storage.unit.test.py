@@ -368,6 +368,56 @@ SELECT 1;
         self.assertIn("edge:node:bin/tool:shell.command:bin/tool#call:nix-build", sql)
         self.assertIn("tool:nix", sql)
 
+    def test_load_file_observations_builds_raw_observation_retention_sql(self):
+        observations = [
+            RawObservation(
+                kind="file",
+                source_id="bin/tool",
+                path="bin/tool",
+                confidence="manual",
+                extractor="fixture-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "shell",
+                    "role": "entrypoint",
+                    "content_hash": "a" * 64,
+                    "generated": False,
+                    "executable": True,
+                },
+            ),
+            RawObservation(
+                kind="shell.command",
+                source_id="bin/tool#call:nix",
+                path="bin/tool",
+                start_line=2,
+                end_line=2,
+                name="nix build",
+                target="tool:nix",
+                confidence="heuristic",
+                extractor="fixture-shell",
+                extractor_version="0.1.0",
+                metadata={"argv": ["nix", "build"]},
+            ),
+        ]
+        completed = SimpleNamespace(
+            stdout='{"repository_id": 7, "run_id": 11, "files": 1}\n'
+        )
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+            load_file_observations(
+                ["-d", "postgres"],
+                observations,
+                repository_name="fixture",
+                root_path="/tmp/fixture",
+                psql_command="/bin/psql",
+            )
+
+        sql = run.call_args.kwargs["input"]
+        self.assertIn("INSERT INTO raw_observations(", sql)
+        self.assertIn("ordinal, kind, source_id, path, observation_json", sql)
+        self.assertIn("'shell.command'", sql)
+        self.assertIn('"target": "tool:nix"', sql)
+
     def test_load_file_observations_returns_psql_summary(self):
         observation = RawObservation(
             kind="file",
