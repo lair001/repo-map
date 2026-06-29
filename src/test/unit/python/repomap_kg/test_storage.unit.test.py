@@ -504,6 +504,76 @@ SELECT 1;
         )
         self.assertEqual(record.to_dict()["target_key"], "tool:nix")
 
+    def test_canonical_node_record_from_storage_payload_accepts_null_run_ids(self):
+        record = canonical_node_record_from_storage_payload(
+            {
+                "canonical_key": "tool:nix",
+                "graph_key_version": 1,
+                "kind": "tool",
+                "display_name": "nix",
+                "confidence": "extracted",
+                "conflict": False,
+                "metadata": {},
+                "first_seen_run_id": None,
+                "last_seen_run_id": None,
+            }
+        )
+
+        self.assertEqual(
+            record,
+            CanonicalNodeRecord(
+                canonical_key="tool:nix",
+                graph_key_version=1,
+                kind="tool",
+                display_name="nix",
+                confidence="extracted",
+                conflict=False,
+                metadata={},
+                first_seen_run_id=None,
+                last_seen_run_id=None,
+            ),
+        )
+        self.assertIsNone(record.to_dict()["first_seen_run_id"])
+        self.assertIsNone(record.to_dict()["last_seen_run_id"])
+
+    def test_canonical_edge_record_from_storage_payload_accepts_null_run_ids(self):
+        hash_text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+        record = canonical_edge_record_from_storage_payload(
+            {
+                "source_key": "file:bin/tool",
+                "edge_kind": "executes",
+                "target_key": "tool:nix",
+                "graph_key_version": 1,
+                "identity_metadata": {},
+                "identity_metadata_hash": hash_text,
+                "metadata": {},
+                "confidence": "extracted",
+                "conflict": False,
+                "first_seen_run_id": None,
+                "last_seen_run_id": None,
+            }
+        )
+
+        self.assertEqual(
+            record,
+            CanonicalEdgeRecord(
+                source_key="file:bin/tool",
+                edge_kind="executes",
+                target_key="tool:nix",
+                graph_key_version=1,
+                identity_metadata={},
+                identity_metadata_hash=hash_text,
+                metadata={},
+                confidence="extracted",
+                conflict=False,
+                first_seen_run_id=None,
+                last_seen_run_id=None,
+            ),
+        )
+        self.assertIsNone(record.to_dict()["first_seen_run_id"])
+        self.assertIsNone(record.to_dict()["last_seen_run_id"])
+
     def test_canonical_record_payload_helpers_reject_malformed_payloads(self):
         with self.assertRaisesRegex(StorageSchemaError, "canonical node record"):
             canonical_node_record_from_storage_payload({"canonical_key": ""})

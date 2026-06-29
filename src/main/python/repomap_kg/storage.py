@@ -181,8 +181,8 @@ class CanonicalNodeRecord:
     confidence: str
     conflict: bool
     metadata: dict[str, Any]
-    first_seen_run_id: int
-    last_seen_run_id: int
+    first_seen_run_id: int | None
+    last_seen_run_id: int | None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -199,8 +199,8 @@ class CanonicalEdgeRecord:
     metadata: dict[str, Any]
     confidence: str
     conflict: bool
-    first_seen_run_id: int
-    last_seen_run_id: int
+    first_seen_run_id: int | None
+    last_seen_run_id: int | None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -2072,10 +2072,10 @@ def canonical_node_record_from_storage_payload(payload: Any) -> CanonicalNodeRec
         metadata=payload_json_object(
             payload, "metadata", label="canonical node record"
         ),
-        first_seen_run_id=payload_int(
+        first_seen_run_id=payload_optional_int(
             payload, "first_seen_run_id", label="canonical node record"
         ),
-        last_seen_run_id=payload_int(
+        last_seen_run_id=payload_optional_int(
             payload, "last_seen_run_id", label="canonical node record"
         ),
     )
@@ -2110,10 +2110,10 @@ def canonical_edge_record_from_storage_payload(payload: Any) -> CanonicalEdgeRec
             payload, "confidence", label="canonical edge record"
         ),
         conflict=payload_bool(payload, "conflict", label="canonical edge record"),
-        first_seen_run_id=payload_int(
+        first_seen_run_id=payload_optional_int(
             payload, "first_seen_run_id", label="canonical edge record"
         ),
-        last_seen_run_id=payload_int(
+        last_seen_run_id=payload_optional_int(
             payload, "last_seen_run_id", label="canonical edge record"
         ),
     )
