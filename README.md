@@ -40,7 +40,8 @@ compact storage summaries. It also includes a conservative first shell
 extractor that emits simple command invocations, sourced-file includes, and
 environment variable reads/writes as raw observations during discovery, plus
 first-pass host-mutating command classifications for obvious package, service,
-and system activation commands. The initial specs live under `docs/specs/`.
+and system activation commands with raw JSONL readback. The initial specs live
+under `docs/specs/`.
 
 ## Development
 
@@ -53,6 +54,7 @@ PYTHONPATH=src/main/python python3 -m repomap_kg discover . --jsonl
 PYTHONPATH=src/main/python python3 -m repomap_kg discover . --profile repomap-profile.toml --jsonl
 PYTHONPATH=src/main/python python3 -m repomap_kg entrypoints raw-observations.jsonl
 PYTHONPATH=src/main/python python3 -m repomap_kg files raw-observations.jsonl --role source
+PYTHONPATH=src/main/python python3 -m repomap_kg host-mutators raw-observations.jsonl --json
 PYTHONPATH=src/main/python python3 -m repomap_kg observations normalize raw-observations.jsonl --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage load-files raw-observations.jsonl --repository-name repo-map --root-path . --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage files --root-path . --role source --json

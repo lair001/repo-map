@@ -684,6 +684,82 @@ script_dirs = ["scripts"]
         self.assertEqual(payload[0]["confidence"], "manual")
         self.assertEqual(result.stderr, "")
 
+    def test_host_mutators_command_prints_discovered_mutations_as_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "fixture-repo"
+            raw_jsonl = Path(tmpdir) / "raw-observations.jsonl"
+            self.write_fixture(
+                fixture / "scripts" / "maintain.sh",
+                (
+                    "#!/usr/bin/env bash\n"
+                    "brew install postgresql\n"
+                    "sudo launchctl bootout system/com.example.agent\n"
+                    "nix build .#checks\n"
+                ),
+            )
+
+            discover_exit, discover_stdout, discover_stderr = (
+                self.run_module_entrypoint("discover", str(fixture), "--jsonl")
+            )
+            raw_jsonl.write_text(discover_stdout)
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "host-mutators", str(raw_jsonl), "--json"
+            )
+
+        payload = json.loads(stdout)
+        self.assertEqual(discover_exit, 0, discover_stderr)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            [(record["name"], record["target"]) for record in payload],
+            [
+                ("brew install", "host:package-management"),
+                ("launchctl bootout", "host:service-management"),
+            ],
+        )
+        self.assertEqual(payload[1]["effective_argv"], [
+            "launchctl",
+            "bootout",
+            "system/com.example.agent",
+        ])
+
+    def test_host_mutators_command_prints_raw_jsonl_as_table(self):
+        observation = RawObservation(
+            kind="shell.host_mutation",
+            source_id="scripts/maintain.sh#host-mutation:2:package",
+            path="scripts/maintain.sh",
+            start_line=2,
+            end_line=2,
+            name="brew install",
+            target="host:package-management",
+            confidence="heuristic",
+            extractor="fixture-shell",
+            extractor_version="0.1.0",
+            metadata={
+                "argv": ["brew", "install", "postgresql"],
+                "category": "package-management",
+                "effective_argv": ["brew", "install", "postgresql"],
+                "privileged": False,
+                "reason": "brew install",
+                "tool": "brew",
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_jsonl = Path(tmpdir) / "raw-observations.jsonl"
+            write_observations_jsonl([observation], raw_jsonl)
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "host-mutators",
+                str(raw_jsonl),
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("path", stdout)
+        self.assertIn("category", stdout)
+        self.assertIn("package-management", stdout)
+        self.assertIn("brew install", stdout)
+        self.assertEqual(stderr, "")
+
     def run_module_entrypoint(self, *args):
         original_argv = sys.argv[:]
         stdout = io.StringIO()

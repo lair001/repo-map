@@ -21,6 +21,11 @@ from repomap_kg.files import (
     format_file_table,
     records_to_jsonable,
 )
+from repomap_kg.host_mutators import (
+    format_host_mutator_table,
+    host_mutator_records_from_observations,
+    host_mutators_to_jsonable,
+)
 from repomap_kg.normalization import normalize_observations
 from repomap_kg.observations import ObservationValidationError, read_observations_jsonl
 from repomap_kg.profiles import ProfileValidationError, load_profile
@@ -89,6 +94,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit entrypoint records as JSON",
+    )
+
+    host_mutators = subparsers.add_parser(
+        "host-mutators",
+        help="list host-mutating commands from raw observation JSONL",
+    )
+    host_mutators.add_argument(
+        "jsonl_path",
+        help="raw observation JSONL path, or - for stdin",
+    )
+    host_mutators.add_argument(
+        "--json",
+        action="store_true",
+        help="emit host-mutator records as JSON",
     )
 
     files = subparsers.add_parser(
@@ -382,6 +401,19 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(entrypoints_to_jsonable(records), sort_keys=True))
         else:
             print(format_entrypoint_table(records))
+        return 0
+
+    if args.command == "host-mutators":
+        try:
+            observations = read_observations_argument(args.jsonl_path)
+        except ObservationValidationError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        records = host_mutator_records_from_observations(observations)
+        if args.json:
+            print(json.dumps(host_mutators_to_jsonable(records), sort_keys=True))
+        else:
+            print(format_host_mutator_table(records))
         return 0
 
     if args.command == "observations" and args.observation_command == "normalize":
