@@ -22,6 +22,7 @@ from repomap_kg.files import (
     records_to_jsonable,
 )
 from repomap_kg.host_mutators import (
+    filter_host_mutator_records,
     format_host_mutator_table,
     host_mutator_records_from_observations,
     host_mutators_to_jsonable,
@@ -110,6 +111,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="emit host-mutator records as JSON",
     )
+    host_mutators.add_argument("--category", help="include only this category")
+    host_mutators.add_argument("--tool", help="include only this tool")
 
     files = subparsers.add_parser(
         "files",
@@ -318,6 +321,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="list stored host-mutating commands from Postgres storage",
     )
     add_storage_root_argument(storage_host_mutators)
+    storage_host_mutators.add_argument(
+        "--category",
+        help="include only this host mutation category",
+    )
+    storage_host_mutators.add_argument(
+        "--tool",
+        help="include only this host mutation tool",
+    )
     add_storage_connection_arguments(storage_host_mutators)
     storage_host_mutators.add_argument(
         "--json",
@@ -422,6 +433,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: {error}", file=sys.stderr)
             return 1
         records = host_mutator_records_from_observations(observations)
+        records = filter_host_mutator_records(
+            records,
+            category=args.category,
+            tool=args.tool,
+        )
         if args.json:
             print(json.dumps(host_mutators_to_jsonable(records), sort_keys=True))
         else:
@@ -614,6 +630,8 @@ def main(argv: list[str] | None = None) -> int:
             records = query_host_mutator_records(
                 psql_args_from_args(args),
                 root_path=args.root_path,
+                category=args.category,
+                tool=args.tool,
                 psql_command=args.psql_command,
             )
         except StorageSchemaError as error:

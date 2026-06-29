@@ -715,7 +715,13 @@ script_dirs = ["scripts"]
             )
             raw_jsonl.write_text(discover_stdout)
             exit_code, stdout, stderr = self.run_module_entrypoint(
-                "host-mutators", str(raw_jsonl), "--json"
+                "host-mutators",
+                str(raw_jsonl),
+                "--category",
+                "service-management",
+                "--tool",
+                "launchctl",
+                "--json",
             )
 
         payload = json.loads(stdout)
@@ -725,11 +731,10 @@ script_dirs = ["scripts"]
         self.assertEqual(
             [(record["name"], record["target"]) for record in payload],
             [
-                ("brew install", "host:package-management"),
                 ("launchctl bootout", "host:service-management"),
             ],
         )
-        self.assertEqual(payload[1]["effective_argv"], [
+        self.assertEqual(payload[0]["effective_argv"], [
             "launchctl",
             "bootout",
             "system/com.example.agent",

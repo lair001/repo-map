@@ -475,11 +475,17 @@ def query_host_mutator_records(
     psql_args: Sequence[str],
     *,
     root_path: str,
+    category: str | None = None,
+    tool: str | None = None,
     psql_command: str = "psql",
 ) -> tuple[HostMutatorRecord, ...]:
     result = run_psql(
         [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
-        input_text=build_host_mutator_query_sql(root_path),
+        input_text=build_host_mutator_query_sql(
+            root_path,
+            category=category,
+            tool=tool,
+        ),
     )
     payload = parse_psql_json(result.stdout, "host-mutator records")
     if not isinstance(payload, list):
@@ -921,7 +927,21 @@ def build_edge_query_sql(
     )
 
 
-def build_host_mutator_query_sql(root_path: str) -> str:
+def build_host_mutator_query_sql(
+    root_path: str,
+    *,
+    category: str | None = None,
+    tool: str | None = None,
+) -> str:
+    filters = [
+        f"repositories.root_path = {sql_literal(root_path)}",
+        "nodes.kind = 'shell.host_mutation'",
+    ]
+    if category is not None:
+        filters.append(f"nodes.metadata_json->>'category' = {sql_literal(category)}")
+    if tool is not None:
+        filters.append(f"nodes.metadata_json->>'tool' = {sql_literal(tool)}")
+    where_sql = " AND ".join(filters)
     return (
         "SELECT COALESCE(json_agg(json_build_object("
         "'path', COALESCE(files.path, ''), "
@@ -946,8 +966,7 @@ def build_host_mutator_query_sql(root_path: str) -> str:
         "JOIN nodes dst ON dst.id = edges.dst_node_id "
         "JOIN evidence ON evidence.id = edges.evidence_id "
         "LEFT JOIN files ON files.id = evidence.file_id "
-        f"WHERE repositories.root_path = {sql_literal(root_path)} "
-        "AND nodes.kind = 'shell.host_mutation';"
+        f"WHERE {where_sql};"
     )
 
 

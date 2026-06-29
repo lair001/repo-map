@@ -1,6 +1,7 @@
 import unittest
 
 from repomap_kg.host_mutators import (
+    filter_host_mutator_records,
     format_host_mutator_table,
     host_mutator_records_from_observations,
     host_mutators_to_jsonable,
@@ -67,6 +68,50 @@ class HostMutatorUnitTests(unittest.TestCase):
             "system/example",
         ))
         self.assertTrue(records[1].privileged)
+
+    def test_filter_host_mutator_records_by_category_and_tool(self):
+        records = host_mutator_records_from_observations(
+            [
+                host_mutation_observation(
+                    source_id="scripts/maintain.sh#host-mutation:2:package",
+                    path="scripts/maintain.sh",
+                    line=2,
+                    name="brew install",
+                    target="host:package-management",
+                    category="package-management",
+                    tool="brew",
+                    privileged=False,
+                    reason="brew install",
+                    argv=["brew", "install", "postgresql"],
+                    effective_argv=["brew", "install", "postgresql"],
+                ),
+                host_mutation_observation(
+                    source_id="scripts/maintain.sh#host-mutation:3:service",
+                    path="scripts/maintain.sh",
+                    line=3,
+                    name="launchctl bootout",
+                    target="host:service-management",
+                    category="service-management",
+                    tool="launchctl",
+                    privileged=True,
+                    reason="launchctl bootout",
+                    argv=["sudo", "launchctl", "bootout", "system/example"],
+                    effective_argv=["launchctl", "bootout", "system/example"],
+                ),
+            ]
+        )
+
+        filtered = filter_host_mutator_records(
+            records,
+            category="service-management",
+            tool="launchctl",
+        )
+
+        self.assertEqual([record.name for record in filtered], ["launchctl bootout"])
+        self.assertEqual(
+            filter_host_mutator_records(records, category="filesystem-mutation"),
+            (),
+        )
 
     def test_format_host_mutator_table_uses_stable_columns(self):
         records = host_mutator_records_from_observations(

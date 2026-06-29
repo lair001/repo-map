@@ -55,7 +55,7 @@ PYTHONPATH=src/main/python python3 -m repomap_kg discover . --jsonl
 PYTHONPATH=src/main/python python3 -m repomap_kg discover . --profile repomap-profile.toml --jsonl
 PYTHONPATH=src/main/python python3 -m repomap_kg entrypoints raw-observations.jsonl
 PYTHONPATH=src/main/python python3 -m repomap_kg files raw-observations.jsonl --role source
-PYTHONPATH=src/main/python python3 -m repomap_kg host-mutators raw-observations.jsonl --json
+PYTHONPATH=src/main/python python3 -m repomap_kg host-mutators raw-observations.jsonl --category service-management --tool launchctl --json
 PYTHONPATH=src/main/python python3 -m repomap_kg observations normalize raw-observations.jsonl --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage load-files raw-observations.jsonl --repository-name repo-map --root-path . --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage files --root-path . --role source --json
@@ -65,7 +65,7 @@ PYTHONPATH=src/main/python python3 -m repomap_kg storage nodes --root-path . --k
 PYTHONPATH=src/main/python python3 -m repomap_kg storage neighborhood --root-path . --node tool:nix --direction in --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage file-neighborhood --root-path . --path bin/tool --direction out --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage edges --root-path . --kind shell.command --target-node tool:nix --json
-PYTHONPATH=src/main/python python3 -m repomap_kg storage host-mutators --root-path . --json
+PYTHONPATH=src/main/python python3 -m repomap_kg storage host-mutators --root-path . --category filesystem-mutation --tool rm --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage summary --root-path . --json
 ```
 

@@ -312,6 +312,72 @@ class CliUnitTests(unittest.TestCase):
         self.assertEqual(payload[0]["category"], "package-management")
         self.assertEqual(payload[0]["target"], "host:package-management")
 
+    def test_host_mutators_filters_json_view(self):
+        package = RawObservation(
+            kind="shell.host_mutation",
+            source_id="scripts/maintain.sh#host-mutation:2:package",
+            path="scripts/maintain.sh",
+            start_line=2,
+            end_line=2,
+            name="brew install",
+            target="host:package-management",
+            confidence="heuristic",
+            extractor="fixture-shell",
+            extractor_version="0.1.0",
+            metadata={
+                "argv": ["brew", "install", "postgresql"],
+                "category": "package-management",
+                "effective_argv": ["brew", "install", "postgresql"],
+                "privileged": False,
+                "reason": "brew install",
+                "tool": "brew",
+            },
+        )
+        service = RawObservation(
+            kind="shell.host_mutation",
+            source_id="scripts/maintain.sh#host-mutation:3:service",
+            path="scripts/maintain.sh",
+            start_line=3,
+            end_line=3,
+            name="launchctl bootout",
+            target="host:service-management",
+            confidence="heuristic",
+            extractor="fixture-shell",
+            extractor_version="0.1.0",
+            metadata={
+                "argv": ["sudo", "launchctl", "bootout", "system/example"],
+                "category": "service-management",
+                "effective_argv": ["launchctl", "bootout", "system/example"],
+                "privileged": True,
+                "reason": "launchctl bootout",
+                "tool": "launchctl",
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl_path = Path(tmpdir) / "raw-observations.jsonl"
+            write_observations_jsonl([package, service], jsonl_path)
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "host-mutators",
+                        str(jsonl_path),
+                        "--category",
+                        "service-management",
+                        "--tool",
+                        "launchctl",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual([record["name"] for record in payload], [
+            "launchctl bootout",
+        ])
+
     def test_host_mutators_reports_validation_errors(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             jsonl_path = Path(tmpdir) / "bad-observations.jsonl"
@@ -989,6 +1055,10 @@ class CliUnitTests(unittest.TestCase):
                         "host-mutators",
                         "--root-path",
                         "/tmp/fixture",
+                        "--category",
+                        "filesystem-mutation",
+                        "--tool",
+                        "rm",
                         "--pg-database",
                         "postgres",
                         "--json",
@@ -1005,6 +1075,11 @@ class CliUnitTests(unittest.TestCase):
         ])
         self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
         self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+        self.assertEqual(
+            query.call_args.kwargs["category"],
+            "filesystem-mutation",
+        )
+        self.assertEqual(query.call_args.kwargs["tool"], "rm")
 
     def test_storage_host_mutators_reports_query_errors(self):
         stderr = io.StringIO()

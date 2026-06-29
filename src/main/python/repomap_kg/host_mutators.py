@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -39,7 +39,25 @@ def host_mutator_records_from_observations(
         if observation.kind != "shell.host_mutation":
             continue
         records.append(record_from_observation(observation))
-    return tuple(sorted(records, key=lambda record: (record.path, record.line, record.name)))
+    return tuple(
+        sorted(records, key=lambda record: (record.path, record.line, record.name))
+    )
+
+
+def filter_host_mutator_records(
+    records: Iterable[HostMutatorRecord],
+    *,
+    category: str | None = None,
+    tool: str | None = None,
+) -> tuple[HostMutatorRecord, ...]:
+    filtered = []
+    for record in records:
+        if category is not None and record.category != category:
+            continue
+        if tool is not None and record.tool != tool:
+            continue
+        filtered.append(record)
+    return tuple(filtered)
 
 
 def record_from_observation(observation: RawObservation) -> HostMutatorRecord:
@@ -82,18 +100,18 @@ def format_host_mutator_table(records: Iterable[HostMutatorRecord]) -> str:
     return "\n".join(lines)
 
 
-def metadata_text(metadata: dict[str, Any], key: str, default: str) -> str:
+def metadata_text(metadata: Mapping[str, Any], key: str, default: str) -> str:
     value = metadata.get(key, default)
     if not isinstance(value, str) or not value:
         return default
     return value
 
 
-def metadata_bool(metadata: dict[str, Any], key: str) -> bool:
+def metadata_bool(metadata: Mapping[str, Any], key: str) -> bool:
     return bool(metadata.get(key, False))
 
 
-def metadata_string_tuple(metadata: dict[str, Any], key: str) -> tuple[str, ...]:
+def metadata_string_tuple(metadata: Mapping[str, Any], key: str) -> tuple[str, ...]:
     value = metadata.get(key, ())
     if not isinstance(value, list):
         return ()

@@ -870,6 +870,8 @@ SELECT 1;
             records = query_host_mutator_records(
                 ["-d", "postgres"],
                 root_path="/tmp/fixture",
+                category="filesystem-mutation",
+                tool="rm",
                 psql_command="/bin/psql",
             )
 
@@ -891,6 +893,14 @@ SELECT 1;
             "nodes.kind = 'shell.host_mutation'",
             run.call_args.kwargs["input"],
         )
+        self.assertIn(
+            "nodes.metadata_json->>'category' = 'filesystem-mutation'",
+            run.call_args.kwargs["input"],
+        )
+        self.assertIn(
+            "nodes.metadata_json->>'tool' = 'rm'",
+            run.call_args.kwargs["input"],
+        )
 
     def test_query_host_mutator_records_rejects_malformed_json(self):
         completed = SimpleNamespace(stdout='{"path": "scripts/maintain.sh"}\n')
@@ -903,13 +913,22 @@ SELECT 1;
                 )
 
     def test_build_host_mutator_query_sql_quotes_root_path(self):
-        sql = build_host_mutator_query_sql("/tmp/fixture's repo")
+        sql = build_host_mutator_query_sql(
+            "/tmp/fixture's repo",
+            category="service-management",
+            tool="launchctl",
+        )
 
         self.assertIn(
             "repositories.root_path = '/tmp/fixture''s repo'",
             sql,
         )
         self.assertIn("nodes.kind = 'shell.host_mutation'", sql)
+        self.assertIn(
+            "nodes.metadata_json->>'category' = 'service-management'",
+            sql,
+        )
+        self.assertIn("nodes.metadata_json->>'tool' = 'launchctl'", sql)
 
     def test_query_storage_summary_returns_counts(self):
         completed = SimpleNamespace(
