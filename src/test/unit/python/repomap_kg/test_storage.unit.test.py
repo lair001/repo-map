@@ -471,9 +471,19 @@ SELECT 1;
             )
 
         sql = run.call_args.kwargs["input"]
+        self.assertEqual(sql.count("BEGIN;"), 1)
+        self.assertEqual(sql.count("COMMIT;"), 1)
         self.assertIn("INSERT INTO edges(", sql)
         self.assertIn("edge:node:bin/tool:shell.command:bin/tool#call:nix-build", sql)
         self.assertIn("tool:nix", sql)
+        self.assertIn("INSERT INTO raw_observations(", sql)
+        self.assertIn("INSERT INTO canonical_nodes(", sql)
+        self.assertIn("INSERT INTO canonical_edges(", sql)
+        self.assertIn("INSERT INTO canonical_evidence(", sql)
+        self.assertIn("INSERT INTO canonical_node_evidence(", sql)
+        self.assertIn("INSERT INTO canonical_edge_evidence(", sql)
+        self.assertIn("'files', 1", sql)
+        self.assertNotIn("'canonical_nodes',", sql)
 
     def test_load_file_observations_returns_psql_summary(self):
         observation = RawObservation(
@@ -508,6 +518,34 @@ SELECT 1;
         self.assertEqual(summary.run_id, 11)
         self.assertEqual(summary.files, 1)
         self.assertIn("-qAt", run.call_args.args[0])
+
+    def test_load_file_observations_rejects_canonicalization_errors_before_psql(self):
+        observation = RawObservation(
+            kind="file",
+            source_id="../outside",
+            path="../outside",
+            confidence="extracted",
+            extractor="fixture-discovery",
+            extractor_version="0.1.0",
+            metadata={
+                "language": "text",
+                "role": "documentation",
+                "content_hash": "0" * 64,
+                "generated": False,
+                "executable": False,
+            },
+        )
+
+        with patch("repomap_kg.storage.subprocess.run") as run:
+            with self.assertRaisesRegex(StorageSchemaError, "canonicalization failed"):
+                load_file_observations(
+                    ["-d", "postgres"],
+                    [observation],
+                    repository_name="fixture",
+                    root_path="/tmp/fixture",
+                )
+
+        run.assert_not_called()
 
     def test_load_file_observations_wraps_psql_failures(self):
         error = subprocess.CalledProcessError(

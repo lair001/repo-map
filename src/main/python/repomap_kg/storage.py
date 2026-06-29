@@ -165,6 +165,13 @@ class CanonicalLoadRows:
 
 
 @dataclass(frozen=True)
+class PreparedCanonicalLoad:
+    result: CanonicalizationResult
+    raw_rows: tuple[RawObservationRow, ...]
+    canonical_rows: CanonicalLoadRows
+
+
+@dataclass(frozen=True)
 class FileNodeRecord:
     path: str
     node_kind: str
@@ -513,6 +520,32 @@ def canonical_edge_link_row(
     )
 
 
+def prepare_canonical_load(
+    observations: Sequence[RawObservation],
+) -> PreparedCanonicalLoad:
+    result = canonicalize_observations(observations)
+    raw_rows = raw_observation_rows_from_observations(observations)
+    canonical_rows = (
+        canonical_rows_from_result(result)
+        if result.ok
+        else CanonicalLoadRows((), (), (), (), ())
+    )
+    return PreparedCanonicalLoad(
+        result=result,
+        raw_rows=raw_rows,
+        canonical_rows=canonical_rows,
+    )
+
+
+def canonicalization_error_message(result: CanonicalizationResult) -> str:
+    messages = "; ".join(
+        diagnostic.message
+        for diagnostic in result.diagnostics
+        if diagnostic.severity == "error"
+    )
+    return messages or "unknown canonicalization error"
+
+
 def load_canonical_observations(
     psql_args: Sequence[str],
     observations: Sequence[RawObservation],
@@ -522,20 +555,14 @@ def load_canonical_observations(
     git_commit: str | None = None,
     psql_command: str = "psql",
 ) -> CanonicalLoadSummary:
-    result = canonicalize_observations(observations)
-    raw_rows = raw_observation_rows_from_observations(observations)
-    canonical_rows = (
-        canonical_rows_from_result(result)
-        if result.ok
-        else CanonicalLoadRows((), (), (), (), ())
-    )
+    prepared = prepare_canonical_load(observations)
     sql = build_canonical_ingest_sql(
-        raw_rows,
-        canonical_rows,
+        prepared.raw_rows,
+        prepared.canonical_rows,
         repository_name=repository_name,
         root_path=root_path,
         git_commit=git_commit,
-        run_status="complete" if result.ok else "failed",
+        run_status="complete" if prepared.result.ok else "failed",
     )
     completed = run_psql(
         [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
@@ -544,13 +571,10 @@ def load_canonical_observations(
     summary = canonical_load_summary_from_payload(
         parse_psql_json(completed.stdout, "canonical load summary")
     )
-    if not result.ok:
-        messages = "; ".join(
-            diagnostic.message
-            for diagnostic in result.diagnostics
-            if diagnostic.severity == "error"
+    if not prepared.result.ok:
+        raise StorageSchemaError(
+            f"canonicalization failed: {canonicalization_error_message(prepared.result)}"
         )
-        raise StorageSchemaError(f"canonicalization failed: {messages}")
     return summary
 
 
@@ -565,9 +589,16 @@ def load_file_observations(
 ) -> LoadSummary:
     rows = file_rows_from_observations(observations)
     relationship_rows = relationship_rows_from_observations(observations)
-    sql = build_file_ingest_sql(
+    prepared = prepare_canonical_load(observations)
+    if not prepared.result.ok:
+        raise StorageSchemaError(
+            f"canonicalization failed: {canonicalization_error_message(prepared.result)}"
+        )
+    sql = build_file_canonical_ingest_sql(
         rows,
         relationship_rows=relationship_rows,
+        raw_rows=prepared.raw_rows,
+        canonical_rows=prepared.canonical_rows,
         repository_name=repository_name,
         root_path=root_path,
         git_commit=git_commit,
@@ -759,40 +790,44 @@ def build_file_ingest_sql(
     root_path: str,
     git_commit: str | None = None,
 ) -> str:
-    statements = [
-        "BEGIN;",
-        (
-            "INSERT INTO repositories(name, root_path) "
-            f"VALUES ({sql_literal(repository_name)}, {sql_literal(root_path)}) "
-            "ON CONFLICT (root_path) DO UPDATE SET name = EXCLUDED.name "
-            "RETURNING id"
-        ),
-        "\\gset repo_",
-        (
-            "INSERT INTO runs(repository_id, git_commit, status) "
-            f"VALUES (:repo_id, {sql_literal(git_commit)}, 'complete') "
-            "RETURNING id"
-        ),
-        "\\gset run_",
-    ]
-    statements.extend(file_upsert_sql(row) for row in rows)
-    statements.extend(file_node_upsert_sql(row) for row in rows)
-    statements.extend(file_evidence_upsert_sql(row) for row in rows)
-    for row in relationship_rows:
-        statements.append(relationship_source_node_upsert_sql(row))
-        statements.append(relationship_target_node_upsert_sql(row))
-        statements.append(relationship_evidence_upsert_sql(row))
-        statements.append(relationship_edge_upsert_sql(row))
+    statements = repository_run_prefix_sql(
+        repository_name=repository_name,
+        root_path=root_path,
+        git_commit=git_commit,
+        run_status="complete",
+    )
+    statements.extend(legacy_file_ingest_statements(rows, relationship_rows))
     statements.extend(
         [
             "COMMIT;",
-            (
-                "SELECT json_build_object("
-                "'repository_id', :repo_id::bigint, "
-                "'run_id', :run_id::bigint, "
-                f"'files', {len(rows)}"
-                ")::text;"
-            ),
+            file_load_summary_select_sql(len(rows)),
+        ]
+    )
+    return "\n".join(statements) + "\n"
+
+
+def build_file_canonical_ingest_sql(
+    rows: Sequence[FileRow],
+    *,
+    relationship_rows: Sequence[RelationshipRow],
+    raw_rows: Sequence[RawObservationRow],
+    canonical_rows: CanonicalLoadRows,
+    repository_name: str,
+    root_path: str,
+    git_commit: str | None = None,
+) -> str:
+    statements = repository_run_prefix_sql(
+        repository_name=repository_name,
+        root_path=root_path,
+        git_commit=git_commit,
+        run_status="complete",
+    )
+    statements.extend(legacy_file_ingest_statements(rows, relationship_rows))
+    statements.extend(canonical_ingest_statements(raw_rows, canonical_rows))
+    statements.extend(
+        [
+            "COMMIT;",
+            file_load_summary_select_sql(len(rows)),
         ]
     )
     return "\n".join(statements) + "\n"
@@ -807,7 +842,30 @@ def build_canonical_ingest_sql(
     git_commit: str | None = None,
     run_status: str = "complete",
 ) -> str:
-    statements = [
+    statements = repository_run_prefix_sql(
+        repository_name=repository_name,
+        root_path=root_path,
+        git_commit=git_commit,
+        run_status=run_status,
+    )
+    statements.extend(canonical_ingest_statements(raw_rows, canonical_rows))
+    statements.extend(
+        [
+            "COMMIT;",
+            canonical_load_summary_select_sql(raw_rows, canonical_rows),
+        ]
+    )
+    return "\n".join(statements) + "\n"
+
+
+def repository_run_prefix_sql(
+    *,
+    repository_name: str,
+    root_path: str,
+    git_commit: str | None,
+    run_status: str,
+) -> list[str]:
+    return [
         "BEGIN;",
         (
             "INSERT INTO repositories(name, root_path) "
@@ -823,6 +881,29 @@ def build_canonical_ingest_sql(
         ),
         "\\gset run_",
     ]
+
+
+def legacy_file_ingest_statements(
+    rows: Sequence[FileRow],
+    relationship_rows: Sequence[RelationshipRow],
+) -> list[str]:
+    statements = []
+    statements.extend(file_upsert_sql(row) for row in rows)
+    statements.extend(file_node_upsert_sql(row) for row in rows)
+    statements.extend(file_evidence_upsert_sql(row) for row in rows)
+    for row in relationship_rows:
+        statements.append(relationship_source_node_upsert_sql(row))
+        statements.append(relationship_target_node_upsert_sql(row))
+        statements.append(relationship_evidence_upsert_sql(row))
+        statements.append(relationship_edge_upsert_sql(row))
+    return statements
+
+
+def canonical_ingest_statements(
+    raw_rows: Sequence[RawObservationRow],
+    canonical_rows: CanonicalLoadRows,
+) -> list[str]:
+    statements = []
     statements.extend(raw_observation_upsert_sql(row) for row in raw_rows)
     statements.extend(canonical_node_upsert_sql(row) for row in canonical_rows.nodes)
     statements.extend(canonical_edge_upsert_sql(row) for row in canonical_rows.edges)
@@ -837,26 +918,37 @@ def build_canonical_ingest_sql(
         canonical_edge_evidence_upsert_sql(row)
         for row in canonical_rows.edge_evidence_links
     )
-    statements.extend(
-        [
-            "COMMIT;",
-            (
-                "SELECT json_build_object("
-                "'repository_id', :repo_id::bigint, "
-                "'run_id', :run_id::bigint, "
-                f"'raw_observations', {len(raw_rows)}, "
-                f"'canonical_nodes', {len(canonical_rows.nodes)}, "
-                f"'canonical_edges', {len(canonical_rows.edges)}, "
-                f"'canonical_evidence', {len(canonical_rows.evidence)}, "
-                "'canonical_node_evidence_links', "
-                f"{len(canonical_rows.node_evidence_links)}, "
-                "'canonical_edge_evidence_links', "
-                f"{len(canonical_rows.edge_evidence_links)}"
-                ")::text;"
-            ),
-        ]
+    return statements
+
+
+def file_load_summary_select_sql(file_count: int) -> str:
+    return (
+        "SELECT json_build_object("
+        "'repository_id', :repo_id::bigint, "
+        "'run_id', :run_id::bigint, "
+        f"'files', {file_count}"
+        ")::text;"
     )
-    return "\n".join(statements) + "\n"
+
+
+def canonical_load_summary_select_sql(
+    raw_rows: Sequence[RawObservationRow],
+    canonical_rows: CanonicalLoadRows,
+) -> str:
+    return (
+        "SELECT json_build_object("
+        "'repository_id', :repo_id::bigint, "
+        "'run_id', :run_id::bigint, "
+        f"'raw_observations', {len(raw_rows)}, "
+        f"'canonical_nodes', {len(canonical_rows.nodes)}, "
+        f"'canonical_edges', {len(canonical_rows.edges)}, "
+        f"'canonical_evidence', {len(canonical_rows.evidence)}, "
+        "'canonical_node_evidence_links', "
+        f"{len(canonical_rows.node_evidence_links)}, "
+        "'canonical_edge_evidence_links', "
+        f"{len(canonical_rows.edge_evidence_links)}"
+        ")::text;"
+    )
 
 
 def run_psql(command: Sequence[str], *, input_text: str | None = None):

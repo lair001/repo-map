@@ -11,6 +11,7 @@ from pathlib import Path
 from repomap_kg.cli import main
 from repomap_kg.observations import RawObservation
 from repomap_kg.storage import (
+    StorageSchemaError,
     apply_migrations,
     default_rdbms_root,
     load_file_observations,
@@ -443,6 +444,7 @@ WHERE edges.kind = 'shell.command';
 
         self.assertEqual(exit_code, 0, stderr)
         payload = json.loads(stdout)
+        self.assertEqual(set(payload), {"files", "repository_id", "run_id"})
         self.assertEqual(payload["files"], 1)
         self.assertEqual(text_exit_code, 0, text_stderr)
         self.assertRegex(
@@ -450,6 +452,201 @@ WHERE edges.kind = 'shell.command';
             r"^loaded 1 files into repository [0-9a-f-]+ run [0-9a-f-]+\n$",
         )
         self.assertEqual(stored_path, "README.md")
+
+    def test_storage_load_files_dual_writes_canonical_shell_collapse_fixture(self):
+        require_postgres_binaries()
+        raw_jsonl = canonicalization_fixture(
+            "shell_executes_collapse",
+            "raw_observations.jsonl",
+        )
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            exit_code, stdout, stderr = run_repo_map_in_process(
+                "storage",
+                "load-files",
+                str(raw_jsonl),
+                "--repository-name",
+                "fixture",
+                "--root-path",
+                "/tmp/fixture",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+                "--json",
+            )
+            counts = postgres.psql_scalar(
+                """
+SELECT (SELECT count(*) FROM raw_observations)::text
+       || '|'
+       || (SELECT count(*) FROM canonical_nodes)::text
+       || '|'
+       || (SELECT count(*) FROM canonical_edges)::text
+       || '|'
+       || (SELECT count(*) FROM canonical_evidence)::text
+       || '|'
+       || (SELECT count(*) FROM canonical_node_evidence)::text
+       || '|'
+       || (SELECT count(*) FROM canonical_edge_evidence)::text
+       || '|'
+       || (SELECT count(*) FROM files)::text
+       || '|'
+       || (SELECT count(*) FROM nodes)::text
+       || '|'
+       || (SELECT count(*) FROM edges)::text
+       || '|'
+       || (SELECT count(*) FROM evidence)::text;
+"""
+            )
+            edge_row = postgres.psql_scalar(
+                """
+SELECT source_canonical_key
+       || '|'
+       || edge_kind
+       || '|'
+       || target_canonical_key
+FROM canonical_edges;
+"""
+            )
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(set(payload), {"files", "repository_id", "run_id"})
+        self.assertEqual(payload["files"], 0)
+        self.assertEqual(counts, "2|2|1|2|4|2|0|3|2|2")
+        self.assertEqual(edge_row, "file:bin/tool|executes|tool:nix")
+
+    def test_storage_load_files_retains_unsupported_future_observation(self):
+        require_postgres_binaries()
+        raw_jsonl = canonicalization_fixture(
+            "future_python_stub",
+            "raw_observations.jsonl",
+        )
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            exit_code, stdout, stderr = run_repo_map_in_process(
+                "storage",
+                "load-files",
+                str(raw_jsonl),
+                "--repository-name",
+                "fixture",
+                "--root-path",
+                "/tmp/fixture",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+                "--json",
+            )
+            counts = postgres.psql_scalar(
+                """
+SELECT (SELECT count(*) FROM raw_observations)::text
+       || '|'
+       || (SELECT count(*) FROM canonical_nodes)::text
+       || '|'
+       || (SELECT count(*) FROM canonical_edges)::text
+       || '|'
+       || (SELECT count(*) FROM canonical_evidence)::text;
+"""
+            )
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(set(payload), {"files", "repository_id", "run_id"})
+        self.assertEqual(payload["files"], 0)
+        self.assertEqual(counts, "1|0|0|0")
+
+    def test_storage_load_files_canonical_failure_rolls_back_legacy_rows(self):
+        require_postgres_binaries()
+        observation = RawObservation(
+            kind="file",
+            source_id="README.md",
+            path="README.md",
+            confidence="manual",
+            extractor="fixture-discovery",
+            extractor_version="0.1.0",
+            metadata={
+                "language": "markdown",
+                "role": "documentation",
+                "content_hash": "e" * 64,
+                "generated": False,
+                "executable": False,
+            },
+        )
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            postgres.psql_scalar(
+                """
+CREATE OR REPLACE FUNCTION fail_canonical_node_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'simulated canonical failure';
+END;
+$$;
+CREATE TRIGGER fail_canonical_nodes
+BEFORE INSERT ON canonical_nodes
+FOR EACH ROW EXECUTE FUNCTION fail_canonical_node_insert();
+SELECT 'ok';
+"""
+            )
+
+            with self.assertRaisesRegex(StorageSchemaError, "simulated canonical failure"):
+                load_file_observations(
+                    postgres.psql_args,
+                    [observation],
+                    repository_name="fixture",
+                    root_path="/tmp/fixture",
+                    psql_command=postgres.psql_command,
+                )
+
+            counts = postgres.psql_scalar(
+                """
+SELECT (SELECT count(*) FROM repositories)::text
+       || '|'
+       || (SELECT count(*) FROM runs)::text
+       || '|'
+       || (SELECT count(*) FROM files)::text
+       || '|'
+       || (SELECT count(*) FROM nodes)::text
+       || '|'
+       || (SELECT count(*) FROM evidence)::text
+       || '|'
+       || (SELECT count(*) FROM raw_observations)::text
+       || '|'
+       || (SELECT count(*) FROM canonical_nodes)::text;
+"""
+            )
+
+        self.assertEqual(counts, "0|0|0|0|0|0|0")
 
     def test_storage_load_canonical_cli_loads_shell_collapse_fixture(self):
         require_postgres_binaries()
