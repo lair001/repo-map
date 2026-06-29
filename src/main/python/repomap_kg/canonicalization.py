@@ -20,6 +20,7 @@ from repomap_kg.graph_keys import (
     dynamic_key,
     env_key,
     file_key,
+    host_category_key,
     tool_key,
     unknown_key,
 )
@@ -42,6 +43,15 @@ SECRET_PRONE_ENV_MARKERS = (
     "KEY",
     "CREDENTIAL",
     "AUTH",
+)
+
+HOST_MUTATION_CATEGORIES = frozenset(
+    (
+        "package-management",
+        "service-management",
+        "system-activation",
+        "filesystem-mutation",
+    )
 )
 
 CONFIDENCE_RANKS = {
@@ -99,6 +109,18 @@ def canonicalize_observations(
             continue
         if observation.kind == "shell.env":
             _canonicalize_shell_env_observation(
+                observation=observation,
+                ordinal=ordinal,
+                nodes=nodes,
+                edges=edges,
+                evidence=evidence,
+                node_evidence_links=node_evidence_links,
+                edge_evidence_links=edge_evidence_links,
+                diagnostics=diagnostics,
+            )
+            continue
+        if observation.kind == "shell.host_mutation":
+            _canonicalize_shell_host_mutation_observation(
                 observation=observation,
                 ordinal=ordinal,
                 nodes=nodes,
@@ -510,6 +532,96 @@ def _canonicalize_shell_env_observation(
     )
 
 
+def _canonicalize_shell_host_mutation_observation(
+    *,
+    observation: RawObservation,
+    ordinal: int,
+    nodes: dict[str, CanonicalNode],
+    edges: dict[str, CanonicalEdge],
+    evidence: list[CanonicalEvidence],
+    node_evidence_links: list[CanonicalNodeEvidenceLink],
+    edge_evidence_links: list[CanonicalEdgeEvidenceLink],
+    diagnostics: list[CanonicalizationDiagnostic],
+) -> None:
+    try:
+        source_key = file_key(observation.path)
+    except GraphKeyError as error:
+        diagnostics.append(
+            CanonicalizationDiagnostic(
+                severity="error",
+                category=_graph_key_error_category(error),
+                message=str(error),
+                raw_observation_ordinal=ordinal,
+                raw_source_id=observation.source_id,
+                path=observation.path,
+                field="path",
+                value=observation.path,
+            )
+        )
+        return
+
+    target_key = _shell_host_mutation_target_key(observation, ordinal, diagnostics)
+    evidence_record = _evidence_from_observation(observation, ordinal)
+    evidence.append(evidence_record)
+
+    _upsert_node(
+        nodes,
+        canonical_key=source_key,
+        kind="file",
+        display_name=observation.path,
+        metadata={},
+        confidence=observation.confidence,
+    )
+    _upsert_node(
+        nodes,
+        canonical_key=target_key,
+        kind=_node_kind_from_key(target_key),
+        display_name=_display_name_from_key(target_key),
+        metadata={},
+        confidence=observation.confidence,
+    )
+    node_evidence_links.extend(
+        (
+            CanonicalNodeEvidenceLink(
+                canonical_key=source_key,
+                evidence_key=evidence_record.evidence_key,
+                link_kind="inferred_from_edge",
+            ),
+            CanonicalNodeEvidenceLink(
+                canonical_key=target_key,
+                evidence_key=evidence_record.evidence_key,
+                link_kind="inferred_from_edge",
+            ),
+        )
+    )
+
+    identity_metadata: dict[str, Any] = {}
+    edge_key = canonical_edge_key(
+        graph_key_version=GRAPH_KEY_VERSION,
+        source_key=source_key,
+        kind="mutates_host",
+        target_key=target_key,
+        identity_metadata=identity_metadata,
+    )
+    _upsert_edge(
+        edges,
+        edge_key=edge_key,
+        source_key=source_key,
+        kind="mutates_host",
+        target_key=target_key,
+        identity_metadata=identity_metadata,
+        metadata=_shell_host_mutation_edge_metadata(observation.metadata),
+        confidence=observation.confidence,
+    )
+    edge_evidence_links.append(
+        CanonicalEdgeEvidenceLink(
+            edge_key=edge_key,
+            evidence_key=evidence_record.evidence_key,
+            link_kind="supports",
+        )
+    )
+
+
 def _evidence_from_observation(
     observation: RawObservation,
     ordinal: int,
@@ -726,6 +838,71 @@ def _is_secret_prone_env_variable(variable: str) -> bool:
     return any(marker in upper_variable for marker in SECRET_PRONE_ENV_MARKERS)
 
 
+def _shell_host_mutation_target_key(
+    observation: RawObservation,
+    ordinal: int,
+    diagnostics: list[CanonicalizationDiagnostic],
+) -> str:
+    category = observation.metadata.get("category")
+    if not isinstance(category, str) or not category.strip():
+        placeholder_key = unknown_key("host.category", "missing-host-category")
+        diagnostics.append(
+            CanonicalizationDiagnostic(
+                severity="warning",
+                category="missing_required_metadata",
+                message="shell.host_mutation observation requires category metadata",
+                raw_observation_ordinal=ordinal,
+                raw_source_id=observation.source_id,
+                path=observation.path,
+                field="metadata.category",
+                value=category,
+                placeholder_key=placeholder_key,
+            )
+        )
+        return placeholder_key
+
+    if category not in HOST_MUTATION_CATEGORIES:
+        placeholder_key = unknown_key("host.category", f"unregistered-{category}")
+        diagnostics.append(
+            CanonicalizationDiagnostic(
+                severity="warning",
+                category="unregistered_category",
+                message=f"unregistered shell host mutation category: {category}",
+                raw_observation_ordinal=ordinal,
+                raw_source_id=observation.source_id,
+                path=observation.path,
+                field="metadata.category",
+                value=category,
+                placeholder_key=placeholder_key,
+            )
+        )
+        return placeholder_key
+
+    return host_category_key(category)
+
+
+def _shell_host_mutation_edge_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    tool = metadata.get("tool")
+    if isinstance(tool, str) and tool:
+        summary["tools"] = [tool]
+    argv = metadata.get("argv")
+    if isinstance(argv, Sequence) and not isinstance(argv, (str, bytes)):
+        summary["argv_examples"] = [list(argv)]
+    effective_argv = metadata.get("effective_argv")
+    if isinstance(effective_argv, Sequence) and not isinstance(
+        effective_argv, (str, bytes)
+    ):
+        summary["effective_argv_examples"] = [list(effective_argv)]
+    privileged = metadata.get("privileged")
+    if isinstance(privileged, bool):
+        summary["privileged_observed"] = privileged
+    reason = metadata.get("reason")
+    if isinstance(reason, str) and reason:
+        summary["reasons"] = [reason]
+    return summary
+
+
 def _node_kind_from_key(canonical_key: str) -> str:
     return canonical_key.split(":", 1)[0]
 
@@ -811,6 +988,13 @@ def _merge_summary_metadata(
     for key, value in incoming.items():
         if key not in merged:
             merged[key] = value
+            continue
+        if (
+            key == "privileged_observed"
+            and isinstance(merged[key], bool)
+            and isinstance(value, bool)
+        ):
+            merged[key] = merged[key] or value
             continue
         if isinstance(merged[key], list) and isinstance(value, list):
             merged[key] = _append_distinct_json_values(merged[key], value)

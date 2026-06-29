@@ -21,6 +21,7 @@ class CanonicalizationFixtureTests(unittest.TestCase):
             "shell_env_read",
             "shell_env_write",
             "shell_env_write_collapse",
+            "shell_host_mutation_package",
         )
 
         for fixture_name in fixture_names:
