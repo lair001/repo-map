@@ -15,6 +15,8 @@ from repomap_kg.storage import (
     apply_migrations,
     default_rdbms_root,
     load_file_observations,
+    query_canonical_edge_records,
+    query_canonical_node_records,
     raw_observation_rows_from_observations,
     raw_observation_upsert_sql,
 )
@@ -526,6 +528,83 @@ FROM canonical_edges;
         self.assertEqual(payload["files"], 0)
         self.assertEqual(counts, "2|2|1|2|4|2|0|3|2|2")
         self.assertEqual(edge_row, "file:bin/tool|executes|tool:nix")
+
+    def test_canonical_query_helpers_read_c2_loaded_rows(self):
+        require_postgres_binaries()
+        raw_jsonl = canonicalization_fixture(
+            "shell_executes_collapse",
+            "raw_observations.jsonl",
+        )
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            exit_code, _stdout, stderr = run_repo_map_in_process(
+                "storage",
+                "load-files",
+                str(raw_jsonl),
+                "--repository-name",
+                "fixture",
+                "--root-path",
+                "/tmp/fixture",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+                "--json",
+            )
+
+            all_nodes = query_canonical_node_records(
+                postgres.psql_args,
+                root_path="/tmp/fixture",
+                psql_command=postgres.psql_command,
+            )
+            file_nodes = query_canonical_node_records(
+                postgres.psql_args,
+                root_path="/tmp/fixture",
+                kind="file",
+                path_prefix="bin/",
+                psql_command=postgres.psql_command,
+            )
+            tool_nodes = query_canonical_node_records(
+                postgres.psql_args,
+                root_path="/tmp/fixture",
+                canonical_key="tool:nix",
+                psql_command=postgres.psql_command,
+            )
+            edges = query_canonical_edge_records(
+                postgres.psql_args,
+                root_path="/tmp/fixture",
+                kind="executes",
+                source_key="file:bin/tool",
+                target_key="tool:nix",
+                psql_command=postgres.psql_command,
+            )
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(
+            [node.canonical_key for node in all_nodes],
+            ["file:bin/tool", "tool:nix"],
+        )
+        self.assertEqual([node.canonical_key for node in file_nodes], ["file:bin/tool"])
+        self.assertEqual(file_nodes[0].display_name, "bin/tool")
+        self.assertEqual(file_nodes[0].metadata, {})
+        self.assertEqual([node.canonical_key for node in tool_nodes], ["tool:nix"])
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0].source_key, "file:bin/tool")
+        self.assertEqual(edges[0].edge_kind, "executes")
+        self.assertEqual(edges[0].target_key, "tool:nix")
+        self.assertEqual(len(edges[0].identity_metadata_hash), 64)
+        self.assertFalse(edges[0].conflict)
 
     def test_storage_load_files_retains_unsupported_future_observation(self):
         require_postgres_binaries()

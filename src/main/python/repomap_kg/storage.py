@@ -14,6 +14,7 @@ from typing import Any
 from repomap_kg.canonical import CanonicalizationResult
 from repomap_kg.canonicalization import canonicalize_observations
 from repomap_kg.files import FileRecord, format_table_row, render_table_value
+from repomap_kg.graph_keys import GraphKeyError, file_key
 from repomap_kg.host_mutators import HostMutatorRecord
 from repomap_kg.observations import RawObservation
 
@@ -169,6 +170,40 @@ class PreparedCanonicalLoad:
     result: CanonicalizationResult
     raw_rows: tuple[RawObservationRow, ...]
     canonical_rows: CanonicalLoadRows
+
+
+@dataclass(frozen=True)
+class CanonicalNodeRecord:
+    canonical_key: str
+    graph_key_version: int
+    kind: str
+    display_name: str
+    confidence: str
+    conflict: bool
+    metadata: dict[str, Any]
+    first_seen_run_id: int
+    last_seen_run_id: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class CanonicalEdgeRecord:
+    source_key: str
+    edge_kind: str
+    target_key: str
+    graph_key_version: int
+    identity_metadata: dict[str, Any]
+    identity_metadata_hash: str
+    metadata: dict[str, Any]
+    confidence: str
+    conflict: bool
+    first_seen_run_id: int
+    last_seen_run_id: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -671,6 +706,34 @@ def query_node_records(
     return tuple(node_record_from_storage_payload(item) for item in payload)
 
 
+def query_canonical_node_records(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    kind: str | None = None,
+    canonical_key: str | None = None,
+    path_prefix: str | None = None,
+    graph_key_version: int = 1,
+    psql_command: str = "psql",
+) -> tuple[CanonicalNodeRecord, ...]:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_canonical_node_query_sql(
+            root_path,
+            kind=kind,
+            canonical_key=canonical_key,
+            path_prefix=path_prefix,
+            graph_key_version=graph_key_version,
+        ),
+    )
+    payload = parse_psql_json(result.stdout, "canonical node records")
+    if not isinstance(payload, list):
+        raise StorageSchemaError(
+            "psql did not return canonical node records as a JSON array"
+        )
+    return tuple(canonical_node_record_from_storage_payload(item) for item in payload)
+
+
 def query_neighborhood(
     psql_args: Sequence[str],
     *,
@@ -741,6 +804,34 @@ def query_edge_records(
     if not isinstance(payload, list):
         raise StorageSchemaError("psql did not return edge records as a JSON array")
     return tuple(edge_record_from_storage_payload(item) for item in payload)
+
+
+def query_canonical_edge_records(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    kind: str | None = None,
+    source_key: str | None = None,
+    target_key: str | None = None,
+    graph_key_version: int = 1,
+    psql_command: str = "psql",
+) -> tuple[CanonicalEdgeRecord, ...]:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_canonical_edge_query_sql(
+            root_path,
+            kind=kind,
+            source_key=source_key,
+            target_key=target_key,
+            graph_key_version=graph_key_version,
+        ),
+    )
+    payload = parse_psql_json(result.stdout, "canonical edge records")
+    if not isinstance(payload, list):
+        raise StorageSchemaError(
+            "psql did not return canonical edge records as a JSON array"
+        )
+    return tuple(canonical_edge_record_from_storage_payload(item) for item in payload)
 
 
 def query_host_mutator_records(
@@ -1052,6 +1143,50 @@ def build_node_query_sql(
     )
 
 
+def build_canonical_node_query_sql(
+    root_path: str,
+    *,
+    kind: str | None = None,
+    canonical_key: str | None = None,
+    path_prefix: str | None = None,
+    graph_key_version: int = 1,
+) -> str:
+    require_supported_graph_key_version(graph_key_version)
+    filters = [
+        f"repositories.root_path = {sql_literal(root_path)}",
+        f"canonical_nodes.graph_key_version = {graph_key_version}",
+    ]
+    if kind is not None:
+        filters.append(f"canonical_nodes.kind = {sql_literal(kind)}")
+    if canonical_key is not None:
+        filters.append(
+            f"canonical_nodes.canonical_key = {sql_literal(canonical_key)}"
+        )
+    if path_prefix is not None:
+        filters.append(
+            "canonical_nodes.canonical_key LIKE "
+            f"{sql_like_prefix_literal(canonical_file_path_prefix(path_prefix))} "
+            "ESCAPE '\\'"
+        )
+    where_sql = " AND ".join(filters)
+    return (
+        "SELECT COALESCE(json_agg(json_build_object("
+        "'canonical_key', canonical_nodes.canonical_key, "
+        "'graph_key_version', canonical_nodes.graph_key_version, "
+        "'kind', canonical_nodes.kind, "
+        "'display_name', canonical_nodes.display_name, "
+        "'confidence', canonical_nodes.confidence, "
+        "'conflict', canonical_nodes.conflict, "
+        "'metadata', canonical_nodes.metadata_json, "
+        "'first_seen_run_id', canonical_nodes.first_seen_run_id, "
+        "'last_seen_run_id', canonical_nodes.last_seen_run_id"
+        ") ORDER BY canonical_nodes.canonical_key), '[]'::json)::text "
+        "FROM canonical_nodes "
+        "JOIN repositories ON repositories.id = canonical_nodes.repository_id "
+        f"WHERE {where_sql};"
+    )
+
+
 def build_neighborhood_query_sql(
     root_path: str,
     *,
@@ -1317,6 +1452,55 @@ def build_edge_query_sql(
         "JOIN nodes dst ON dst.id = edges.dst_node_id "
         "JOIN evidence ON evidence.id = edges.evidence_id "
         "LEFT JOIN files ON files.id = evidence.file_id "
+        f"WHERE {where_sql};"
+    )
+
+
+def build_canonical_edge_query_sql(
+    root_path: str,
+    *,
+    kind: str | None = None,
+    source_key: str | None = None,
+    target_key: str | None = None,
+    graph_key_version: int = 1,
+) -> str:
+    require_supported_graph_key_version(graph_key_version)
+    filters = [
+        f"repositories.root_path = {sql_literal(root_path)}",
+        f"canonical_edges.graph_key_version = {graph_key_version}",
+    ]
+    if kind is not None:
+        filters.append(f"canonical_edges.edge_kind = {sql_literal(kind)}")
+    if source_key is not None:
+        filters.append(
+            "canonical_edges.source_canonical_key = "
+            f"{sql_literal(source_key)}"
+        )
+    if target_key is not None:
+        filters.append(
+            "canonical_edges.target_canonical_key = "
+            f"{sql_literal(target_key)}"
+        )
+    where_sql = " AND ".join(filters)
+    return (
+        "SELECT COALESCE(json_agg(json_build_object("
+        "'source_key', canonical_edges.source_canonical_key, "
+        "'edge_kind', canonical_edges.edge_kind, "
+        "'target_key', canonical_edges.target_canonical_key, "
+        "'graph_key_version', canonical_edges.graph_key_version, "
+        "'identity_metadata', canonical_edges.identity_metadata_json, "
+        "'identity_metadata_hash', canonical_edges.identity_metadata_hash, "
+        "'metadata', canonical_edges.metadata_json, "
+        "'confidence', canonical_edges.confidence, "
+        "'conflict', canonical_edges.conflict, "
+        "'first_seen_run_id', canonical_edges.first_seen_run_id, "
+        "'last_seen_run_id', canonical_edges.last_seen_run_id"
+        ") ORDER BY canonical_edges.source_canonical_key, "
+        "canonical_edges.edge_kind, "
+        "canonical_edges.target_canonical_key, "
+        "canonical_edges.identity_metadata_hash), '[]'::json)::text "
+        "FROM canonical_edges "
+        "JOIN repositories ON repositories.id = canonical_edges.repository_id "
         f"WHERE {where_sql};"
     )
 
@@ -1867,6 +2051,74 @@ def edge_record_from_storage_payload(payload: Any) -> EdgeRecord:
     )
 
 
+def canonical_node_record_from_storage_payload(payload: Any) -> CanonicalNodeRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed canonical node record")
+    return CanonicalNodeRecord(
+        canonical_key=payload_text(
+            payload, "canonical_key", label="canonical node record"
+        ),
+        graph_key_version=payload_int(
+            payload, "graph_key_version", label="canonical node record"
+        ),
+        kind=payload_text(payload, "kind", label="canonical node record"),
+        display_name=payload_text(
+            payload, "display_name", label="canonical node record"
+        ),
+        confidence=payload_text(
+            payload, "confidence", label="canonical node record"
+        ),
+        conflict=payload_bool(payload, "conflict", label="canonical node record"),
+        metadata=payload_json_object(
+            payload, "metadata", label="canonical node record"
+        ),
+        first_seen_run_id=payload_int(
+            payload, "first_seen_run_id", label="canonical node record"
+        ),
+        last_seen_run_id=payload_int(
+            payload, "last_seen_run_id", label="canonical node record"
+        ),
+    )
+
+
+def canonical_edge_record_from_storage_payload(payload: Any) -> CanonicalEdgeRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed canonical edge record")
+    return CanonicalEdgeRecord(
+        source_key=payload_text(
+            payload, "source_key", label="canonical edge record"
+        ),
+        edge_kind=payload_text(
+            payload, "edge_kind", label="canonical edge record"
+        ),
+        target_key=payload_text(
+            payload, "target_key", label="canonical edge record"
+        ),
+        graph_key_version=payload_int(
+            payload, "graph_key_version", label="canonical edge record"
+        ),
+        identity_metadata=payload_json_object(
+            payload, "identity_metadata", label="canonical edge record"
+        ),
+        identity_metadata_hash=payload_text(
+            payload, "identity_metadata_hash", label="canonical edge record"
+        ),
+        metadata=payload_json_object(
+            payload, "metadata", label="canonical edge record"
+        ),
+        confidence=payload_text(
+            payload, "confidence", label="canonical edge record"
+        ),
+        conflict=payload_bool(payload, "conflict", label="canonical edge record"),
+        first_seen_run_id=payload_int(
+            payload, "first_seen_run_id", label="canonical edge record"
+        ),
+        last_seen_run_id=payload_int(
+            payload, "last_seen_run_id", label="canonical edge record"
+        ),
+    )
+
+
 def host_mutator_record_from_storage_payload(payload: Any) -> HostMutatorRecord:
     if not isinstance(payload, dict):
         raise StorageSchemaError("psql returned a malformed host-mutator record")
@@ -2215,6 +2467,18 @@ def payload_string_tuple(
     return tuple(value)
 
 
+def payload_json_object(
+    payload: dict[str, Any], key: str, *, label: str
+) -> dict[str, Any]:
+    value = payload.get(key)
+    if not isinstance(value, Mapping):
+        raise StorageSchemaError(f"psql returned a malformed {label}: {key}")
+    normalized = canonical_json_value(value)
+    if not isinstance(normalized, dict):
+        raise StorageSchemaError(f"psql returned a malformed {label}: {key}")
+    return normalized
+
+
 def payload_int(payload: dict[str, Any], key: str, *, label: str) -> int:
     value = payload.get(key)
     try:
@@ -2287,6 +2551,31 @@ def canonical_json_value(value: Any) -> Any:
     if isinstance(value, tuple | list):
         return [canonical_json_value(item) for item in value]
     return value
+
+
+def require_supported_graph_key_version(graph_key_version: int) -> None:
+    if graph_key_version != 1:
+        raise StorageSchemaError("unsupported graph key version")
+
+
+def canonical_file_path_prefix(path_prefix: str) -> str:
+    try:
+        normalized = path_prefix.replace("\\", "/")
+        if normalized.endswith("/"):
+            stripped = normalized.rstrip("/")
+            return file_key(stripped or ".") + "/"
+        return file_key(normalized)
+    except GraphKeyError as error:
+        raise StorageSchemaError("invalid canonical file path prefix") from error
+
+
+def sql_like_prefix_literal(value: str) -> str:
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+    return sql_literal(escaped + "%")
 
 
 def sql_literal(value: str | None) -> str:

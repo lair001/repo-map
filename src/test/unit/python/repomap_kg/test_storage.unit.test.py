@@ -10,6 +10,8 @@ from unittest.mock import patch
 from repomap_kg.canonicalization import canonicalize_observations
 from repomap_kg.observations import RawObservation
 from repomap_kg.storage import (
+    CanonicalEdgeRecord,
+    CanonicalNodeRecord,
     EdgeRecord,
     FileNodeRecord,
     FileNeighborhoodRecord,
@@ -18,6 +20,8 @@ from repomap_kg.storage import (
     StorageSummaryRecord,
     StorageSchemaError,
     build_file_neighborhood_query_sql,
+    build_canonical_edge_query_sql,
+    build_canonical_node_query_sql,
     build_neighborhood_query_sql,
     build_node_query_sql,
     build_storage_summary_query_sql,
@@ -51,6 +55,10 @@ from repomap_kg.storage import (
     identity_metadata_hash,
     raw_observation_payload_hash,
     raw_observation_rows_from_observations,
+    canonical_edge_record_from_storage_payload,
+    canonical_node_record_from_storage_payload,
+    query_canonical_edge_records,
+    query_canonical_node_records,
 )
 
 
@@ -385,6 +393,180 @@ SELECT 1;
         self.assertIn("INSERT INTO canonical_edge_evidence(", sql)
         self.assertIn("source_canonical_key = 'file:bin/tool'", sql)
         self.assertNotIn("canonical_edge_id = 'canonical-edge:", sql)
+
+    def test_build_canonical_node_query_sql_filters_and_orders(self):
+        sql = build_canonical_node_query_sql(
+            "/tmp/fixture",
+            kind="file",
+            canonical_key="file:bin/tool",
+            path_prefix="bin/",
+            graph_key_version=1,
+        )
+
+        self.assertIn("FROM canonical_nodes", sql)
+        self.assertIn("repositories.root_path = '/tmp/fixture'", sql)
+        self.assertIn("canonical_nodes.graph_key_version = 1", sql)
+        self.assertIn("canonical_nodes.kind = 'file'", sql)
+        self.assertIn("canonical_nodes.canonical_key = 'file:bin/tool'", sql)
+        self.assertIn("canonical_nodes.canonical_key LIKE 'file:bin/%'", sql)
+        self.assertIn("ORDER BY canonical_nodes.canonical_key", sql)
+        self.assertIn("'metadata', canonical_nodes.metadata_json", sql)
+
+    def test_build_canonical_edge_query_sql_filters_and_orders(self):
+        sql = build_canonical_edge_query_sql(
+            "/tmp/fixture",
+            kind="executes",
+            source_key="file:bin/tool",
+            target_key="tool:nix",
+            graph_key_version=1,
+        )
+
+        self.assertIn("FROM canonical_edges", sql)
+        self.assertIn("repositories.root_path = '/tmp/fixture'", sql)
+        self.assertIn("canonical_edges.graph_key_version = 1", sql)
+        self.assertIn("canonical_edges.edge_kind = 'executes'", sql)
+        self.assertIn("canonical_edges.source_canonical_key = 'file:bin/tool'", sql)
+        self.assertIn("canonical_edges.target_canonical_key = 'tool:nix'", sql)
+        self.assertIn(
+            "ORDER BY canonical_edges.source_canonical_key, "
+            "canonical_edges.edge_kind, "
+            "canonical_edges.target_canonical_key, "
+            "canonical_edges.identity_metadata_hash",
+            sql,
+        )
+        self.assertIn("'identity_metadata', canonical_edges.identity_metadata_json", sql)
+
+    def test_canonical_node_record_from_storage_payload_preserves_public_fields(self):
+        record = canonical_node_record_from_storage_payload(
+            {
+                "canonical_key": "file:bin/tool",
+                "graph_key_version": 1,
+                "kind": "file",
+                "display_name": "bin/tool",
+                "confidence": "extracted",
+                "conflict": False,
+                "metadata": {"role": "script"},
+                "first_seen_run_id": 10,
+                "last_seen_run_id": 12,
+            }
+        )
+
+        self.assertEqual(
+            record,
+            CanonicalNodeRecord(
+                canonical_key="file:bin/tool",
+                graph_key_version=1,
+                kind="file",
+                display_name="bin/tool",
+                confidence="extracted",
+                conflict=False,
+                metadata={"role": "script"},
+                first_seen_run_id=10,
+                last_seen_run_id=12,
+            ),
+        )
+        self.assertEqual(record.to_dict()["canonical_key"], "file:bin/tool")
+
+    def test_canonical_edge_record_from_storage_payload_preserves_public_fields(self):
+        hash_text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+        record = canonical_edge_record_from_storage_payload(
+            {
+                "source_key": "file:bin/tool",
+                "edge_kind": "executes",
+                "target_key": "tool:nix",
+                "graph_key_version": 1,
+                "identity_metadata": {},
+                "identity_metadata_hash": hash_text,
+                "metadata": {"commands": ["nix"]},
+                "confidence": "extracted",
+                "conflict": False,
+                "first_seen_run_id": 10,
+                "last_seen_run_id": 12,
+            }
+        )
+
+        self.assertEqual(
+            record,
+            CanonicalEdgeRecord(
+                source_key="file:bin/tool",
+                edge_kind="executes",
+                target_key="tool:nix",
+                graph_key_version=1,
+                identity_metadata={},
+                identity_metadata_hash=hash_text,
+                metadata={"commands": ["nix"]},
+                confidence="extracted",
+                conflict=False,
+                first_seen_run_id=10,
+                last_seen_run_id=12,
+            ),
+        )
+        self.assertEqual(record.to_dict()["target_key"], "tool:nix")
+
+    def test_canonical_record_payload_helpers_reject_malformed_payloads(self):
+        with self.assertRaisesRegex(StorageSchemaError, "canonical node record"):
+            canonical_node_record_from_storage_payload({"canonical_key": ""})
+        with self.assertRaisesRegex(StorageSchemaError, "canonical edge record"):
+            canonical_edge_record_from_storage_payload({"source_key": ""})
+
+    def test_query_canonical_records_parse_psql_json_arrays(self):
+        node_payload = json.dumps(
+            [
+                {
+                    "canonical_key": "tool:nix",
+                    "graph_key_version": 1,
+                    "kind": "tool",
+                    "display_name": "nix",
+                    "confidence": "extracted",
+                    "conflict": False,
+                    "metadata": {},
+                    "first_seen_run_id": 10,
+                    "last_seen_run_id": 12,
+                }
+            ]
+        )
+        edge_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        edge_payload = json.dumps(
+            [
+                {
+                    "source_key": "file:bin/tool",
+                    "edge_kind": "executes",
+                    "target_key": "tool:nix",
+                    "graph_key_version": 1,
+                    "identity_metadata": {},
+                    "identity_metadata_hash": edge_hash,
+                    "metadata": {},
+                    "confidence": "extracted",
+                    "conflict": False,
+                    "first_seen_run_id": 10,
+                    "last_seen_run_id": 12,
+                }
+            ]
+        )
+
+        with patch("repomap_kg.storage.subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["psql"], 0, stdout=node_payload + "\n"),
+                subprocess.CompletedProcess(["psql"], 0, stdout=edge_payload + "\n"),
+            ]
+
+            nodes = query_canonical_node_records(
+                ["-d", "postgres"],
+                root_path="/tmp/fixture",
+                kind="tool",
+            )
+            edges = query_canonical_edge_records(
+                ["-d", "postgres"],
+                root_path="/tmp/fixture",
+                kind="executes",
+                target_key="tool:nix",
+            )
+
+        self.assertEqual(nodes[0].canonical_key, "tool:nix")
+        self.assertEqual(edges[0].target_key, "tool:nix")
+        self.assertIn("canonical_nodes", run.call_args_list[0].kwargs["input"])
+        self.assertIn("canonical_edges", run.call_args_list[1].kwargs["input"])
 
     def test_build_file_ingest_sql_quotes_values_and_sets_run(self):
         rows = file_rows_from_observations(
