@@ -237,7 +237,7 @@ Each record has this shape:
     "target_key": "tool:nix",
     "graph_key_version": 1,
     "identity_metadata": {},
-    "identity_metadata_hash": "sha256:...",
+    "identity_metadata_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "metadata": {"commands": ["nix"]},
     "confidence": "extracted",
     "conflict": false,
@@ -248,6 +248,9 @@ Each record has this shape:
 ```
 
 Database integer ids are not exposed.
+
+Hash fields are lowercase 64-character SHA-256 hex strings without a `sha256:`
+prefix, matching Phase C storage constraints.
 
 ### Table Output
 
@@ -343,7 +346,7 @@ JSON output is one object:
       "target_key": "tool:nix",
       "graph_key_version": 1,
       "identity_metadata": {},
-      "identity_metadata_hash": "sha256:...",
+      "identity_metadata_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       "metadata": {},
       "confidence": "extracted",
       "conflict": false,
@@ -437,7 +440,7 @@ When the edge exists, JSON output is one object:
     "target_key": "tool:nix",
     "graph_key_version": 1,
     "identity_metadata": {},
-    "identity_metadata_hash": "sha256:...",
+    "identity_metadata_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "metadata": {"commands": ["nix"]},
     "confidence": "extracted",
     "conflict": false,
@@ -451,7 +454,7 @@ When the edge exists, JSON output is one object:
       "raw_observation": {
         "run_id": 10,
         "ordinal": 0,
-        "payload_hash": "sha256:...",
+        "payload_hash": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
         "kind": "shell.command",
         "source_id": "bin/tool#call:nix"
       },
