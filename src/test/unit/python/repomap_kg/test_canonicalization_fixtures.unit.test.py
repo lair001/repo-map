@@ -22,6 +22,9 @@ class CanonicalizationFixtureTests(unittest.TestCase):
             "shell_env_write",
             "shell_env_write_collapse",
             "shell_host_mutation_package",
+            "shell_source_repo_escape",
+            "shell_env_missing_variable",
+            "unsupported_kind",
         )
 
         for fixture_name in fixture_names:
