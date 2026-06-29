@@ -370,6 +370,112 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(sources, [])
         self.assertEqual([command["name"] for command in commands], ["echo ok"])
 
+    def test_discover_command_emits_shell_env_observations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "fixture-repo"
+            self.write_fixture(
+                fixture / "bin" / "tool",
+                (
+                    "#!/usr/bin/env bash\n"
+                    'PATH="$PWD/bin:$PATH"\n'
+                    "FOO=bar nix build .#checks\n"
+                    'echo "$PATH"\n'
+                ),
+            )
+
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "discover", str(fixture), "--jsonl"
+            )
+
+        observations = [json.loads(line) for line in stdout.splitlines()]
+        env = [
+            observation
+            for observation in observations
+            if observation["kind"] == "shell.env"
+        ]
+        commands = [
+            observation
+            for observation in observations
+            if observation["kind"] == "shell.command"
+        ]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            [
+                (observation["metadata"]["operation"], observation["name"])
+                for observation in env
+            ],
+            [
+                ("write", "PATH"),
+                ("read", "PWD"),
+                ("read", "PATH"),
+                ("write", "FOO"),
+                ("read", "PATH"),
+            ],
+        )
+        self.assertEqual(env[0]["source_id"], "bin/tool#env-write:2:path")
+        self.assertEqual(env[0]["target"], "env:PATH")
+        self.assertEqual(env[0]["metadata"]["scope"], "shell")
+        self.assertEqual(env[3]["metadata"]["scope"], "command")
+        self.assertEqual(
+            [command["name"] for command in commands],
+            ["nix build", "echo $PATH"],
+        )
+
+    def test_discover_command_handles_ambiguous_shell_env_and_sources(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "fixture-repo"
+            self.write_fixture(
+                fixture / "bin" / "tool",
+                (
+                    "#!/usr/bin/env bash\n"
+                    "source\n"
+                    "source ../../outside.sh\n"
+                    'source "$DYNAMIC"\n'
+                    'echo "$PATH:${PATH:-/bin}:$PATH"\n'
+                    "nix --version\n"
+                    'echo "unterminated\n'
+                ),
+            )
+
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "discover", str(fixture), "--jsonl"
+            )
+
+        observations = [json.loads(line) for line in stdout.splitlines()]
+        sources = [
+            observation
+            for observation in observations
+            if observation["kind"] == "shell.source"
+        ]
+        env = [
+            observation
+            for observation in observations
+            if observation["kind"] == "shell.env"
+        ]
+        commands = [
+            observation
+            for observation in observations
+            if observation["kind"] == "shell.command"
+        ]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(sources, [])
+        self.assertEqual(
+            [
+                (observation["metadata"]["operation"], observation["name"])
+                for observation in env
+            ],
+            [("read", "DYNAMIC"), ("read", "PATH")],
+        )
+        self.assertEqual(
+            [command["name"] for command in commands],
+            [
+                "echo $PATH:${PATH:-/bin}:$PATH",
+                "nix",
+            ],
+        )
+
     def test_discover_command_applies_project_profile(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture = Path(tmpdir) / "fixture-repo"

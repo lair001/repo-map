@@ -11,7 +11,7 @@ Each line is one JSON object with `schema_version` set to `1`.
 
 Required fields:
 
-- `kind`: observation family, such as `file`, `shell.command`, or
+- `kind`: observation family, such as `file`, `shell.command`, `shell.env`, or
   `python.import`.
 - `source_id`: extractor-stable source identity for the observed fact.
 - `path`: repository-relative path where the fact was observed.
@@ -59,6 +59,19 @@ contains:
 - `source`: the original source path token.
 - `resolved_path`: the repository-relative path resolved from the current file.
 - `raw`: the source line text for the include.
+
+The same extractor emits `shell.env` observations for static environment
+variable reads and writes. Assignment-only lines and command-local assignment
+prefixes are treated as writes; `$VAR` and `${VAR...}` expansions are treated
+as reads and are deduplicated once per variable per line. Their metadata
+contains:
+
+- `operation`: `read` or `write`.
+- `variable`: the environment variable name.
+- `raw`: the source line text.
+- `value`: for writes, the assignment value parsed from the assignment word.
+- `scope`: for writes, `shell` for assignment-only lines or `command` for
+  leading command-local assignments.
 
 ## Normalization Boundary
 

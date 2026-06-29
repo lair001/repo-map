@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import posixpath
 import re
 import shlex
-import posixpath
 
 from repomap_kg import __version__
 from repomap_kg.observations import RawObservation
 
 
-ASSIGNMENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+ASSIGNMENT_PATTERN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+ENV_READ_PATTERN = re.compile(
+    r"\$(?:"
+    r"{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?:[^}]*)}"
+    r"|(?P<bare>[A-Za-z_][A-Za-z0-9_]*)"
+    r")"
+)
 SLUG_PATTERN = re.compile(r"[^0-9A-Za-z]+")
 CONTROL_WORDS = frozenset(
     {
@@ -51,7 +57,16 @@ def extract_shell_command_observations(
 def extract_shell_observations(path: str, content: str) -> tuple[RawObservation, ...]:
     observations = []
     for line_number, raw_line in enumerate(content.splitlines(), start=1):
-        argv = command_argv(raw_line)
+        line = command_line(raw_line)
+        if not line:
+            continue
+        words = command_words(line)
+        if not words:
+            continue
+        observations.extend(
+            shell_env_observations(path, line_number, raw_line, line, words)
+        )
+        argv = command_argv_from_words(words)
         if not argv:
             continue
         if argv[0] in SOURCE_COMMANDS:
@@ -59,7 +74,9 @@ def extract_shell_observations(path: str, content: str) -> tuple[RawObservation,
             if source is not None:
                 observations.append(source)
         else:
-            observations.append(shell_command_observation(path, line_number, raw_line, argv))
+            observations.append(
+                shell_command_observation(path, line_number, raw_line, argv)
+            )
     return tuple(observations)
 
 
@@ -117,14 +134,90 @@ def shell_source_observation(
     )
 
 
+def shell_env_observations(
+    path: str,
+    line_number: int,
+    raw_line: str,
+    line: str,
+    words: list[str],
+) -> tuple[RawObservation, ...]:
+    observations = []
+    for variable, value, scope in assignment_writes(words):
+        observations.append(
+            shell_env_observation(
+                path,
+                line_number,
+                raw_line,
+                operation="write",
+                variable=variable,
+                value=value,
+                scope=scope,
+            )
+        )
+    for variable in variable_reads(line):
+        observations.append(
+            shell_env_observation(
+                path,
+                line_number,
+                raw_line,
+                operation="read",
+                variable=variable,
+            )
+        )
+    return tuple(observations)
+
+
+def shell_env_observation(
+    path: str,
+    line_number: int,
+    raw_line: str,
+    *,
+    operation: str,
+    variable: str,
+    value: str | None = None,
+    scope: str | None = None,
+) -> RawObservation:
+    metadata = {
+        "operation": operation,
+        "variable": variable,
+        "raw": raw_line.strip(),
+    }
+    if operation == "write":
+        metadata["value"] = value or ""
+        metadata["scope"] = scope or "shell"
+    return RawObservation(
+        kind="shell.env",
+        source_id=f"{path}#env-{operation}:{line_number}:{slug(variable)}",
+        path=path,
+        start_line=line_number,
+        end_line=line_number,
+        name=variable,
+        target=f"env:{variable}",
+        confidence="heuristic",
+        extractor="repo-shell",
+        extractor_version=__version__,
+        metadata=metadata,
+    )
+
+
 def command_argv(raw_line: str) -> tuple[str, ...]:
     line = command_line(raw_line)
     if not line:
         return ()
-    try:
-        words = shlex.split(line, comments=False, posix=True)
-    except ValueError:
+    words = command_words(line)
+    if not words:
         return ()
+    return command_argv_from_words(words)
+
+
+def command_words(line: str) -> list[str]:
+    try:
+        return shlex.split(line, comments=False, posix=True)
+    except ValueError:
+        return []
+
+
+def command_argv_from_words(words: list[str]) -> tuple[str, ...]:
     index = first_command_index(words)
     if index is None:
         return ()
@@ -149,6 +242,28 @@ def first_command_index(words: list[str]) -> int | None:
             return None
         return index
     return None
+
+
+def assignment_writes(words: list[str]) -> tuple[tuple[str, str, str], ...]:
+    writes = []
+    for word in words:
+        match = ASSIGNMENT_PATTERN.match(word)
+        if match is None:
+            break
+        writes.append((match.group(1), match.group(2)))
+    scope = "shell" if len(writes) == len(words) else "command"
+    return tuple((variable, value, scope) for variable, value in writes)
+
+
+def variable_reads(line: str) -> tuple[str, ...]:
+    variables = []
+    seen = set()
+    for match in ENV_READ_PATTERN.finditer(line):
+        variable = match.group("braced") or match.group("bare")
+        if variable not in seen:
+            variables.append(variable)
+            seen.add(variable)
+    return tuple(variables)
 
 
 def tool_name(command: str) -> str:

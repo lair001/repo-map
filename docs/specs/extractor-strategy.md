@@ -56,11 +56,13 @@ commands are dynamic.
 
 The initial shell extractor is intentionally conservative and dependency-free:
 it emits line-backed `shell.command` observations for simple command invocations
-and `shell.source` observations for static `source` and `.` includes. It skips
-comments, shell control keywords, assignment-only lines, dynamic source paths,
+`shell.source` observations for static `source` and `.` includes, and
+`shell.env` observations for static environment variable reads/writes. It skips
+comments, shell control keywords, invalid shell syntax, dynamic source paths,
 and absolute or repository-escaping source paths. Commands target tools as
-`tool:<command>`; sourced files target `file:<repo-relative-path>`.
-Parser-backed shell expansion remains a future slice.
+`tool:<command>`; sourced files target `file:<repo-relative-path>`; environment
+facts target `env:<VARIABLE>`. Parser-backed shell expansion remains a future
+slice.
 
 Candidate parser families include `mvdan/sh`, Tree-sitter Bash, and bashlex.
 The project should choose based on language coverage, structured AST quality,

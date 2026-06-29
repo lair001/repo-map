@@ -37,8 +37,9 @@ surface, raw observation JSONL validation, first file and entrypoint queries,
 and initial Postgres schema-backed file ingestion with file nodes and evidence
 rows, relationship edges, storage-backed file-node plus edge readback, and
 compact storage summaries. It also includes a conservative first shell
-extractor that emits simple command invocations and sourced-file includes as
-raw observations during discovery. The initial specs live under `docs/specs/`.
+extractor that emits simple command invocations, sourced-file includes, and
+environment variable reads/writes as raw observations during discovery. The
+initial specs live under `docs/specs/`.
 
 ## Development
 
