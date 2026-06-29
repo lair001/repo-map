@@ -2416,7 +2416,7 @@ class CliUnitTests(unittest.TestCase):
                 exit_code = main(["discover", str(root)])
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(stdout.getvalue().strip(), "discovered 1 files")
+        self.assertEqual(stdout.getvalue().strip(), "discovered 2 observations")
 
     def test_discover_reports_profile_validation_errors(self):
         with tempfile.TemporaryDirectory() as tmpdir:

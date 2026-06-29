@@ -593,7 +593,7 @@ def main(argv: list[str] | None = None) -> int:
             for observation in observations:
                 print(observation.to_json_line(), end="")
         else:
-            print(f"discovered {len(observations)} files")
+            print(f"discovered {len(observations)} observations")
         return 0
 
     if args.command == "files":

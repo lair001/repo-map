@@ -853,7 +853,7 @@ src/test/fixtures/canonicalization/
   shell_conflicts/
     raw_observations.jsonl
     expected_canonical_graph.json
-  future_python_stub/
+  unsupported_kind/
     raw_observations.jsonl
     expected_canonical_graph.json
 ```
@@ -921,7 +921,6 @@ malformed_target_placeholder/
 repo_escaping_source/
 unsupported_kind/
 conflicting_evidence/
-future_python_stub/
 ```
 
 ## Public Serialization

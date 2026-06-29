@@ -11,6 +11,10 @@ from typing import Any
 from repomap_kg import __version__
 from repomap_kg.observations import RawObservation
 from repomap_kg.profiles import ProjectProfile
+from repomap_kg.python_extractor import (
+    PythonModuleIndex,
+    extract_python_file_observations,
+)
 from repomap_kg.shell import extract_shell_observations
 
 
@@ -108,12 +112,25 @@ def discover_observations(
     root: Path | str, *, profile: ProjectProfile | None = None
 ) -> list[RawObservation]:
     repository_root = Path(root).resolve()
+    file_infos = discover_repository(repository_root, profile=profile)
+    module_index = PythonModuleIndex.from_python_paths(
+        (file_info.path for file_info in file_infos if file_info.language == "python"),
+        repository_root=repository_root,
+    )
     observations = []
-    for file_info in discover_repository(repository_root, profile=profile):
+    for file_info in file_infos:
         observations.append(file_info.to_observation())
         if file_info.language == "shell":
             observations.extend(
                 extract_shell_file_observations(repository_root, file_info.path)
+            )
+        if file_info.language == "python":
+            observations.extend(
+                extract_python_file_observations_from_file(
+                    repository_root,
+                    file_info.path,
+                    module_index=module_index,
+                )
             )
     return observations
 
@@ -126,6 +143,24 @@ def extract_shell_file_observations(
     except UnicodeDecodeError:
         return ()
     return extract_shell_observations(relative_path, content)
+
+
+def extract_python_file_observations_from_file(
+    repository_root: Path,
+    relative_path: str,
+    *,
+    module_index: PythonModuleIndex,
+) -> tuple[RawObservation, ...]:
+    try:
+        content = (repository_root / relative_path).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return ()
+    return extract_python_file_observations(
+        relative_path,
+        content,
+        module_index=module_index,
+        repository_root=repository_root,
+    )
 
 
 def classify_path(

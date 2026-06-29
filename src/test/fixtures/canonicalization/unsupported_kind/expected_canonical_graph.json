@@ -3,13 +3,13 @@
     {
       "category": "unsupported_raw_observation_kind",
       "field": "kind",
-      "message": "raw observation kind is not supported: python.import",
+      "message": "raw observation kind is not supported: future.language",
       "path": "src/main/python/repomap_kg/cli.py",
       "placeholder_key": null,
       "raw_observation_ordinal": 0,
-      "raw_source_id": "src/main/python/repomap_kg/cli.py#import:storage",
+      "raw_source_id": "src/main/python/repomap_kg/cli.py#future:1",
       "severity": "warning",
-      "value": "python.import"
+      "value": "future.language"
     }
   ],
   "edge_evidence_links": [],

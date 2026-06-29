@@ -19,9 +19,14 @@ from repomap_kg.graph_keys import (
     GraphKeyError,
     dynamic_key,
     env_key,
+    external_key,
     file_key,
     host_category_key,
     parse_key,
+    python_class_key,
+    python_function_key,
+    python_method_key,
+    python_module_key,
     tool_key,
     unknown_key,
 )
@@ -131,6 +136,35 @@ def canonicalize_observations(
             continue
         if observation.kind == "shell.host_mutation":
             _canonicalize_shell_host_mutation_observation(
+                observation=observation,
+                ordinal=ordinal,
+                nodes=nodes,
+                edges=edges,
+                evidence=evidence,
+                node_evidence_links=node_evidence_links,
+                edge_evidence_links=edge_evidence_links,
+                diagnostics=diagnostics,
+            )
+            continue
+        if observation.kind in (
+            "python.module",
+            "python.class",
+            "python.function",
+            "python.method",
+        ):
+            _canonicalize_python_definition_observation(
+                observation=observation,
+                ordinal=ordinal,
+                nodes=nodes,
+                edges=edges,
+                evidence=evidence,
+                node_evidence_links=node_evidence_links,
+                edge_evidence_links=edge_evidence_links,
+                diagnostics=diagnostics,
+            )
+            continue
+        if observation.kind == "python.import":
+            _canonicalize_python_import_observation(
                 observation=observation,
                 ordinal=ordinal,
                 nodes=nodes,
@@ -651,6 +685,203 @@ def _canonicalize_shell_host_mutation_observation(
     )
 
 
+def _canonicalize_python_definition_observation(
+    *,
+    observation: RawObservation,
+    ordinal: int,
+    nodes: dict[str, CanonicalNode],
+    edges: dict[str, CanonicalEdge],
+    evidence: list[CanonicalEvidence],
+    node_evidence_links: list[CanonicalNodeEvidenceLink],
+    edge_evidence_links: list[CanonicalEdgeEvidenceLink],
+    diagnostics: list[CanonicalizationDiagnostic],
+) -> None:
+    try:
+        source_key = file_key(observation.path)
+        target_key, target_display_name, edge_metadata = _python_definition_target(
+            observation
+        )
+    except GraphKeyError as error:
+        diagnostics.append(
+            CanonicalizationDiagnostic(
+                severity="error",
+                category=_graph_key_error_category(error),
+                message=str(error),
+                raw_observation_ordinal=ordinal,
+                raw_source_id=observation.source_id,
+                path=observation.path,
+                field="target",
+                value=observation.target,
+            )
+        )
+        return
+
+    evidence_record = _evidence_from_observation(observation, ordinal)
+    evidence.append(evidence_record)
+
+    _upsert_node(
+        nodes,
+        canonical_key=source_key,
+        kind="file",
+        display_name=observation.path,
+        metadata={},
+        confidence=observation.confidence,
+    )
+    _upsert_node(
+        nodes,
+        canonical_key=target_key,
+        kind=_node_kind_from_key(target_key),
+        display_name=target_display_name,
+        metadata={},
+        confidence=observation.confidence,
+    )
+    node_evidence_links.extend(
+        (
+            CanonicalNodeEvidenceLink(
+                canonical_key=source_key,
+                evidence_key=evidence_record.evidence_key,
+                link_kind="inferred_from_edge",
+            ),
+            CanonicalNodeEvidenceLink(
+                canonical_key=target_key,
+                evidence_key=evidence_record.evidence_key,
+                link_kind="observed",
+            ),
+        )
+    )
+
+    identity_metadata: dict[str, Any] = {}
+    edge_key = canonical_edge_key(
+        graph_key_version=GRAPH_KEY_VERSION,
+        source_key=source_key,
+        kind="defines",
+        target_key=target_key,
+        identity_metadata=identity_metadata,
+    )
+    _upsert_edge(
+        edges,
+        edge_key=edge_key,
+        source_key=source_key,
+        kind="defines",
+        target_key=target_key,
+        identity_metadata=identity_metadata,
+        metadata=edge_metadata,
+        confidence=observation.confidence,
+    )
+    edge_evidence_links.append(
+        CanonicalEdgeEvidenceLink(
+            edge_key=edge_key,
+            evidence_key=evidence_record.evidence_key,
+            link_kind="supports",
+        )
+    )
+
+
+def _canonicalize_python_import_observation(
+    *,
+    observation: RawObservation,
+    ordinal: int,
+    nodes: dict[str, CanonicalNode],
+    edges: dict[str, CanonicalEdge],
+    evidence: list[CanonicalEvidence],
+    node_evidence_links: list[CanonicalNodeEvidenceLink],
+    edge_evidence_links: list[CanonicalEdgeEvidenceLink],
+    diagnostics: list[CanonicalizationDiagnostic],
+) -> None:
+    source_module = _metadata_text(observation.metadata, "module")
+    if source_module is None:
+        diagnostics.append(
+            CanonicalizationDiagnostic(
+                severity="warning",
+                category="missing_required_metadata",
+                message="python.import observation requires module metadata",
+                raw_observation_ordinal=ordinal,
+                raw_source_id=observation.source_id,
+                path=observation.path,
+                field="metadata.module",
+                value=source_module,
+            )
+        )
+        return
+    try:
+        source_key = python_module_key(source_module)
+        target_key = _python_import_target_key(observation, ordinal, diagnostics)
+    except GraphKeyError as error:
+        diagnostics.append(
+            CanonicalizationDiagnostic(
+                severity="error",
+                category=_graph_key_error_category(error),
+                message=str(error),
+                raw_observation_ordinal=ordinal,
+                raw_source_id=observation.source_id,
+                path=observation.path,
+                field="target",
+                value=observation.target,
+            )
+        )
+        return
+
+    evidence_record = _evidence_from_observation(observation, ordinal)
+    evidence.append(evidence_record)
+
+    _upsert_node(
+        nodes,
+        canonical_key=source_key,
+        kind="python.module",
+        display_name=source_module,
+        metadata={},
+        confidence=observation.confidence,
+    )
+    _upsert_node(
+        nodes,
+        canonical_key=target_key,
+        kind=_node_kind_from_key(target_key),
+        display_name=_display_name_from_key(target_key),
+        metadata={},
+        confidence=observation.confidence,
+    )
+    node_evidence_links.extend(
+        (
+            CanonicalNodeEvidenceLink(
+                canonical_key=source_key,
+                evidence_key=evidence_record.evidence_key,
+                link_kind="inferred_from_edge",
+            ),
+            CanonicalNodeEvidenceLink(
+                canonical_key=target_key,
+                evidence_key=evidence_record.evidence_key,
+                link_kind="inferred_from_edge",
+            ),
+        )
+    )
+
+    identity_metadata: dict[str, Any] = {}
+    edge_key = canonical_edge_key(
+        graph_key_version=GRAPH_KEY_VERSION,
+        source_key=source_key,
+        kind="imports",
+        target_key=target_key,
+        identity_metadata=identity_metadata,
+    )
+    _upsert_edge(
+        edges,
+        edge_key=edge_key,
+        source_key=source_key,
+        kind="imports",
+        target_key=target_key,
+        identity_metadata=identity_metadata,
+        metadata=_python_import_edge_metadata(observation.metadata),
+        confidence=observation.confidence,
+    )
+    edge_evidence_links.append(
+        CanonicalEdgeEvidenceLink(
+            edge_key=edge_key,
+            evidence_key=evidence_record.evidence_key,
+            link_kind="supports",
+        )
+    )
+
+
 def _evidence_from_observation(
     observation: RawObservation,
     ordinal: int,
@@ -699,6 +930,91 @@ def _shell_command_name(metadata: Mapping[str, Any]) -> str | None:
         and argv[0].strip()
     ):
         return argv[0]
+    return None
+
+
+def _python_definition_target(
+    observation: RawObservation,
+) -> tuple[str, str, dict[str, Any]]:
+    module = _metadata_text(observation.metadata, "module")
+    name = observation.name
+    if observation.kind == "python.module":
+        module_name = module or name
+        if not isinstance(module_name, str) or not module_name.strip():
+            raise GraphKeyError("python.module observation requires module name")
+        return python_module_key(module_name), module_name, {"modules": [module_name]}
+    if not isinstance(module, str) or not module.strip():
+        raise GraphKeyError(f"{observation.kind} observation requires module metadata")
+    if not isinstance(name, str) or not name.strip():
+        raise GraphKeyError(f"{observation.kind} observation requires name")
+    if observation.kind == "python.class":
+        return python_class_key(module, name), name, {"classes": [name]}
+    if observation.kind == "python.function":
+        return python_function_key(module, name), name, {"functions": [name]}
+    if observation.kind == "python.method":
+        class_name = _metadata_text(observation.metadata, "class")
+        if class_name is None:
+            raise GraphKeyError("python.method observation requires class metadata")
+        return (
+            python_method_key(module, class_name, name),
+            f"{class_name}.{name}",
+            {"methods": [f"{class_name}.{name}"]},
+        )
+    raise GraphKeyError(f"unsupported Python definition kind: {observation.kind}")
+
+
+def _python_import_target_key(
+    observation: RawObservation,
+    ordinal: int,
+    diagnostics: list[CanonicalizationDiagnostic],
+) -> str:
+    resolution = _metadata_text(observation.metadata, "resolution")
+    imported_module = _metadata_text(observation.metadata, "imported_module")
+    if resolution == "local" and imported_module is not None:
+        return python_module_key(imported_module)
+    if resolution == "external" and imported_module is not None:
+        return external_key("python.module", imported_module)
+    if resolution == "unknown":
+        if observation.target is not None:
+            try:
+                parsed = parse_key(observation.target)
+            except GraphKeyError as error:
+                diagnostics.append(
+                    CanonicalizationDiagnostic(
+                        severity="warning",
+                        category=_graph_key_error_category(error),
+                        message=f"raw target is not a valid canonical key: {error}",
+                        raw_observation_ordinal=ordinal,
+                        raw_source_id=observation.source_id,
+                        path=observation.path,
+                        field="target",
+                        value=observation.target,
+                    )
+                )
+            else:
+                if parsed.namespace in ("unknown", "dynamic"):
+                    return observation.target
+        return unknown_key("python.module", "missing-module")
+    if imported_module is not None:
+        return external_key("python.module", imported_module)
+    return unknown_key("python.module", "missing-module")
+
+
+def _python_import_edge_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    imported_module = _metadata_text(metadata, "imported_module")
+    if imported_module is not None:
+        summary["imported_modules"] = [imported_module]
+    resolution = _metadata_text(metadata, "resolution")
+    if resolution is not None:
+        summary["resolutions"] = [resolution]
+    return summary
+
+
+def _metadata_text(metadata: Mapping[str, Any], key: str) -> str | None:
+    value = metadata.get(key)
+    if isinstance(value, str) and value.strip():
+        return value
     return None
 
 

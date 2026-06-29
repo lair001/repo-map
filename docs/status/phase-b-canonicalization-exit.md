@@ -68,6 +68,9 @@ scope for this exit pass.
 - [x] Future language observations are handled intentionally.
   - `future_python_stub` pins `python.import` as
     `unsupported_raw_observation_kind` until a future Python mapping phase.
+  - Superseded by Phase S1 on 2026-06-29: `python.import` is now a supported
+    parser-backed Python raw observation kind, and unsupported future-language
+    coverage lives in `unsupported_kind`.
 - [x] Canonical modules do not import storage or Postgres code.
   - `repomap_kg.graph_keys`, `repomap_kg.canonical`,
     `repomap_kg.canonicalization`, and `repomap_kg.canonical_diagnostics`
