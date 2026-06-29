@@ -31,10 +31,14 @@ royalty-free, irrevocable patent license under patent claims you own or control
 that are necessarily infringed by your contribution alone or by combination of
 your contribution with RepoMap.
 
-This patent license permits Samuel Leighton Lair, as RepoMap project steward,
-and downstream recipients to make, have made, use, offer to sell, sell, import,
-reproduce, distribute, sublicense, and relicense your contribution as part of
-RepoMap under AGPL-3.0-or-later and commercial licenses.
+This patent license permits Samuel Leighton Lair, as RepoMap project steward, to
+make, have made, use, offer to sell, sell, import, reproduce, distribute,
+sublicense, and relicense your contribution as part of RepoMap, including under
+AGPL-3.0-or-later and commercial licenses.
+
+Downstream recipients receive patent rights only under the RepoMap license they
+receive, such as AGPL-3.0-or-later or a separate commercial license granted by
+Samuel Leighton Lair or an authorized successor.
 
 ## Authority
 
