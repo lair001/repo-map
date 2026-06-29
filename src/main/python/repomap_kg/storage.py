@@ -2244,6 +2244,12 @@ def node_records_to_jsonable(records: Sequence[NodeRecord]) -> list[dict[str, An
     return [record.to_dict() for record in records]
 
 
+def canonical_node_records_to_jsonable(
+    records: Sequence[CanonicalNodeRecord],
+) -> list[dict[str, Any]]:
+    return [record.to_dict() for record in records]
+
+
 def edge_records_to_jsonable(records: Sequence[EdgeRecord]) -> list[dict[str, Any]]:
     return [record.to_dict() for record in records]
 
@@ -2293,6 +2299,31 @@ def format_node_table(records: Sequence[NodeRecord]) -> str:
         "node_stable_key",
         "start_line",
         "end_line",
+    )
+    rendered_rows = [
+        {key: render_table_value(row[key]) for key in columns}
+        for row in rows
+    ]
+    widths = {
+        key: max([len(key), *(len(row[key]) for row in rendered_rows)])
+        for key in columns
+    }
+    lines = [format_table_row(dict(zip(columns, columns, strict=True)), columns, widths)]
+    for row in rendered_rows:
+        lines.append(format_table_row(row, columns, widths))
+    return "\n".join(lines)
+
+
+def format_canonical_node_table(records: Sequence[CanonicalNodeRecord]) -> str:
+    rows = [record.to_dict() for record in records]
+    columns = (
+        "canonical_key",
+        "kind",
+        "display_name",
+        "confidence",
+        "conflict",
+        "first_seen_run_id",
+        "last_seen_run_id",
     )
     rendered_rows = [
         {key: render_table_value(row[key]) for key in columns}

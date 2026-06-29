@@ -55,8 +55,10 @@ from repomap_kg.storage import (
     identity_metadata_hash,
     raw_observation_payload_hash,
     raw_observation_rows_from_observations,
+    canonical_node_records_to_jsonable,
     canonical_edge_record_from_storage_payload,
     canonical_node_record_from_storage_payload,
+    format_canonical_node_table,
     query_canonical_edge_records,
     query_canonical_node_records,
 )
@@ -573,6 +575,63 @@ SELECT 1;
         )
         self.assertIsNone(record.to_dict()["first_seen_run_id"])
         self.assertIsNone(record.to_dict()["last_seen_run_id"])
+
+    def test_canonical_node_records_to_jsonable_preserves_public_fields(self):
+        records = (
+            CanonicalNodeRecord(
+                canonical_key="file:bin/tool",
+                graph_key_version=1,
+                kind="file",
+                display_name="bin/tool",
+                confidence="extracted",
+                conflict=False,
+                metadata={"role": "entrypoint"},
+                first_seen_run_id=10,
+                last_seen_run_id=None,
+            ),
+        )
+
+        self.assertEqual(
+            canonical_node_records_to_jsonable(records),
+            [
+                {
+                    "canonical_key": "file:bin/tool",
+                    "graph_key_version": 1,
+                    "kind": "file",
+                    "display_name": "bin/tool",
+                    "confidence": "extracted",
+                    "conflict": False,
+                    "metadata": {"role": "entrypoint"},
+                    "first_seen_run_id": 10,
+                    "last_seen_run_id": None,
+                }
+            ],
+        )
+
+    def test_format_canonical_node_table_uses_contract_columns(self):
+        records = (
+            CanonicalNodeRecord(
+                canonical_key="tool:nix",
+                graph_key_version=1,
+                kind="tool",
+                display_name="nix",
+                confidence="manual",
+                conflict=False,
+                metadata={"omitted": True},
+                first_seen_run_id=None,
+                last_seen_run_id=12,
+            ),
+        )
+
+        table = format_canonical_node_table(records)
+
+        self.assertIn("canonical_key", table)
+        self.assertIn("display_name", table)
+        self.assertIn("first_seen_run_id", table)
+        self.assertIn("tool:nix", table)
+        self.assertIn("12", table)
+        self.assertNotIn("metadata", table)
+        self.assertNotIn("omitted", table)
 
     def test_canonical_record_payload_helpers_reject_malformed_payloads(self):
         with self.assertRaisesRegex(StorageSchemaError, "canonical node record"):

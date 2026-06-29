@@ -21,6 +21,7 @@ from repomap_kg.files import (
     format_file_table,
     records_to_jsonable,
 )
+from repomap_kg.graph_keys import GRAPH_KEY_VERSION, validate_key
 from repomap_kg.host_mutators import (
     filter_host_mutator_records,
     format_host_mutator_summary_table,
@@ -36,9 +37,11 @@ from repomap_kg.profiles import ProfileValidationError, load_profile
 from repomap_kg.project_identity import PROJECT_IDENTITY
 from repomap_kg.storage import (
     StorageSchemaError,
+    canonical_node_records_to_jsonable,
     edge_records_to_jsonable,
     file_neighborhood_to_jsonable,
     file_node_records_to_jsonable,
+    format_canonical_node_table,
     format_edge_table,
     format_file_neighborhood_table,
     format_file_node_table,
@@ -49,6 +52,7 @@ from repomap_kg.storage import (
     load_file_observations,
     neighborhood_to_jsonable,
     node_records_to_jsonable,
+    query_canonical_node_records,
     query_edge_records,
     query_file_neighborhood,
     query_file_node_records,
@@ -214,6 +218,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit canonical load summary as JSON",
+    )
+    storage_canonical_nodes = storage_subcommands.add_parser(
+        "canonical-nodes",
+        help="list stored canonical graph nodes from Postgres storage",
+    )
+    add_storage_root_argument(storage_canonical_nodes)
+    storage_canonical_nodes.add_argument(
+        "--kind",
+        help="include only canonical nodes with this kind",
+    )
+    storage_canonical_nodes.add_argument(
+        "--canonical-key",
+        help="include only the canonical node with this key",
+    )
+    storage_canonical_nodes.add_argument(
+        "--path-prefix",
+        help="include only file canonical nodes under this path prefix",
+    )
+    storage_canonical_nodes.add_argument(
+        "--graph-key-version",
+        type=int,
+        default=GRAPH_KEY_VERSION,
+        help="canonical graph key version; only 1 is currently supported",
+    )
+    add_storage_connection_arguments(storage_canonical_nodes)
+    storage_canonical_nodes.add_argument(
+        "--json",
+        action="store_true",
+        help="emit stored canonical node records as JSON",
     )
     storage_files = storage_subcommands.add_parser(
         "files",
@@ -614,6 +647,32 @@ def main(argv: list[str] | None = None) -> int:
             )
         return 0
 
+    if args.command == "storage" and args.storage_command == "canonical-nodes":
+        try:
+            kind = canonical_node_kind_from_args(args)
+            records = query_canonical_node_records(
+                psql_args_from_args(args),
+                root_path=args.root_path,
+                kind=kind,
+                canonical_key=args.canonical_key,
+                path_prefix=args.path_prefix,
+                graph_key_version=args.graph_key_version,
+                psql_command=args.psql_command,
+            )
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(
+                json.dumps(
+                    canonical_node_records_to_jsonable(records),
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(format_canonical_node_table(records))
+        return 0
+
     if args.command == "storage" and args.storage_command == "files":
         try:
             records = query_file_records(
@@ -812,6 +871,22 @@ def read_observations_argument(jsonl_path: str):
     if jsonl_path == "-":
         return read_observations_jsonl(sys.stdin)
     return read_observations_jsonl(jsonl_path)
+
+
+def canonical_node_kind_from_args(args) -> str | None:
+    if args.graph_key_version != GRAPH_KEY_VERSION:
+        raise StorageSchemaError("unsupported graph key version")
+    if args.canonical_key is not None:
+        validation = validate_key(args.canonical_key)
+        if not validation.valid:
+            detail = f": {validation.error}" if validation.error else ""
+            raise StorageSchemaError(f"invalid canonical key{detail}")
+    kind = args.kind
+    if args.path_prefix is not None:
+        if kind is not None and kind != "file":
+            raise StorageSchemaError("path-prefix only applies to file canonical nodes")
+        kind = "file"
+    return kind
 
 
 def psql_args_from_args(args) -> list[str]:
