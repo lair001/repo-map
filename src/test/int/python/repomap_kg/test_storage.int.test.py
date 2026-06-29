@@ -1300,6 +1300,275 @@ FROM canonical_edges;
         )
         self.assertEqual(evidence["start_line"], 1)
 
+    def test_mcp_read_only_tools_read_python_canonical_graph(self):
+        require_postgres_binaries()
+        raw_jsonl = canonicalization_fixture(
+            "python_package",
+            "raw_observations.jsonl",
+        )
+        from repomap_kg.mcp_server import (
+            handle_jsonrpc_message,
+            repomap_canonical_edges,
+            repomap_canonical_neighborhood,
+            repomap_canonical_nodes,
+            repomap_explain_canonical_edge,
+            repomap_status,
+            serve_stdio,
+        )
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            load_exit_code, _load_stdout, load_stderr = run_repo_map_in_process(
+                "storage",
+                "load-files",
+                str(raw_jsonl),
+                "--repository-name",
+                "fixture",
+                "--root-path",
+                "/tmp/fixture",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+                "--json",
+            )
+            mcp_args = {
+                "root_path": "/tmp/fixture",
+                "pg_host": str(postgres.socket_dir),
+                "pg_port": str(postgres.port),
+                "pg_user": postgres.user,
+                "pg_database": "postgres",
+                "psql_command": postgres.psql_command,
+            }
+            status = repomap_status(**mcp_args)
+            modules = repomap_canonical_nodes(**mcp_args, kind="python.module")
+            imports = repomap_canonical_edges(
+                **mcp_args,
+                kind="imports",
+                source_key="python.module:pkg.app",
+            )
+            explanation = repomap_explain_canonical_edge(
+                **mcp_args,
+                source_key="python.module:pkg.app",
+                kind="imports",
+                target_key="python.module:pkg.lib.helper",
+                identity_metadata={},
+            )
+            neighborhood = repomap_canonical_neighborhood(
+                **mcp_args,
+                node="python.module:pkg.app",
+                direction="out",
+            )
+            initialize_response = handle_jsonrpc_message(
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize"}
+            )
+            tools_response = handle_jsonrpc_message(
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+            )
+            jsonrpc_status = handle_jsonrpc_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "repomap_status",
+                        "arguments": mcp_args,
+                    },
+                }
+            )
+            jsonrpc_modules = handle_jsonrpc_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "repomap_canonical_nodes",
+                        "arguments": {**mcp_args, "kind": "python.module"},
+                    },
+                }
+            )
+            jsonrpc_imports = handle_jsonrpc_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "repomap_canonical_edges",
+                        "arguments": {
+                            **mcp_args,
+                            "kind": "imports",
+                            "source_key": "python.module:pkg.app",
+                        },
+                    },
+                }
+            )
+            jsonrpc_explanation = handle_jsonrpc_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 6,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "repomap_explain_canonical_edge",
+                        "arguments": {
+                            **mcp_args,
+                            "source_key": "python.module:pkg.app",
+                            "kind": "imports",
+                            "target_key": "python.module:pkg.lib.helper",
+                            "identity_metadata": {},
+                        },
+                    },
+                }
+            )
+            jsonrpc_neighborhood = handle_jsonrpc_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "repomap_canonical_neighborhood",
+                        "arguments": {
+                            **mcp_args,
+                            "node": "python.module:pkg.app",
+                            "direction": "out",
+                        },
+                    },
+                }
+            )
+            jsonrpc_missing = handle_jsonrpc_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 8,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "repomap_missing",
+                        "arguments": mcp_args,
+                    },
+                }
+            )
+            stdio_output = StringIO()
+            serve_stdio(
+                input_stream=StringIO(
+                    "\n"
+                    '{"jsonrpc":"2.0","id":9,"method":"tools/list"}\n'
+                    '{"jsonrpc":"2.0","method":"notifications/initialized"}\n'
+                    '[]\n'
+                ),
+                output_stream=stdio_output,
+            )
+
+        self.assertEqual(load_exit_code, 0, load_stderr)
+
+        self.assertTrue(status["read_only"])
+        self.assertEqual(status["repository_name"], "fixture")
+        self.assertEqual(status["graph_key_version"], 1)
+        self.assertGreaterEqual(status["counts"]["nodes"], 8)
+        self.assertNotIn("repository_id", status)
+
+        self.assertEqual(
+            [record["canonical_key"] for record in modules],
+            ["python.module:pkg.app", "python.module:pkg.lib.helper"],
+        )
+
+        self.assertEqual(
+            [record["target_key"] for record in imports],
+            [
+                "external:python.module:json",
+                "python.module:pkg.lib.helper",
+                "unknown:python.module:missing-module",
+            ],
+        )
+        self.assertTrue(
+            all(record["edge_kind"] == "imports" for record in imports)
+        )
+
+        self.assertEqual(
+            explanation["edge"]["target_key"],
+            "python.module:pkg.lib.helper",
+        )
+        self.assertEqual(len(explanation["evidence"]), 1)
+        self.assertEqual(
+            explanation["evidence"][0]["raw_observation"]["kind"],
+            "python.import",
+        )
+
+        self.assertEqual(
+            neighborhood["center"]["canonical_key"],
+            "python.module:pkg.app",
+        )
+        self.assertEqual(
+            [record["target_key"] for record in neighborhood["edges"]],
+            [
+                "external:python.module:json",
+                "python.module:pkg.lib.helper",
+                "unknown:python.module:missing-module",
+            ],
+        )
+
+        self.assertEqual(
+            initialize_response["result"]["serverInfo"]["name"],
+            "repomap-kg",
+        )
+        self.assertEqual(
+            [tool["name"] for tool in tools_response["result"]["tools"]],
+            [
+                "repomap_status",
+                "repomap_canonical_nodes",
+                "repomap_canonical_edges",
+                "repomap_explain_canonical_edge",
+                "repomap_canonical_neighborhood",
+            ],
+        )
+        self.assertEqual(
+            jsonrpc_status["result"]["structuredContent"]["repository_name"],
+            "fixture",
+        )
+        self.assertEqual(
+            [
+                record["canonical_key"]
+                for record in jsonrpc_modules["result"]["structuredContent"]
+            ],
+            ["python.module:pkg.app", "python.module:pkg.lib.helper"],
+        )
+        self.assertEqual(
+            [
+                record["target_key"]
+                for record in jsonrpc_imports["result"]["structuredContent"]
+            ],
+            [
+                "external:python.module:json",
+                "python.module:pkg.lib.helper",
+                "unknown:python.module:missing-module",
+            ],
+        )
+        self.assertEqual(
+            jsonrpc_explanation["result"]["structuredContent"]["edge"]["target_key"],
+            "python.module:pkg.lib.helper",
+        )
+        self.assertEqual(
+            jsonrpc_neighborhood["result"]["structuredContent"]["center"][
+                "canonical_key"
+            ],
+            "python.module:pkg.app",
+        )
+        self.assertTrue(jsonrpc_missing["result"]["isError"])
+        stdio_lines = stdio_output.getvalue().splitlines()
+        self.assertEqual(len(stdio_lines), 2)
+        self.assertEqual(
+            json.loads(stdio_lines[0])["result"]["tools"][0]["name"],
+            "repomap_status",
+        )
+        self.assertEqual(json.loads(stdio_lines[1])["error"]["code"], -32700)
+
     def test_storage_load_files_retains_unsupported_future_observation(self):
         require_postgres_binaries()
         raw_jsonl = canonicalization_fixture(
