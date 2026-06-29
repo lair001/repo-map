@@ -45,6 +45,7 @@ from repomap_kg.storage import (
     format_neighborhood_table,
     format_node_table,
     format_storage_summary_table,
+    load_canonical_observations,
     load_file_observations,
     neighborhood_to_jsonable,
     node_records_to_jsonable,
@@ -199,6 +200,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit load summary as JSON",
+    )
+    load_canonical = storage_subcommands.add_parser(
+        "load-canonical",
+        help="load raw observations into canonical Postgres storage",
+    )
+    load_canonical.add_argument("jsonl_path", help="raw observation JSONL path")
+    load_canonical.add_argument("--repository-name", required=True)
+    add_storage_root_argument(load_canonical)
+    load_canonical.add_argument("--git-commit")
+    add_storage_connection_arguments(load_canonical)
+    load_canonical.add_argument(
+        "--json",
+        action="store_true",
+        help="emit canonical load summary as JSON",
     )
     storage_files = storage_subcommands.add_parser(
         "files",
@@ -555,6 +570,47 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"loaded {summary.files} files into "
                 f"repository {summary.repository_id} run {summary.run_id}"
+            )
+        return 0
+
+    if args.command == "storage" and args.storage_command == "load-canonical":
+        try:
+            observations = read_observations_jsonl(args.jsonl_path)
+            summary = load_canonical_observations(
+                psql_args_from_args(args),
+                observations,
+                repository_name=args.repository_name,
+                root_path=args.root_path,
+                git_commit=args.git_commit,
+                psql_command=args.psql_command,
+            )
+        except (ObservationValidationError, StorageSchemaError) as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        payload = {
+            "repository_id": summary.repository_id,
+            "run_id": summary.run_id,
+            "raw_observations": summary.raw_observations,
+            "canonical_nodes": summary.canonical_nodes,
+            "canonical_edges": summary.canonical_edges,
+            "canonical_evidence": summary.canonical_evidence,
+            "canonical_node_evidence_links": (
+                summary.canonical_node_evidence_links
+            ),
+            "canonical_edge_evidence_links": (
+                summary.canonical_edge_evidence_links
+            ),
+        }
+        if args.json:
+            print(json.dumps(payload, sort_keys=True))
+        else:
+            print(
+                "loaded "
+                f"{summary.raw_observations} raw observations into "
+                f"{summary.canonical_nodes} canonical nodes, "
+                f"{summary.canonical_edges} canonical edges, and "
+                f"{summary.canonical_evidence} canonical evidence records "
+                f"for repository {summary.repository_id} run {summary.run_id}"
             )
         return 0
 

@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from repomap_kg.canonical import CanonicalizationResult
+from repomap_kg.canonicalization import canonicalize_observations
 from repomap_kg.files import FileRecord, format_table_row, render_table_value
 from repomap_kg.host_mutators import HostMutatorRecord
 from repomap_kg.observations import RawObservation
@@ -67,6 +70,98 @@ class LoadSummary:
     repository_id: int
     run_id: int
     files: int
+
+
+@dataclass(frozen=True)
+class CanonicalLoadSummary:
+    repository_id: int
+    run_id: int
+    raw_observations: int
+    canonical_nodes: int
+    canonical_edges: int
+    canonical_evidence: int
+    canonical_node_evidence_links: int
+    canonical_edge_evidence_links: int
+
+
+@dataclass(frozen=True)
+class RawObservationRow:
+    ordinal: int
+    schema_version: int
+    kind: str
+    source_id: str
+    path: str
+    payload_json: dict[str, Any]
+    payload_hash: str
+
+
+@dataclass(frozen=True)
+class CanonicalNodeRow:
+    graph_key_version: int
+    canonical_key: str
+    kind: str
+    display_name: str
+    metadata_json: dict[str, Any]
+    confidence: str
+    conflict: bool
+
+
+@dataclass(frozen=True)
+class CanonicalEdgeRow:
+    edge_key: str
+    graph_key_version: int
+    source_key: str
+    edge_kind: str
+    target_key: str
+    identity_metadata_json: dict[str, Any]
+    identity_metadata_hash: str
+    metadata_json: dict[str, Any]
+    confidence: str
+    conflict: bool
+
+
+@dataclass(frozen=True)
+class CanonicalEvidenceRow:
+    evidence_key: str
+    graph_key_version: int
+    raw_observation_ordinal: int
+    raw_schema_version: int
+    raw_kind: str
+    raw_source_id: str
+    path: str
+    start_line: int | None
+    end_line: int | None
+    extractor: str
+    extractor_version: str
+    confidence: str
+    metadata_json: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class CanonicalNodeEvidenceLinkRow:
+    canonical_key: str
+    evidence_key: str
+    link_kind: str
+
+
+@dataclass(frozen=True)
+class CanonicalEdgeEvidenceLinkRow:
+    graph_key_version: int
+    source_key: str
+    edge_kind: str
+    target_key: str
+    identity_metadata_hash: str
+    evidence_key: str
+    link_kind: str
+
+
+@dataclass(frozen=True)
+class CanonicalLoadRows:
+    nodes: tuple[CanonicalNodeRow, ...]
+    edges: tuple[CanonicalEdgeRow, ...]
+    evidence: tuple[CanonicalEvidenceRow, ...]
+    node_evidence_links: tuple[CanonicalNodeEvidenceLinkRow, ...]
+    edge_evidence_links: tuple[CanonicalEdgeEvidenceLinkRow, ...]
 
 
 @dataclass(frozen=True)
@@ -313,6 +408,152 @@ def relationship_rows_from_observations(
     return tuple(sorted(rows, key=lambda row: row.edge_stable_key))
 
 
+def raw_observation_payload_hash(observation: RawObservation) -> str:
+    return sha256_text(canonical_json_text(observation.to_dict()))
+
+
+def identity_metadata_hash(metadata: Mapping[str, Any]) -> str:
+    return sha256_text(canonical_json_text(metadata))
+
+
+def raw_observation_rows_from_observations(
+    observations: Sequence[RawObservation],
+) -> tuple[RawObservationRow, ...]:
+    return tuple(
+        RawObservationRow(
+            ordinal=ordinal,
+            schema_version=observation.schema_version,
+            kind=observation.kind,
+            source_id=observation.source_id,
+            path=observation.path,
+            payload_json=observation.to_dict(),
+            payload_hash=raw_observation_payload_hash(observation),
+        )
+        for ordinal, observation in enumerate(observations)
+    )
+
+
+def canonical_rows_from_result(result: CanonicalizationResult) -> CanonicalLoadRows:
+    edges_by_key = {edge.edge_key: edge for edge in result.graph.edges}
+    edge_rows = tuple(
+        CanonicalEdgeRow(
+            edge_key=edge.edge_key,
+            graph_key_version=edge.graph_key_version,
+            source_key=edge.source_key,
+            edge_kind=edge.kind,
+            target_key=edge.target_key,
+            identity_metadata_json=dict(edge.identity_metadata),
+            identity_metadata_hash=identity_metadata_hash(edge.identity_metadata),
+            metadata_json=dict(edge.metadata),
+            confidence=edge.confidence,
+            conflict=edge.conflict,
+        )
+        for edge in result.graph.edges
+    )
+    return CanonicalLoadRows(
+        nodes=tuple(
+            CanonicalNodeRow(
+                graph_key_version=node.graph_key_version,
+                canonical_key=node.canonical_key,
+                kind=node.kind,
+                display_name=node.display_name,
+                metadata_json=dict(node.metadata),
+                confidence=node.confidence,
+                conflict=node.conflict,
+            )
+            for node in result.graph.nodes
+        ),
+        edges=edge_rows,
+        evidence=tuple(
+            CanonicalEvidenceRow(
+                evidence_key=evidence.evidence_key,
+                graph_key_version=result.graph.graph_key_version,
+                raw_observation_ordinal=evidence.raw_observation_ordinal,
+                raw_schema_version=evidence.raw_schema_version,
+                raw_kind=evidence.raw_kind,
+                raw_source_id=evidence.raw_source_id,
+                path=evidence.path,
+                start_line=evidence.start_line,
+                end_line=evidence.end_line,
+                extractor=evidence.extractor,
+                extractor_version=evidence.extractor_version,
+                confidence=evidence.confidence,
+                metadata_json=dict(evidence.metadata),
+            )
+            for evidence in result.graph.evidence
+        ),
+        node_evidence_links=tuple(
+            CanonicalNodeEvidenceLinkRow(
+                canonical_key=link.canonical_key,
+                evidence_key=link.evidence_key,
+                link_kind=link.link_kind,
+            )
+            for link in result.graph.node_evidence_links
+        ),
+        edge_evidence_links=tuple(
+            canonical_edge_link_row(link, edges_by_key)
+            for link in result.graph.edge_evidence_links
+        ),
+    )
+
+
+def canonical_edge_link_row(
+    link,
+    edges_by_key,
+) -> CanonicalEdgeEvidenceLinkRow:
+    edge = edges_by_key[link.edge_key]
+    return CanonicalEdgeEvidenceLinkRow(
+        graph_key_version=edge.graph_key_version,
+        source_key=edge.source_key,
+        edge_kind=edge.kind,
+        target_key=edge.target_key,
+        identity_metadata_hash=identity_metadata_hash(edge.identity_metadata),
+        evidence_key=link.evidence_key,
+        link_kind=link.link_kind,
+    )
+
+
+def load_canonical_observations(
+    psql_args: Sequence[str],
+    observations: Sequence[RawObservation],
+    *,
+    repository_name: str,
+    root_path: str,
+    git_commit: str | None = None,
+    psql_command: str = "psql",
+) -> CanonicalLoadSummary:
+    result = canonicalize_observations(observations)
+    raw_rows = raw_observation_rows_from_observations(observations)
+    canonical_rows = (
+        canonical_rows_from_result(result)
+        if result.ok
+        else CanonicalLoadRows((), (), (), (), ())
+    )
+    sql = build_canonical_ingest_sql(
+        raw_rows,
+        canonical_rows,
+        repository_name=repository_name,
+        root_path=root_path,
+        git_commit=git_commit,
+        run_status="complete" if result.ok else "failed",
+    )
+    completed = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=sql,
+    )
+    summary = canonical_load_summary_from_payload(
+        parse_psql_json(completed.stdout, "canonical load summary")
+    )
+    if not result.ok:
+        messages = "; ".join(
+            diagnostic.message
+            for diagnostic in result.diagnostics
+            if diagnostic.severity == "error"
+        )
+        raise StorageSchemaError(f"canonicalization failed: {messages}")
+    return summary
+
+
 def load_file_observations(
     psql_args: Sequence[str],
     observations: Sequence[RawObservation],
@@ -550,6 +791,67 @@ def build_file_ingest_sql(
                 "'repository_id', :repo_id::bigint, "
                 "'run_id', :run_id::bigint, "
                 f"'files', {len(rows)}"
+                ")::text;"
+            ),
+        ]
+    )
+    return "\n".join(statements) + "\n"
+
+
+def build_canonical_ingest_sql(
+    raw_rows: Sequence[RawObservationRow],
+    canonical_rows: CanonicalLoadRows,
+    *,
+    repository_name: str,
+    root_path: str,
+    git_commit: str | None = None,
+    run_status: str = "complete",
+) -> str:
+    statements = [
+        "BEGIN;",
+        (
+            "INSERT INTO repositories(name, root_path) "
+            f"VALUES ({sql_literal(repository_name)}, {sql_literal(root_path)}) "
+            "ON CONFLICT (root_path) DO UPDATE SET name = EXCLUDED.name "
+            "RETURNING id"
+        ),
+        "\\gset repo_",
+        (
+            "INSERT INTO runs(repository_id, git_commit, status) "
+            f"VALUES (:repo_id, {sql_literal(git_commit)}, {sql_literal(run_status)}) "
+            "RETURNING id"
+        ),
+        "\\gset run_",
+    ]
+    statements.extend(raw_observation_upsert_sql(row) for row in raw_rows)
+    statements.extend(canonical_node_upsert_sql(row) for row in canonical_rows.nodes)
+    statements.extend(canonical_edge_upsert_sql(row) for row in canonical_rows.edges)
+    statements.extend(
+        canonical_evidence_upsert_sql(row) for row in canonical_rows.evidence
+    )
+    statements.extend(
+        canonical_node_evidence_upsert_sql(row)
+        for row in canonical_rows.node_evidence_links
+    )
+    statements.extend(
+        canonical_edge_evidence_upsert_sql(row)
+        for row in canonical_rows.edge_evidence_links
+    )
+    statements.extend(
+        [
+            "COMMIT;",
+            (
+                "SELECT json_build_object("
+                "'repository_id', :repo_id::bigint, "
+                "'run_id', :run_id::bigint, "
+                f"'raw_observations', {len(raw_rows)}, "
+                f"'canonical_nodes', {len(canonical_rows.nodes)}, "
+                f"'canonical_edges', {len(canonical_rows.edges)}, "
+                f"'canonical_evidence', {len(canonical_rows.evidence)}, "
+                "'canonical_node_evidence_links', "
+                f"{len(canonical_rows.node_evidence_links)}, "
+                "'canonical_edge_evidence_links', "
+                f"{len(canonical_rows.edge_evidence_links)}"
                 ")::text;"
             ),
         ]
@@ -1180,6 +1482,187 @@ def relationship_edge_upsert_sql(row: RelationshipRow) -> str:
     )
 
 
+def raw_observation_upsert_sql(row: RawObservationRow) -> str:
+    payload_json = canonical_json_text(row.payload_json)
+    return "\n".join(
+        [
+            (
+                "SELECT CAST("
+                "'raw observation payload hash mismatch ' || now()::text "
+                "AS integer) "
+                "WHERE EXISTS ("
+                "SELECT 1 FROM raw_observations "
+                "WHERE run_id = :run_id "
+                f"AND ordinal = {row.ordinal} "
+                f"AND payload_hash <> {sql_literal(row.payload_hash)}"
+                ");"
+            ),
+            (
+                "INSERT INTO raw_observations("
+                "repository_id, run_id, ordinal, schema_version, kind, source_id, "
+                "path, payload_json, payload_hash"
+                ") VALUES ("
+                ":repo_id, :run_id, "
+                f"{row.ordinal}, "
+                f"{row.schema_version}, "
+                f"{sql_literal(row.kind)}, "
+                f"{sql_literal(row.source_id)}, "
+                f"{sql_literal(row.path)}, "
+                f"{sql_literal(payload_json)}::jsonb, "
+                f"{sql_literal(row.payload_hash)}"
+                ") ON CONFLICT (run_id, ordinal) DO UPDATE SET "
+                "schema_version = EXCLUDED.schema_version, "
+                "kind = EXCLUDED.kind, "
+                "source_id = EXCLUDED.source_id, "
+                "path = EXCLUDED.path, "
+                "payload_json = EXCLUDED.payload_json, "
+                "payload_hash = EXCLUDED.payload_hash;"
+            ),
+        ]
+    )
+
+
+def canonical_node_upsert_sql(row: CanonicalNodeRow) -> str:
+    return (
+        "INSERT INTO canonical_nodes("
+        "repository_id, graph_key_version, canonical_key, kind, display_name, "
+        "metadata_json, confidence, conflict, first_seen_run_id, last_seen_run_id"
+        ") VALUES ("
+        ":repo_id, "
+        f"{row.graph_key_version}, "
+        f"{sql_literal(row.canonical_key)}, "
+        f"{sql_literal(row.kind)}, "
+        f"{sql_literal(row.display_name)}, "
+        f"{sql_literal(canonical_json_text(row.metadata_json))}::jsonb, "
+        f"{sql_literal(row.confidence)}, "
+        f"{sql_bool(row.conflict)}, "
+        ":run_id, :run_id"
+        ") ON CONFLICT (repository_id, graph_key_version, canonical_key) "
+        "DO UPDATE SET "
+        "kind = EXCLUDED.kind, "
+        "display_name = EXCLUDED.display_name, "
+        "metadata_json = EXCLUDED.metadata_json, "
+        "confidence = EXCLUDED.confidence, "
+        "conflict = EXCLUDED.conflict, "
+        "last_seen_run_id = EXCLUDED.last_seen_run_id, "
+        "updated_at = now();"
+    )
+
+
+def canonical_edge_upsert_sql(row: CanonicalEdgeRow) -> str:
+    return (
+        "INSERT INTO canonical_edges("
+        "repository_id, graph_key_version, source_canonical_key, edge_kind, "
+        "target_canonical_key, identity_metadata_json, identity_metadata_hash, "
+        "metadata_json, confidence, conflict, first_seen_run_id, last_seen_run_id"
+        ") VALUES ("
+        ":repo_id, "
+        f"{row.graph_key_version}, "
+        f"{sql_literal(row.source_key)}, "
+        f"{sql_literal(row.edge_kind)}, "
+        f"{sql_literal(row.target_key)}, "
+        f"{sql_literal(canonical_json_text(row.identity_metadata_json))}::jsonb, "
+        f"{sql_literal(row.identity_metadata_hash)}, "
+        f"{sql_literal(canonical_json_text(row.metadata_json))}::jsonb, "
+        f"{sql_literal(row.confidence)}, "
+        f"{sql_bool(row.conflict)}, "
+        ":run_id, :run_id"
+        ") ON CONFLICT ("
+        "repository_id, graph_key_version, source_canonical_key, edge_kind, "
+        "target_canonical_key, identity_metadata_hash"
+        ") DO UPDATE SET "
+        "identity_metadata_json = EXCLUDED.identity_metadata_json, "
+        "metadata_json = EXCLUDED.metadata_json, "
+        "confidence = EXCLUDED.confidence, "
+        "conflict = EXCLUDED.conflict, "
+        "last_seen_run_id = EXCLUDED.last_seen_run_id, "
+        "updated_at = now();"
+    )
+
+
+def canonical_evidence_upsert_sql(row: CanonicalEvidenceRow) -> str:
+    return (
+        "INSERT INTO canonical_evidence("
+        "repository_id, run_id, graph_key_version, raw_observation_id, "
+        "evidence_key, raw_observation_ordinal, raw_schema_version, raw_kind, "
+        "raw_source_id, path, start_line, end_line, extractor, "
+        "extractor_version, confidence, metadata_json"
+        ") SELECT "
+        ":repo_id, :run_id, "
+        f"{row.graph_key_version}, "
+        "raw_observations.id, "
+        f"{sql_literal(row.evidence_key)}, "
+        f"{row.raw_observation_ordinal}, "
+        f"{row.raw_schema_version}, "
+        f"{sql_literal(row.raw_kind)}, "
+        f"{sql_literal(row.raw_source_id)}, "
+        f"{sql_literal(row.path)}, "
+        f"{sql_int_or_null(row.start_line)}, "
+        f"{sql_int_or_null(row.end_line)}, "
+        f"{sql_literal(row.extractor)}, "
+        f"{sql_literal(row.extractor_version)}, "
+        f"{sql_literal(row.confidence)}, "
+        f"{sql_literal(canonical_json_text(row.metadata_json))}::jsonb "
+        "FROM raw_observations "
+        "WHERE raw_observations.run_id = :run_id "
+        f"AND raw_observations.ordinal = {row.raw_observation_ordinal} "
+        "ON CONFLICT (run_id, graph_key_version, evidence_key) DO UPDATE SET "
+        "raw_observation_id = EXCLUDED.raw_observation_id, "
+        "raw_observation_ordinal = EXCLUDED.raw_observation_ordinal, "
+        "raw_schema_version = EXCLUDED.raw_schema_version, "
+        "raw_kind = EXCLUDED.raw_kind, "
+        "raw_source_id = EXCLUDED.raw_source_id, "
+        "path = EXCLUDED.path, "
+        "start_line = EXCLUDED.start_line, "
+        "end_line = EXCLUDED.end_line, "
+        "extractor = EXCLUDED.extractor, "
+        "extractor_version = EXCLUDED.extractor_version, "
+        "confidence = EXCLUDED.confidence, "
+        "metadata_json = EXCLUDED.metadata_json;"
+    )
+
+
+def canonical_node_evidence_upsert_sql(row: CanonicalNodeEvidenceLinkRow) -> str:
+    return (
+        "INSERT INTO canonical_node_evidence("
+        "canonical_node_id, canonical_evidence_id, link_kind"
+        ") SELECT canonical_nodes.id, canonical_evidence.id, "
+        f"{sql_literal(row.link_kind)} "
+        "FROM canonical_nodes "
+        "JOIN canonical_evidence ON canonical_evidence.repository_id = :repo_id "
+        "AND canonical_evidence.run_id = :run_id "
+        f"AND canonical_evidence.evidence_key = {sql_literal(row.evidence_key)} "
+        "WHERE canonical_nodes.repository_id = :repo_id "
+        f"AND canonical_nodes.canonical_key = {sql_literal(row.canonical_key)} "
+        "AND canonical_nodes.graph_key_version = "
+        "canonical_evidence.graph_key_version "
+        "ON CONFLICT DO NOTHING;"
+    )
+
+
+def canonical_edge_evidence_upsert_sql(row: CanonicalEdgeEvidenceLinkRow) -> str:
+    return (
+        "INSERT INTO canonical_edge_evidence("
+        "canonical_edge_id, canonical_evidence_id, link_kind"
+        ") SELECT canonical_edges.id, canonical_evidence.id, "
+        f"{sql_literal(row.link_kind)} "
+        "FROM canonical_edges "
+        "JOIN canonical_evidence ON canonical_evidence.repository_id = :repo_id "
+        "AND canonical_evidence.run_id = :run_id "
+        f"AND canonical_evidence.evidence_key = {sql_literal(row.evidence_key)} "
+        "WHERE canonical_edges.repository_id = :repo_id "
+        f"AND canonical_edges.graph_key_version = {row.graph_key_version} "
+        f"AND canonical_edges.source_canonical_key = {sql_literal(row.source_key)} "
+        f"AND canonical_edges.edge_kind = {sql_literal(row.edge_kind)} "
+        f"AND canonical_edges.target_canonical_key = {sql_literal(row.target_key)} "
+        "AND canonical_edges.identity_metadata_hash = "
+        f"{sql_literal(row.identity_metadata_hash)} "
+        "AND canonical_edges.graph_key_version = "
+        "canonical_evidence.graph_key_version "
+        "ON CONFLICT DO NOTHING;"
+    )
+
+
 def file_node_stable_key(row: FileRow) -> str:
     return f"node:{row.path}:file:{file_source_id(row)}"
 
@@ -1571,6 +2054,30 @@ def load_summary_from_payload(payload: Any) -> LoadSummary:
         raise StorageSchemaError("psql returned a malformed load summary") from error
 
 
+def canonical_load_summary_from_payload(payload: Any) -> CanonicalLoadSummary:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed canonical load summary")
+    try:
+        return CanonicalLoadSummary(
+            repository_id=int(payload["repository_id"]),
+            run_id=int(payload["run_id"]),
+            raw_observations=int(payload["raw_observations"]),
+            canonical_nodes=int(payload["canonical_nodes"]),
+            canonical_edges=int(payload["canonical_edges"]),
+            canonical_evidence=int(payload["canonical_evidence"]),
+            canonical_node_evidence_links=int(
+                payload["canonical_node_evidence_links"]
+            ),
+            canonical_edge_evidence_links=int(
+                payload["canonical_edge_evidence_links"]
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise StorageSchemaError(
+            "psql returned a malformed canonical load summary"
+        ) from error
+
+
 def parse_psql_json(stdout: str, label: str) -> Any:
     try:
         return json.loads(last_output_line(stdout))
@@ -1665,6 +2172,29 @@ def metadata_bool(metadata: dict[str, Any], key: str) -> bool:
 
 def optional_text(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def canonical_json_text(value: Any) -> str:
+    return json.dumps(
+        canonical_json_value(value),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def canonical_json_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): canonical_json_value(item)
+            for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, tuple | list):
+        return [canonical_json_value(item) for item in value]
+    return value
 
 
 def sql_literal(value: str | None) -> str:
