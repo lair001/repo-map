@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -10,6 +11,15 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from repomap_kg.canonical import (
+    CanonicalEdge,
+    CanonicalEdgeEvidenceLink,
+    CanonicalEvidence,
+    CanonicalGraph,
+    CanonicalNode,
+    CanonicalNodeEvidenceLink,
+)
+from repomap_kg.canonicalization import canonicalize_observations
 from repomap_kg.files import FileRecord, format_table_row, render_table_value
 from repomap_kg.host_mutators import HostMutatorRecord
 from repomap_kg.observations import RawObservation
@@ -351,10 +361,12 @@ def load_file_observations(
     rows = file_rows_from_observations(observations)
     relationship_rows = relationship_rows_from_observations(observations)
     raw_observation_rows = raw_observation_rows_from_observations(observations)
+    canonical_graph = canonicalize_observations(observations).graph
     sql = build_file_ingest_sql(
         rows,
         relationship_rows=relationship_rows,
         raw_observation_rows=raw_observation_rows,
+        canonical_graph=canonical_graph,
         repository_name=repository_name,
         root_path=root_path,
         git_commit=git_commit,
@@ -543,6 +555,7 @@ def build_file_ingest_sql(
     *,
     relationship_rows: Sequence[RelationshipRow] = (),
     raw_observation_rows: Sequence[RawObservationRow] = (),
+    canonical_graph: CanonicalGraph | None = None,
     repository_name: str,
     root_path: str,
     git_commit: str | None = None,
@@ -566,6 +579,46 @@ def build_file_ingest_sql(
     statements.extend(
         raw_observation_insert_sql(row) for row in raw_observation_rows
     )
+    if canonical_graph is not None:
+        statements.extend(
+            canonical_node_upsert_sql(node)
+            for node in sorted(
+                canonical_graph.nodes, key=lambda item: item.canonical_key
+            )
+        )
+        statements.extend(
+            canonical_evidence_upsert_sql(record)
+            for record in sorted(
+                canonical_graph.evidence,
+                key=lambda item: (item.raw_observation_ordinal, item.evidence_key),
+            )
+        )
+        statements.extend(
+            canonical_edge_upsert_sql(edge)
+            for edge in sorted(canonical_graph.edges, key=lambda item: item.edge_key)
+        )
+        statements.extend(
+            canonical_node_evidence_link_upsert_sql(
+                link, graph_key_version=canonical_graph.graph_key_version
+            )
+            for link in sorted(
+                canonical_graph.node_evidence_links,
+                key=lambda item: (
+                    item.canonical_key,
+                    item.evidence_key,
+                    item.link_kind,
+                ),
+            )
+        )
+        statements.extend(
+            canonical_edge_evidence_link_upsert_sql(
+                link, graph_key_version=canonical_graph.graph_key_version
+            )
+            for link in sorted(
+                canonical_graph.edge_evidence_links,
+                key=lambda item: (item.edge_key, item.evidence_key, item.link_kind),
+            )
+        )
     statements.extend(file_upsert_sql(row) for row in rows)
     statements.extend(file_node_upsert_sql(row) for row in rows)
     statements.extend(file_evidence_upsert_sql(row) for row in rows)
@@ -1085,6 +1138,165 @@ def raw_observation_insert_sql(row: RawObservationRow) -> str:
         "path = EXCLUDED.path, "
         "observation_json = EXCLUDED.observation_json, "
         "schema_version = EXCLUDED.schema_version;"
+    )
+
+
+def canonical_node_upsert_sql(node: CanonicalNode) -> str:
+    return (
+        "INSERT INTO canonical_nodes("
+        "repository_id, graph_key_version, canonical_key, kind, display_name, "
+        "confidence, conflict, metadata_json"
+        ") VALUES ("
+        ":repo_id, "
+        f"{node.graph_key_version}, "
+        f"{sql_literal(node.canonical_key)}, "
+        f"{sql_literal(node.kind)}, "
+        f"{sql_literal(node.display_name)}, "
+        f"{sql_literal(node.confidence)}, "
+        f"{sql_bool(node.conflict)}, "
+        f"{sql_literal(json.dumps(dict(node.metadata), sort_keys=True))}::jsonb"
+        ") ON CONFLICT (repository_id, graph_key_version, canonical_key) "
+        "DO UPDATE SET "
+        "kind = EXCLUDED.kind, "
+        "display_name = EXCLUDED.display_name, "
+        "confidence = EXCLUDED.confidence, "
+        "conflict = EXCLUDED.conflict, "
+        "metadata_json = EXCLUDED.metadata_json, "
+        "updated_at = now();"
+    )
+
+
+def canonical_evidence_upsert_sql(record: CanonicalEvidence) -> str:
+    return (
+        "INSERT INTO canonical_evidence("
+        "repository_id, run_id, raw_observation_id, evidence_key, "
+        "raw_observation_ordinal, raw_schema_version, raw_kind, raw_source_id, "
+        "path, start_line, end_line, extractor, extractor_version, confidence, "
+        "metadata_json"
+        ") SELECT "
+        ":repo_id, :run_id, raw_observations.id, "
+        f"{sql_literal(record.evidence_key)}, "
+        f"{record.raw_observation_ordinal}, "
+        f"{record.raw_schema_version}, "
+        f"{sql_literal(record.raw_kind)}, "
+        f"{sql_literal(record.raw_source_id)}, "
+        f"{sql_literal(record.path)}, "
+        f"{sql_int_or_null(record.start_line)}, "
+        f"{sql_int_or_null(record.end_line)}, "
+        f"{sql_literal(record.extractor)}, "
+        f"{sql_literal(record.extractor_version)}, "
+        f"{sql_literal(record.confidence)}, "
+        f"{sql_literal(json.dumps(dict(record.metadata), sort_keys=True))}::jsonb "
+        "FROM raw_observations "
+        "WHERE raw_observations.repository_id = :repo_id "
+        "AND raw_observations.run_id = :run_id "
+        f"AND raw_observations.ordinal = {record.raw_observation_ordinal} "
+        "ON CONFLICT (repository_id, run_id, evidence_key) DO UPDATE SET "
+        "raw_observation_id = EXCLUDED.raw_observation_id, "
+        "raw_observation_ordinal = EXCLUDED.raw_observation_ordinal, "
+        "raw_schema_version = EXCLUDED.raw_schema_version, "
+        "raw_kind = EXCLUDED.raw_kind, "
+        "raw_source_id = EXCLUDED.raw_source_id, "
+        "path = EXCLUDED.path, "
+        "start_line = EXCLUDED.start_line, "
+        "end_line = EXCLUDED.end_line, "
+        "extractor = EXCLUDED.extractor, "
+        "extractor_version = EXCLUDED.extractor_version, "
+        "confidence = EXCLUDED.confidence, "
+        "metadata_json = EXCLUDED.metadata_json, "
+        "updated_at = now();"
+    )
+
+
+def canonical_edge_upsert_sql(edge: CanonicalEdge) -> str:
+    identity_metadata_json = json.dumps(
+        dict(edge.identity_metadata), sort_keys=True, separators=(",", ":")
+    )
+    identity_metadata_hash = hashlib.sha256(
+        identity_metadata_json.encode("utf-8")
+    ).hexdigest()
+    return (
+        "INSERT INTO canonical_edges("
+        "repository_id, graph_key_version, edge_key, source_node_id, "
+        "target_node_id, source_canonical_key, edge_kind, target_canonical_key, "
+        "identity_metadata_hash, identity_metadata_json, metadata_json, "
+        "confidence, conflict"
+        ") SELECT "
+        ":repo_id, "
+        f"{edge.graph_key_version}, "
+        f"{sql_literal(edge.edge_key)}, "
+        "source_node.id, target_node.id, "
+        f"{sql_literal(edge.source_key)}, "
+        f"{sql_literal(edge.kind)}, "
+        f"{sql_literal(edge.target_key)}, "
+        f"{sql_literal(identity_metadata_hash)}, "
+        f"{sql_literal(identity_metadata_json)}::jsonb, "
+        f"{sql_literal(json.dumps(dict(edge.metadata), sort_keys=True))}::jsonb, "
+        f"{sql_literal(edge.confidence)}, "
+        f"{sql_bool(edge.conflict)} "
+        "FROM canonical_nodes source_node "
+        "JOIN canonical_nodes target_node "
+        "ON target_node.repository_id = :repo_id "
+        f"AND target_node.graph_key_version = {edge.graph_key_version} "
+        f"AND target_node.canonical_key = {sql_literal(edge.target_key)} "
+        "WHERE source_node.repository_id = :repo_id "
+        f"AND source_node.graph_key_version = {edge.graph_key_version} "
+        f"AND source_node.canonical_key = {sql_literal(edge.source_key)} "
+        "ON CONFLICT (repository_id, graph_key_version, edge_key) "
+        "DO UPDATE SET "
+        "source_node_id = EXCLUDED.source_node_id, "
+        "target_node_id = EXCLUDED.target_node_id, "
+        "source_canonical_key = EXCLUDED.source_canonical_key, "
+        "edge_kind = EXCLUDED.edge_kind, "
+        "target_canonical_key = EXCLUDED.target_canonical_key, "
+        "identity_metadata_hash = EXCLUDED.identity_metadata_hash, "
+        "identity_metadata_json = EXCLUDED.identity_metadata_json, "
+        "metadata_json = EXCLUDED.metadata_json, "
+        "confidence = EXCLUDED.confidence, "
+        "conflict = EXCLUDED.conflict, "
+        "updated_at = now();"
+    )
+
+
+def canonical_node_evidence_link_upsert_sql(
+    link: CanonicalNodeEvidenceLink,
+    *,
+    graph_key_version: int,
+) -> str:
+    return (
+        "INSERT INTO canonical_node_evidence("
+        "canonical_node_id, canonical_evidence_id, link_kind"
+        ") SELECT canonical_nodes.id, canonical_evidence.id, "
+        f"{sql_literal(link.link_kind)} "
+        "FROM canonical_nodes "
+        "JOIN canonical_evidence ON canonical_evidence.repository_id = :repo_id "
+        "AND canonical_evidence.run_id = :run_id "
+        f"AND canonical_evidence.evidence_key = {sql_literal(link.evidence_key)} "
+        "WHERE canonical_nodes.repository_id = :repo_id "
+        f"AND canonical_nodes.graph_key_version = {graph_key_version} "
+        f"AND canonical_nodes.canonical_key = {sql_literal(link.canonical_key)} "
+        "ON CONFLICT DO NOTHING;"
+    )
+
+
+def canonical_edge_evidence_link_upsert_sql(
+    link: CanonicalEdgeEvidenceLink,
+    *,
+    graph_key_version: int,
+) -> str:
+    return (
+        "INSERT INTO canonical_edge_evidence("
+        "canonical_edge_id, canonical_evidence_id, link_kind"
+        ") SELECT canonical_edges.id, canonical_evidence.id, "
+        f"{sql_literal(link.link_kind)} "
+        "FROM canonical_edges "
+        "JOIN canonical_evidence ON canonical_evidence.repository_id = :repo_id "
+        "AND canonical_evidence.run_id = :run_id "
+        f"AND canonical_evidence.evidence_key = {sql_literal(link.evidence_key)} "
+        "WHERE canonical_edges.repository_id = :repo_id "
+        f"AND canonical_edges.graph_key_version = {graph_key_version} "
+        f"AND canonical_edges.edge_key = {sql_literal(link.edge_key)} "
+        "ON CONFLICT DO NOTHING;"
     )
 
 

@@ -33,6 +33,11 @@ SELECT string_agg(table_name, ',' ORDER BY table_name)
 FROM information_schema.tables
 WHERE table_schema = 'public'
   AND table_name IN (
+    'canonical_edge_evidence',
+    'canonical_edges',
+    'canonical_evidence',
+    'canonical_node_evidence',
+    'canonical_nodes',
     'repositories',
     'raw_observations',
     'runs',
@@ -109,7 +114,9 @@ SELECT path FROM files WHERE role = 'entrypoint';
 
         self.assertEqual(
             tables,
-            "edges,evidence,files,nodes,raw_observations,repositories,runs",
+            "canonical_edge_evidence,canonical_edges,canonical_evidence,"
+            "canonical_node_evidence,canonical_nodes,edges,evidence,files,nodes,"
+            "raw_observations,repositories,runs",
         )
         self.assertEqual(inserted_path, "bin/tool")
 
@@ -347,6 +354,91 @@ WHERE raw_observations.run_id = {summary.run_id};
             "0|file|bin/tool|bin/tool|;"
             "1|shell.command|bin/tool#call:nix|bin/tool|tool:nix",
         )
+
+    def test_load_file_observations_writes_canonical_graph_rows(self):
+        require_postgres_binaries()
+        observations = [
+            RawObservation(
+                kind="file",
+                source_id="bin/tool",
+                path="bin/tool",
+                confidence="manual",
+                extractor="fixture-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "shell",
+                    "role": "entrypoint",
+                    "content_hash": "f" * 64,
+                    "generated": False,
+                    "executable": True,
+                },
+            ),
+            RawObservation(
+                kind="shell.command",
+                source_id="bin/tool#call:nix",
+                path="bin/tool",
+                start_line=2,
+                end_line=2,
+                name="nix build",
+                target="tool:nix",
+                confidence="heuristic",
+                extractor="fixture-shell",
+                extractor_version="0.1.0",
+                metadata={"argv": ["nix", "build"], "command": "nix"},
+            ),
+        ]
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            load_file_observations(
+                postgres.psql_args,
+                observations,
+                repository_name="fixture",
+                root_path="/tmp/fixture",
+                psql_command=postgres.psql_command,
+            )
+            canonical_edge_row = postgres.psql_scalar(
+                """
+SELECT src.canonical_key
+       || '|'
+       || canonical_edges.edge_kind
+       || '|'
+       || dst.canonical_key
+       || '|'
+       || canonical_edges.confidence
+       || '|'
+       || canonical_edges.conflict::text
+       || '|'
+       || COUNT(canonical_edge_evidence.canonical_evidence_id)::text
+FROM canonical_edges
+JOIN canonical_nodes src ON src.id = canonical_edges.source_node_id
+JOIN canonical_nodes dst ON dst.id = canonical_edges.target_node_id
+LEFT JOIN canonical_edge_evidence
+  ON canonical_edge_evidence.canonical_edge_id = canonical_edges.id
+WHERE canonical_edges.edge_kind = 'executes'
+GROUP BY src.canonical_key, canonical_edges.edge_kind, dst.canonical_key,
+         canonical_edges.confidence, canonical_edges.conflict;
+"""
+            )
+            node_link_count = postgres.psql_scalar(
+                """
+SELECT COUNT(*)::text
+FROM canonical_node_evidence
+JOIN canonical_nodes ON canonical_nodes.id =
+  canonical_node_evidence.canonical_node_id
+WHERE canonical_nodes.canonical_key IN ('file:bin/tool', 'tool:nix');
+"""
+            )
+
+        self.assertEqual(
+            canonical_edge_row,
+            "file:bin/tool|executes|tool:nix|heuristic|false|1",
+        )
+        self.assertEqual(node_link_count, "3")
 
     def test_storage_load_files_cli_loads_discovery_jsonl(self):
         require_postgres_binaries()

@@ -53,6 +53,22 @@ The normalized graph is stored in Postgres. The initial schema should include:
 - test cases
 - coverage targets
 
+### Canonical Graph
+
+Canonical graph rows are stored alongside the existing observation-derived graph
+rows. The canonical graph tables use durable canonical keys and graph key
+versioning from the canonicalization ADRs, while the current public storage CLI
+readback remains backed by the observation-derived `nodes`, `edges`, and
+`evidence` tables during the transition.
+
+The additive canonical tables are:
+
+- canonical_nodes
+- canonical_edges
+- canonical_evidence
+- canonical_node_evidence
+- canonical_edge_evidence
+
 ## Core Table Sketch
 
 ```sql
@@ -133,6 +149,66 @@ evidence(
   extractor,
   metadata_json
 )
+
+canonical_nodes(
+  id,
+  repository_id,
+  graph_key_version,
+  canonical_key,
+  kind,
+  display_name,
+  confidence,
+  conflict,
+  metadata_json
+)
+
+canonical_edges(
+  id,
+  repository_id,
+  graph_key_version,
+  edge_key,
+  source_node_id,
+  target_node_id,
+  source_canonical_key,
+  edge_kind,
+  target_canonical_key,
+  identity_metadata_hash,
+  identity_metadata_json,
+  metadata_json,
+  confidence,
+  conflict
+)
+
+canonical_evidence(
+  id,
+  repository_id,
+  run_id,
+  raw_observation_id,
+  evidence_key,
+  raw_observation_ordinal,
+  raw_schema_version,
+  raw_kind,
+  raw_source_id,
+  path,
+  start_line,
+  end_line,
+  extractor,
+  extractor_version,
+  confidence,
+  metadata_json
+)
+
+canonical_node_evidence(
+  canonical_node_id,
+  canonical_evidence_id,
+  link_kind
+)
+
+canonical_edge_evidence(
+  canonical_edge_id,
+  canonical_evidence_id,
+  link_kind
+)
 ```
 
 ## Migration Strategy
@@ -164,6 +240,7 @@ src/main/resources/rdbms/2026/06/28-002-core-add_file_run_tracking.sql
 src/main/resources/rdbms/2026/06/28-003-core-add_evidence_stable_key.sql
 src/main/resources/rdbms/2026/06/28-004-core-add_edge_stable_key.sql
 src/main/resources/rdbms/2026/06/29-001-core-create_raw_observations_table.sql
+src/main/resources/rdbms/2026/06/29-002-core-create_canonical_graph_tables.sql
 ```
 
 Until the Liquibase CLI is part of the local toolchain, RepoMap includes a
@@ -179,7 +256,12 @@ retaining every input raw observation with its run-local ordinal and full JSON
 payload. The same transaction also upserts normalized file nodes plus evidence
 rows with stable keys. Targeted non-file observations, such as `shell.command`,
 also persist source nodes, target nodes, evidence, and stable-keyed relationship
-edges.
+edges. The ingestion path also runs the pure canonicalizer in memory and
+dual-writes canonical nodes, canonical edges, canonical evidence records, and
+node/edge evidence links into the canonical tables. Canonical evidence links
+back to retained raw observations by run-local ordinal. Existing public storage
+readback commands still use the observation-derived tables until canonical
+readback commands or compatibility views are added in a later slice.
 The CLI exposes this path as `repomap-kg storage load-files`, accepting raw
 observation JSONL plus repository identity fields and optional `psql` connection
 arguments.
