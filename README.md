@@ -17,7 +17,7 @@ files, and command-line tools.
 - Python distribution: `repomap-kg`
 - Python import package: `repomap_kg`
 - CLI: `repomap-kg`
-- License: Apache-2.0
+- License: AGPL-3.0-or-later plus commercial licensing
 - Primary database: Postgres container
 
 ## Design Principles
@@ -95,4 +95,14 @@ gate and print per-file advisory rows.
 
 ## License
 
-RepoMap is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
+Future RepoMap releases are licensed under the GNU Affero General Public
+License v3.0 or later. See [LICENSE](LICENSE).
+
+Commercial licenses are available for proprietary terms, including
+closed-source embedding, private SaaS deployments, OEM use, support, warranty,
+indemnity, and custom commercial terms. See
+[COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md).
+
+Code released before the `apache-2.0-final` tag remains available under the
+Apache License, Version 2.0. Those prior Apache-2.0 grants are not revoked by
+the licensing change for future releases.
