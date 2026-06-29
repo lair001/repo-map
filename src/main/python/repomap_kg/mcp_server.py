@@ -31,6 +31,11 @@ from repomap_kg.storage import (
 )
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
+ENV_PG_HOST = "REPOMAP_PG_HOST"
+ENV_PG_PORT = "REPOMAP_PG_PORT"
+ENV_PG_USER = "REPOMAP_PG_USER"
+ENV_PG_DATABASE = "REPOMAP_PG_DATABASE"
+ENV_PSQL_COMMAND = "REPOMAP_PSQL_COMMAND"
 
 
 class RepoMapMcpError(ValueError):
@@ -65,7 +70,7 @@ def repomap_status(
     pg_host: str | None = None,
     pg_port: str | int | None = None,
     pg_user: str | None = None,
-    psql_command: str = "psql",
+    psql_command: str | None = None,
 ) -> dict[str, Any]:
     connection = storage_connection(
         root_path=root_path,
@@ -104,7 +109,7 @@ def repomap_canonical_nodes(
     pg_host: str | None = None,
     pg_port: str | int | None = None,
     pg_user: str | None = None,
-    psql_command: str = "psql",
+    psql_command: str | None = None,
     kind: str | None = None,
     canonical_key: str | None = None,
     path_prefix: str | None = None,
@@ -143,7 +148,7 @@ def repomap_canonical_edges(
     pg_host: str | None = None,
     pg_port: str | int | None = None,
     pg_user: str | None = None,
-    psql_command: str = "psql",
+    psql_command: str | None = None,
     kind: str | None = None,
     source_key: str | None = None,
     target_key: str | None = None,
@@ -182,7 +187,7 @@ def repomap_explain_canonical_edge(
     pg_host: str | None = None,
     pg_port: str | int | None = None,
     pg_user: str | None = None,
-    psql_command: str = "psql",
+    psql_command: str | None = None,
     source_key: str,
     kind: str,
     target_key: str,
@@ -224,7 +229,7 @@ def repomap_canonical_neighborhood(
     pg_host: str | None = None,
     pg_port: str | int | None = None,
     pg_user: str | None = None,
-    psql_command: str = "psql",
+    psql_command: str | None = None,
     node: str,
     direction: str = "both",
     depth: int = 1,
@@ -259,22 +264,28 @@ def repomap_canonical_neighborhood(
 def storage_connection(
     *,
     root_path: str,
-    pg_database: str | None,
+    pg_database: str | None = None,
     pg_host: str | None = None,
     pg_port: str | int | None = None,
     pg_user: str | None = None,
-    psql_command: str = "psql",
+    psql_command: str | None = None,
 ) -> StorageConnection:
     root = require_non_blank(root_path, "root_path")
-    database = require_non_blank(pg_database, "pg_database")
-    command = require_non_blank(psql_command, "psql_command")
+    database = require_non_blank(
+        first_config_value(pg_database, ENV_PG_DATABASE),
+        "pg_database",
+    )
+    command = require_non_blank(
+        first_config_value(psql_command, ENV_PSQL_COMMAND, default="psql"),
+        "psql_command",
+    )
     validate_psql_command(command)
     return StorageConnection(
         root_path=root,
         pg_database=database,
-        pg_host=optional_text(pg_host),
-        pg_port=optional_text(pg_port),
-        pg_user=optional_text(pg_user),
+        pg_host=first_config_value(pg_host, ENV_PG_HOST),
+        pg_port=first_config_value(pg_port, ENV_PG_PORT),
+        pg_user=first_config_value(pg_user, ENV_PG_USER),
         psql_command=command,
     )
 
@@ -358,6 +369,19 @@ def optional_text(value: Any) -> str | None:
     return text if text else None
 
 
+def first_config_value(
+    explicit_value: Any,
+    environment_name: str,
+    *,
+    default: str | None = None,
+) -> str | None:
+    return (
+        optional_text(explicit_value)
+        or optional_text(os.environ.get(environment_name))
+        or default
+    )
+
+
 def validate_psql_command(command: str) -> None:
     if any(character.isspace() for character in command):
         raise RepoMapMcpError("psql_command must not contain whitespace")
@@ -406,7 +430,7 @@ def tool_definitions() -> list[dict[str, Any]]:
                 },
                 "graph_key_version": {"type": "integer", "default": 1},
             },
-            required=("root_path", "pg_database", "source_key", "kind", "target_key"),
+            required=("root_path", "source_key", "kind", "target_key"),
         ),
         tool_definition(
             "repomap_canonical_neighborhood",
@@ -421,7 +445,7 @@ def tool_definitions() -> list[dict[str, Any]]:
                 "depth": {"type": "integer", "default": 1},
                 "graph_key_version": {"type": "integer", "default": 1},
             },
-            required=("root_path", "pg_database", "node"),
+            required=("root_path", "node"),
         ),
     ]
 
@@ -431,7 +455,7 @@ def tool_definition(
     description: str,
     properties: dict[str, Any],
     *,
-    required: tuple[str, ...] = ("root_path", "pg_database"),
+    required: tuple[str, ...] = ("root_path",),
 ) -> dict[str, Any]:
     base_properties: dict[str, Any] = {
         "root_path": {"type": "string"},
@@ -439,7 +463,6 @@ def tool_definition(
         "pg_host": {"type": "string"},
         "pg_port": {"type": ["string", "integer"]},
         "pg_user": {"type": "string"},
-        "psql_command": {"type": "string", "default": "psql"},
     }
     base_properties.update(properties)
     return {
@@ -472,8 +495,11 @@ def handle_tool_call(name: str, arguments: dict[str, Any] | None) -> dict[str, A
         arguments = {}
     if not isinstance(arguments, dict):
         raise RepoMapMcpError("tool arguments must be a JSON object")
+    validate_tool_call_arguments(name, arguments)
     try:
         payload = function(**arguments)
+    except TypeError as error:
+        raise RepoMapMcpError(f"invalid tool arguments: {error}") from error
     except StorageSchemaError as error:
         raise RepoMapMcpError(str(error)) from error
     return {
@@ -485,6 +511,30 @@ def handle_tool_call(name: str, arguments: dict[str, Any] | None) -> dict[str, A
         ],
         "structuredContent": payload,
     }
+
+
+def validate_tool_call_arguments(name: str, arguments: dict[str, Any]) -> None:
+    schema = tool_input_schema(name)
+    properties = schema.get("properties", {})
+    required = schema.get("required", [])
+    allowed_names = set(properties)
+    unexpected = sorted(set(arguments) - allowed_names)
+    if unexpected:
+        raise RepoMapMcpError(
+            "unexpected argument(s): " + ", ".join(unexpected)
+        )
+    missing = sorted(name for name in required if name not in arguments)
+    if missing:
+        raise RepoMapMcpError(
+            "missing required argument(s): " + ", ".join(missing)
+        )
+
+
+def tool_input_schema(name: str) -> dict[str, Any]:
+    for tool in tool_definitions():
+        if tool["name"] == name:
+            return tool["inputSchema"]
+    raise RepoMapMcpError(f"unknown RepoMap MCP tool: {name}")
 
 
 def handle_jsonrpc_message(message: dict[str, Any]) -> dict[str, Any] | None:

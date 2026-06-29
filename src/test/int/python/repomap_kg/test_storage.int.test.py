@@ -7,6 +7,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from repomap_kg.cli import main
 from repomap_kg.observations import RawObservation
@@ -1350,6 +1351,11 @@ FROM canonical_edges;
                 "pg_database": "postgres",
                 "psql_command": postgres.psql_command,
             }
+            jsonrpc_args = {
+                key: value
+                for key, value in mcp_args.items()
+                if key != "psql_command"
+            }
             status = repomap_status(**mcp_args)
             modules = repomap_canonical_nodes(**mcp_args, kind="python.module")
             imports = repomap_canonical_edges(
@@ -1375,86 +1381,91 @@ FROM canonical_edges;
             tools_response = handle_jsonrpc_message(
                 {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
             )
-            jsonrpc_status = handle_jsonrpc_message(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 3,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "repomap_status",
-                        "arguments": mcp_args,
-                    },
-                }
-            )
-            jsonrpc_modules = handle_jsonrpc_message(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 4,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "repomap_canonical_nodes",
-                        "arguments": {**mcp_args, "kind": "python.module"},
-                    },
-                }
-            )
-            jsonrpc_imports = handle_jsonrpc_message(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 5,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "repomap_canonical_edges",
-                        "arguments": {
-                            **mcp_args,
-                            "kind": "imports",
-                            "source_key": "python.module:pkg.app",
+            with patch.dict(
+                "os.environ",
+                {"REPOMAP_PSQL_COMMAND": postgres.psql_command},
+                clear=False,
+            ):
+                jsonrpc_status = handle_jsonrpc_message(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 3,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "repomap_status",
+                            "arguments": jsonrpc_args,
                         },
-                    },
-                }
-            )
-            jsonrpc_explanation = handle_jsonrpc_message(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 6,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "repomap_explain_canonical_edge",
-                        "arguments": {
-                            **mcp_args,
-                            "source_key": "python.module:pkg.app",
-                            "kind": "imports",
-                            "target_key": "python.module:pkg.lib.helper",
-                            "identity_metadata": {},
+                    }
+                )
+                jsonrpc_modules = handle_jsonrpc_message(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 4,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "repomap_canonical_nodes",
+                            "arguments": {**jsonrpc_args, "kind": "python.module"},
                         },
-                    },
-                }
-            )
-            jsonrpc_neighborhood = handle_jsonrpc_message(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 7,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "repomap_canonical_neighborhood",
-                        "arguments": {
-                            **mcp_args,
-                            "node": "python.module:pkg.app",
-                            "direction": "out",
+                    }
+                )
+                jsonrpc_imports = handle_jsonrpc_message(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 5,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "repomap_canonical_edges",
+                            "arguments": {
+                                **jsonrpc_args,
+                                "kind": "imports",
+                                "source_key": "python.module:pkg.app",
+                            },
                         },
-                    },
-                }
-            )
-            jsonrpc_missing = handle_jsonrpc_message(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 8,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "repomap_missing",
-                        "arguments": mcp_args,
-                    },
-                }
-            )
+                    }
+                )
+                jsonrpc_explanation = handle_jsonrpc_message(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 6,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "repomap_explain_canonical_edge",
+                            "arguments": {
+                                **jsonrpc_args,
+                                "source_key": "python.module:pkg.app",
+                                "kind": "imports",
+                                "target_key": "python.module:pkg.lib.helper",
+                                "identity_metadata": {},
+                            },
+                        },
+                    }
+                )
+                jsonrpc_neighborhood = handle_jsonrpc_message(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 7,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "repomap_canonical_neighborhood",
+                            "arguments": {
+                                **jsonrpc_args,
+                                "node": "python.module:pkg.app",
+                                "direction": "out",
+                            },
+                        },
+                    }
+                )
+                jsonrpc_missing = handle_jsonrpc_message(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 8,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "repomap_missing",
+                            "arguments": jsonrpc_args,
+                        },
+                    }
+                )
             stdio_output = StringIO()
             serve_stdio(
                 input_stream=StringIO(

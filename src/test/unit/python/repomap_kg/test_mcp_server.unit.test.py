@@ -21,8 +21,9 @@ class McpServerUnitTests(unittest.TestCase):
         with self.assertRaisesRegex(RepoMapMcpError, "root_path is required"):
             repomap_status(root_path="", pg_database="postgres")
 
-        with self.assertRaisesRegex(RepoMapMcpError, "pg_database is required"):
-            repomap_status(root_path="/tmp/fixture")
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(RepoMapMcpError, "pg_database is required"):
+                repomap_status(root_path="/tmp/fixture")
 
     def test_status_rejects_non_psql_command_names(self):
         from repomap_kg.mcp_server import RepoMapMcpError, repomap_status
@@ -46,6 +47,46 @@ class McpServerUnitTests(unittest.TestCase):
                 pg_database="postgres",
                 psql_command="psql --echo-all",
             )
+
+    def test_status_reads_postgres_connection_defaults_from_environment(self):
+        from repomap_kg.mcp_server import repomap_status
+
+        with patch.dict(
+            "os.environ",
+            {
+                "REPOMAP_PG_HOST": "/tmp/pg",
+                "REPOMAP_PG_PORT": "5433",
+                "REPOMAP_PG_USER": "slair",
+                "REPOMAP_PG_DATABASE": "repomap",
+                "REPOMAP_PSQL_COMMAND": "/opt/postgres/bin/psql",
+            },
+            clear=False,
+        ):
+            with patch(
+                "repomap_kg.mcp_server.query_storage_summary",
+                return_value=StorageSummaryRecord(
+                    root_path="/tmp/fixture",
+                    repository_id=10,
+                    repository_name="fixture",
+                    latest_run_id=22,
+                    runs=2,
+                    files=3,
+                    nodes=5,
+                    edges=7,
+                    evidence=11,
+                ),
+            ) as query:
+                payload = repomap_status(root_path="/tmp/fixture")
+
+        self.assertEqual(payload["repository_name"], "fixture")
+        self.assertEqual(
+            query.call_args.args[0],
+            ["-h", "/tmp/pg", "-p", "5433", "-U", "slair", "-d", "repomap"],
+        )
+        self.assertEqual(
+            query.call_args.kwargs["psql_command"],
+            "/opt/postgres/bin/psql",
+        )
 
     def test_status_returns_read_only_summary_without_database_ids(self):
         from repomap_kg.mcp_server import repomap_status
@@ -391,6 +432,16 @@ class McpServerUnitTests(unittest.TestCase):
         self.assertNotIn("discover", serialized)
         self.assertNotIn("load-files", serialized)
 
+    def test_mcp_tool_schemas_do_not_expose_psql_command(self):
+        from repomap_kg.mcp_server import tool_definitions
+
+        for tool in tool_definitions():
+            with self.subTest(tool=tool["name"]):
+                self.assertNotIn(
+                    "psql_command",
+                    tool["inputSchema"]["properties"],
+                )
+
     def test_handle_tool_call_rejects_unknown_tool_and_non_object_args(self):
         from repomap_kg.mcp_server import RepoMapMcpError, handle_tool_call
 
@@ -403,6 +454,53 @@ class McpServerUnitTests(unittest.TestCase):
         ):
             handle_tool_call("repomap_status", [])
 
+    def test_jsonrpc_tools_call_reports_missing_required_arguments(self):
+        from repomap_kg.mcp_server import handle_jsonrpc_message
+
+        response = handle_jsonrpc_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {
+                    "name": "repomap_canonical_neighborhood",
+                    "arguments": {"root_path": "/tmp/fixture"},
+                },
+            }
+        )
+
+        self.assertEqual(response["id"], 9)
+        self.assertTrue(response["result"]["isError"])
+        self.assertIn("missing required argument", response["result"]["content"][0]["text"])
+        self.assertIn("node", response["result"]["structuredContent"]["error"])
+
+    def test_jsonrpc_tools_call_reports_unexpected_arguments(self):
+        from repomap_kg.mcp_server import handle_jsonrpc_message
+
+        response = handle_jsonrpc_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "tools/call",
+                "params": {
+                    "name": "repomap_status",
+                    "arguments": {
+                        "root_path": "/tmp/fixture",
+                        "pg_database": "postgres",
+                        "psql_command": "/tmp/attacker/psql",
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(response["id"], 10)
+        self.assertTrue(response["result"]["isError"])
+        self.assertIn(
+            "unexpected argument",
+            response["result"]["content"][0]["text"],
+        )
+        self.assertIn("psql_command", response["result"]["structuredContent"]["error"])
+
     def test_handle_tool_call_wraps_storage_schema_errors(self):
         from repomap_kg.mcp_server import RepoMapMcpError, handle_tool_call
         from repomap_kg.storage import StorageSchemaError
@@ -412,7 +510,7 @@ class McpServerUnitTests(unittest.TestCase):
             side_effect=StorageSchemaError("bad storage"),
         ):
             with self.assertRaisesRegex(RepoMapMcpError, "bad storage"):
-                handle_tool_call("repomap_status", {})
+                handle_tool_call("repomap_status", {"root_path": "/tmp/fixture"})
 
     def test_handle_tool_call_returns_structured_content_and_text_json(self):
         from repomap_kg.mcp_server import handle_tool_call
