@@ -41,12 +41,13 @@ license change for future RepoMap releases.
 ## Contribution Terms
 
 Future contributions require the contribution terms in `CLA.md`.
-Contributors retain copyright, but they grant the RepoMap maintainer broad
-rights to use, modify, distribute, sublicense, and relicense contributions as
-part of RepoMap, including under AGPL-3.0-or-later and commercial licenses.
+Contributors retain copyright, but they grant Samuel Leighton Lair, as RepoMap
+project steward, broad rights to use, modify, distribute, sublicense, and
+relicense contributions as part of RepoMap, including under
+AGPL-3.0-or-later and commercial licenses.
 
-Contributions must include either a sign-off line or an explicit pull-request
-acknowledgment of `CLA.md`.
+Contributions must include an explicit pull-request acknowledgment of
+`CLA.md`. A `Signed-off-by` line does not replace that acknowledgment.
 
 ## Phase Boundary
 

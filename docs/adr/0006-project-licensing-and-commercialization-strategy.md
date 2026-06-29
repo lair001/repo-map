@@ -45,9 +45,10 @@ remain available under Apache-2.0.
 Before accepting outside contributions, RepoMap will add contribution
 governance that preserves future relicensing options. The initial contribution
 terms use a contributor license agreement rather than copyright assignment:
-contributors retain copyright while granting the RepoMap maintainer broad
-rights to use, modify, distribute, sublicense, and relicense contributions as
-part of RepoMap, including under AGPL-3.0-or-later and commercial licenses.
+contributors retain copyright while granting Samuel Leighton Lair, as RepoMap
+project steward, broad rights to use, modify, distribute, sublicense, and
+relicense contributions as part of RepoMap, including under
+AGPL-3.0-or-later and commercial licenses.
 
 AGPL is preferred over GPL for a tool that may become valuable as a hosted
 analysis service, because AGPL is stronger than GPL for SaaS and

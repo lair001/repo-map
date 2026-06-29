@@ -9,18 +9,32 @@ Contributors retain copyright in their contributions.
 
 ## Contribution Grant
 
-By submitting a contribution to RepoMap, you grant the RepoMap maintainer a
-perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-license to use, reproduce, prepare derivative works of, publicly display,
-publicly perform, sublicense, distribute, and otherwise exploit your
-contribution as part of RepoMap.
+By submitting a contribution to RepoMap, you grant Samuel Leighton Lair, as
+RepoMap project steward, a perpetual, worldwide, non-exclusive, no-charge,
+royalty-free, irrevocable copyright license to use, reproduce, prepare
+derivative works of, publicly display, publicly perform, sublicense,
+distribute, and otherwise exploit your contribution as part of RepoMap.
 
-This grant includes the right to license, sublicense, and relicense your
-contribution as part of RepoMap under:
+This copyright grant includes the right to license, sublicense, and relicense
+your contribution as part of RepoMap under:
 
 - AGPL-3.0-or-later;
 - commercial licenses; and
-- other project licenses or terms chosen by the RepoMap maintainer for RepoMap.
+- future RepoMap project licenses adopted by the project steward, including
+  open-source, source-available, and commercial licenses.
+
+## Patent Grant
+
+By submitting a contribution to RepoMap, you grant Samuel Leighton Lair, as
+RepoMap project steward, a perpetual, worldwide, non-exclusive, no-charge,
+royalty-free, irrevocable patent license under patent claims you own or control
+that are necessarily infringed by your contribution alone or by combination of
+your contribution with RepoMap.
+
+This patent license permits Samuel Leighton Lair, as RepoMap project steward,
+and downstream recipients to make, have made, use, offer to sell, sell, import,
+reproduce, distribute, sublicense, and relicense your contribution as part of
+RepoMap under AGPL-3.0-or-later and commercial licenses.
 
 ## Authority
 
@@ -29,19 +43,17 @@ authority to submit it under these terms. If your employer or another party has
 rights in the contribution, you are responsible for ensuring that you have
 permission to submit it.
 
-## Sign-Off or Acknowledgment
+## Pull Request Acknowledgment
 
-Each pull request must include either a commit sign-off line:
-
-```text
-Signed-off-by: Your Name <you@example.com>
-```
-
-or an explicit pull-request acknowledgment:
+Each pull request must include this explicit acknowledgment in the pull request
+body:
 
 ```text
 I agree to the RepoMap contribution terms in CLA.md.
 ```
+
+A `Signed-off-by` line may be included, but it does not replace this explicit
+pull request acknowledgment.
 
 ## Contact
 

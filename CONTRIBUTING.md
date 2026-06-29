@@ -1,30 +1,31 @@
 # Contributing to RepoMap
 
-RepoMap accepts contributions under the project contribution terms in
+RepoMap accepts contributions only under the project contribution terms in
 [CLA.md](CLA.md).
 
 Contributors retain copyright in their contributions. By submitting a
-contribution, the contributor grants the RepoMap maintainer broad rights to
-use, modify, distribute, sublicense, and relicense the contribution as part of
-RepoMap, including under AGPL-3.0-or-later and commercial licenses.
+contribution, the contributor grants Samuel Leighton Lair, as RepoMap project
+steward, broad copyright and patent rights to use, modify, distribute,
+sublicense, and relicense the contribution as part of RepoMap, including under
+AGPL-3.0-or-later and commercial licenses.
 
 Contributions must be original work or submitted with authority from the
 copyright owner. Do not submit code, documentation, generated output, or other
 content unless you have the right to provide it under these terms.
 
-Pull requests must include either:
+Every pull request must include this explicit acknowledgment in the pull
+request body:
 
-- a sign-off line in each commit message:
+```text
+I agree to the RepoMap contribution terms in CLA.md.
+```
 
-  ```text
-  Signed-off-by: Your Name <you@example.com>
-  ```
+A `Signed-off-by` line may be included, but it does not replace the explicit
+pull request acknowledgment. Contributions without that acknowledgment cannot
+be accepted.
 
-- or an explicit pull-request statement:
-
-  ```text
-  I agree to the RepoMap contribution terms in CLA.md.
-  ```
+Pull requests should also confirm that the contributor has authority to submit
+the work under `CLA.md`.
 
 Questions about commercial licensing or contribution terms can be sent to
 lair001@gmail.com.
