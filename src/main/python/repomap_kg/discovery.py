@@ -12,6 +12,7 @@ from repomap_kg import __version__
 from repomap_kg.config_extractor import extract_config_file_observations
 from repomap_kg.css import extract_css_file_observations
 from repomap_kg.css_html_matching import extract_css_selector_match_observations
+from repomap_kg.feed import extract_feed_file_observations
 from repomap_kg.html import extract_html_file_observations
 from repomap_kg.markdown import (
     extract_markdown_file_observations,
@@ -164,6 +165,14 @@ def discover_observations(
             observations.extend(
                 extract_nix_file_observations_from_file(repository_root, file_info.path)
             )
+        if file_info.language in ("json", "xml"):
+            feed_observations = extract_feed_file_observations_from_file(
+                repository_root,
+                file_info.path,
+            )
+            if feed_observations:
+                observations.extend(feed_observations)
+                continue
         if file_info.language in ("json", "jsonc", "jsonl", "toml", "plist", "xml"):
             observations.extend(
                 extract_config_file_observations_from_file(
@@ -239,6 +248,16 @@ def extract_config_file_observations_from_file(
     except UnicodeDecodeError:
         return ()
     return extract_config_file_observations(relative_path, content)
+
+
+def extract_feed_file_observations_from_file(
+    repository_root: Path, relative_path: str
+) -> tuple[RawObservation, ...]:
+    try:
+        content = (repository_root / relative_path).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return ()
+    return extract_feed_file_observations(relative_path, content)
 
 
 def extract_html_file_observations_from_file(

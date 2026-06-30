@@ -42,6 +42,11 @@ _SEGMENT_COUNTS = {
     "xml.document": 1,
     "xml.element": 2,
     "xml.attribute": 3,
+    "feed.document": 1,
+    "feed.channel": 2,
+    "feed.item": 2,
+    "feed.author": 2,
+    "feed.category": 2,
     "ruby.module": 1,
     "ruby.class": 1,
     "ruby.method": 2,
@@ -206,6 +211,42 @@ def xml_attribute_key(
     )
 
 
+def feed_document_key(path_or_file_key: str | os.PathLike[str]) -> str:
+    return _key("feed.document", _coerce_file_key(path_or_file_key))
+
+
+def feed_channel_key(feed_document_canonical_key: str, channel_id: str) -> str:
+    return _key(
+        "feed.channel",
+        _coerce_namespace_key(feed_document_canonical_key, "feed.document"),
+        channel_id,
+    )
+
+
+def feed_item_key(feed_channel_canonical_key: str, item_id: str) -> str:
+    return _key(
+        "feed.item",
+        _coerce_namespace_key(feed_channel_canonical_key, "feed.channel"),
+        item_id,
+    )
+
+
+def feed_author_key(feed_channel_canonical_key: str, author_id: str) -> str:
+    return _key(
+        "feed.author",
+        _coerce_namespace_key(feed_channel_canonical_key, "feed.channel"),
+        author_id,
+    )
+
+
+def feed_category_key(feed_channel_canonical_key: str, category_id: str) -> str:
+    return _key(
+        "feed.category",
+        _coerce_namespace_key(feed_channel_canonical_key, "feed.channel"),
+        category_id,
+    )
+
+
 def ruby_module_key(name: str) -> str:
     return _key("ruby.module", name)
 
@@ -284,6 +325,13 @@ def _coerce_file_key(path_or_file_key: str | os.PathLike[str]) -> str:
             raise GraphKeyError("documentation page keys require a file key")
         return path_or_file_key
     return file_key(path_or_file_key)
+
+
+def _coerce_namespace_key(key: str, namespace: str) -> str:
+    parsed = parse_key(key)
+    if parsed.namespace != namespace:
+        raise GraphKeyError(f"{namespace} keys require a {namespace} parent key")
+    return key
 
 
 def _coerce_pointer(pointer: str) -> str:

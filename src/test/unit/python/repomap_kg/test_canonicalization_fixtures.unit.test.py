@@ -39,6 +39,7 @@ class CanonicalizationFixtureTests(unittest.TestCase):
             "html_static_basic",
             "css_static_basic",
             "css_html_matching_basic",
+            "feed_static_basic",
         )
 
         for fixture_name in fixture_names:

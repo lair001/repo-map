@@ -27,6 +27,11 @@ from repomap_kg.graph_keys import (
     doc_section_key,
     doc_skill_key,
     external_url_key,
+    feed_author_key,
+    feed_category_key,
+    feed_channel_key,
+    feed_document_key,
+    feed_item_key,
     nix_app_key,
     nix_check_key,
     nix_dev_shell_key,
@@ -192,6 +197,53 @@ class GraphKeysUnitTests(unittest.TestCase):
         self.assertEqual(
             xml_attribute_key("beans.xml", "/beans/bean", "class"),
             "xml.attribute:file%3Abeans.xml:%2Fbeans%2Fbean:class",
+        )
+        self.assertEqual(
+            feed_document_key("feeds/rss.xml"),
+            "feed.document:file%3Afeeds%2Frss.xml",
+        )
+        self.assertEqual(
+            feed_channel_key(
+                "feed.document:file%3Afeeds%2Frss.xml",
+                "self:https://example.com/feed.xml",
+            ),
+            (
+                "feed.channel:feed.document%3Afile%253Afeeds%252Frss.xml:"
+                "self%3Ahttps%3A%2F%2Fexample.com%2Ffeed.xml"
+            ),
+        )
+        self.assertEqual(
+            feed_item_key(
+                "feed.channel:feed.document%3Afile%253Afeeds%252Frss.xml:channel",
+                "guid:item:1",
+            ),
+            (
+                "feed.item:"
+                "feed.channel%3Afeed.document%253Afile%25253Afeeds%25252Frss.xml%3Achannel:"
+                "guid%3Aitem%3A1"
+            ),
+        )
+        self.assertEqual(
+            feed_author_key(
+                "feed.channel:feed.document%3Afile%253Afeeds%252Frss.xml:channel",
+                "fixture author",
+            ),
+            (
+                "feed.author:"
+                "feed.channel%3Afeed.document%253Afile%25253Afeeds%25252Frss.xml%3Achannel:"
+                "fixture%20author"
+            ),
+        )
+        self.assertEqual(
+            feed_category_key(
+                "feed.channel:feed.document%3Afile%253Afeeds%252Frss.xml:channel",
+                "Release Notes",
+            ),
+            (
+                "feed.category:"
+                "feed.channel%3Afeed.document%253Afile%25253Afeeds%25252Frss.xml%3Achannel:"
+                "Release%20Notes"
+            ),
         )
         self.assertEqual(ruby_module_key("RepoMap"), "ruby.module:RepoMap")
         self.assertEqual(

@@ -864,6 +864,78 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertIn("unknown:file:repo-escaping-css-reference", reference_targets)
         self.assertIn("dynamic:file:css-url-dynamic", reference_targets)
 
+    def test_discover_command_emits_feed_observations_from_fixture(self):
+        fixture = REPO_ROOT / "src" / "test" / "fixtures" / "discovery" / "feed_static_basic"
+
+        exit_code, stdout, stderr = self.run_module_entrypoint(
+            "discover", str(fixture), "--jsonl"
+        )
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertNotIn("fixture-feed-secret", stdout)
+        self.assertNotIn("throw new Error", stdout)
+        observations = [
+            json.loads(line)
+            for line in stdout.splitlines()
+            if line.strip()
+        ]
+        kinds = {observation["kind"] for observation in observations}
+        self.assertTrue(
+            {
+                "feed.document",
+                "feed.channel",
+                "feed.item",
+                "feed.link",
+                "feed.enclosure",
+                "feed.author",
+                "feed.category",
+                "feed.content",
+                "feed.parse_error",
+            }.issubset(kinds)
+        )
+
+        feed_formats = {
+            observation["metadata"].get("feed_format")
+            for observation in observations
+            if observation["kind"] == "feed.document"
+        }
+        self.assertEqual(feed_formats, {"rss", "atom", "json-feed"})
+        feed_files = [
+            observation
+            for observation in observations
+            if observation["kind"] == "file"
+            and observation["metadata"]["language"] in ("json", "xml")
+        ]
+        self.assertEqual(
+            [observation["path"] for observation in feed_files],
+            [
+                "atom.xml",
+                "feed.json",
+                "malformed-rss.xml",
+                "rss.xml",
+                "secret-feed.xml",
+            ],
+        )
+        link_targets = {
+            observation["target"]
+            for observation in observations
+            if observation["kind"] in ("feed.link", "feed.enclosure")
+        }
+        self.assertIn(
+            "external.url:https%3A%2F%2Fexample.com%2Frepomap%2Frss%2F1",
+            link_targets,
+        )
+        self.assertIn("file:media/rss-audio.mp3", link_targets)
+        parse_errors = [
+            observation
+            for observation in observations
+            if observation["kind"] == "feed.parse_error"
+        ]
+        self.assertIn(
+            "xml-parse-error",
+            {error["metadata"]["error_kind"] for error in parse_errors},
+        )
+
     def test_discover_command_emits_java_spring_maven_xml_observations(self):
         fixture = (
             REPO_ROOT

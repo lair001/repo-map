@@ -4,6 +4,7 @@ from repomap_kg.canonical import canonical_edge_key
 from repomap_kg.canonicalization import canonicalize_observations
 from repomap_kg.config_extractor import extract_config_file_observations
 from repomap_kg.css import extract_css_file_observations
+from repomap_kg.feed import extract_feed_file_observations
 from repomap_kg.html import extract_html_file_observations
 from repomap_kg.observations import RawObservation
 
@@ -2646,6 +2647,161 @@ cwd = "src/main/python"
                 (edge["source_key"], edge["kind"], edge["target_key"])
                 for edge in payload["edges"]
             },
+        )
+
+    def test_feed_observations_create_feed_nodes_and_reference_edges(self):
+        observations = extract_feed_file_observations(
+            "feeds/rss.xml",
+            """\
+<rss version="2.0">
+  <channel>
+    <title>RepoMap Feed</title>
+    <link>https://example.com/repomap/</link>
+    <item>
+      <guid>release-1</guid>
+      <title>Release One</title>
+      <link>articles/release-one.html</link>
+      <author>Fixture Author</author>
+      <category>Release Notes</category>
+      <description>Short safe summary.</description>
+      <enclosure url="media/release-one.mp3" type="audio/mpeg" />
+    </item>
+  </channel>
+</rss>
+""",
+        ) + (
+            RawObservation(
+                kind="feed.parse_error",
+                source_id="feeds/broken.xml#feed-parse-error:xml-parse-error",
+                path="feeds/broken.xml",
+                confidence="unknown",
+                extractor="repo-feed",
+                extractor_version="0.1.0",
+                metadata={"error_kind": "xml-parse-error", "raw_only": True},
+            ),
+        )
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["diagnostics"], [])
+        node_kinds = {node["kind"] for node in payload["nodes"]}
+        self.assertIn("feed.document", node_kinds)
+        self.assertIn("feed.channel", node_kinds)
+        self.assertIn("feed.item", node_kinds)
+        self.assertIn("feed.author", node_kinds)
+        self.assertIn("feed.category", node_kinds)
+        self.assertNotIn("feed.content", node_kinds)
+        self.assertNotIn("feed.parse_error", node_kinds)
+        edge_kinds = {edge["kind"] for edge in payload["edges"]}
+        self.assertEqual(edge_kinds, {"defines", "references"})
+        references = {
+            (edge["source_key"].split(":", 1)[0], edge["target_key"])
+            for edge in payload["edges"]
+            if edge["kind"] == "references"
+        }
+        self.assertIn(("feed.item", "file:feeds/articles/release-one.html"), references)
+        self.assertIn(("feed.item", "file:feeds/media/release-one.mp3"), references)
+        self.assertTrue(
+            any(target.startswith("feed.author:") for _, target in references)
+        )
+        self.assertTrue(
+            any(target.startswith("feed.category:") for _, target in references)
+        )
+
+    def test_feed_reference_diagnostics_use_placeholders(self):
+        observations = [
+            RawObservation(
+                kind="feed.link",
+                source_id="feeds/rss.xml#missing-target",
+                path="feeds/rss.xml",
+                confidence="extracted",
+                extractor="repo-feed",
+                extractor_version="0.1.0",
+                metadata={"source_key": "feed.item:bad-parent:item"},
+            ),
+            RawObservation(
+                kind="feed.link",
+                source_id="feeds/rss.xml#malformed-target",
+                path="feeds/rss.xml",
+                target="bad key",
+                confidence="extracted",
+                extractor="repo-feed",
+                extractor_version="0.1.0",
+                metadata={"source_key": "feed.item:bad-parent:item"},
+            ),
+        ]
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["summary"]["warnings"], 2)
+        self.assertEqual(
+            {
+                diagnostic["placeholder_key"]
+                for diagnostic in payload["diagnostics"]
+            },
+            {
+                "unknown:feed.reference:missing-target",
+                "unknown:feed.reference:malformed-target",
+            },
+        )
+        self.assertIn(
+            "unknown:feed.reference:missing-target",
+            {edge["target_key"] for edge in payload["edges"]},
+        )
+
+    def test_feed_diagnostics_reject_bad_source_and_parent_keys(self):
+        observations = [
+            RawObservation(
+                kind="feed.link",
+                source_id="feeds/rss.xml#bad-source",
+                path="feeds/rss.xml",
+                target="external.url:https%3A%2F%2Fexample.com",
+                confidence="extracted",
+                extractor="repo-feed",
+                extractor_version="0.1.0",
+                metadata={"source_key": "config.document:file%3Asettings.json"},
+            ),
+            RawObservation(
+                kind="feed.item",
+                source_id="feeds/rss.xml#missing-channel",
+                path="feeds/rss.xml",
+                target="feed.item:feed.channel%3Aparent:item",
+                confidence="extracted",
+                extractor="repo-feed",
+                extractor_version="0.1.0",
+                metadata={},
+            ),
+            RawObservation(
+                kind="feed.author",
+                source_id="feeds/rss.xml#bad-item-key",
+                path="feeds/rss.xml",
+                target="feed.author:feed.channel%3Aparent:fixture",
+                confidence="extracted",
+                extractor="repo-feed",
+                extractor_version="0.1.0",
+                metadata={
+                    "channel_key": "feed.channel:feed.document%3Afile%253Arss.xml:channel",
+                    "item_key": "config.path:file%3Asettings.json:%2Fname",
+                },
+            ),
+        ]
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertFalse(result.ok)
+        self.assertEqual(payload["summary"]["errors"], 3)
+        self.assertEqual(
+            [diagnostic["category"] for diagnostic in payload["diagnostics"]],
+            [
+                "invalid_canonical_key",
+                "invalid_canonical_key",
+                "invalid_canonical_key",
+            ],
         )
 
     def test_plist_config_observations_reuse_config_canonicalization_contract(self):

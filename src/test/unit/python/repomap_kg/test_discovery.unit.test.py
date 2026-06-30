@@ -7,6 +7,7 @@ from repomap_kg.discovery import (
     discover_observations,
     discover_repository,
     extract_css_file_observations_from_file,
+    extract_feed_file_observations_from_file,
 )
 
 
@@ -385,6 +386,44 @@ class DiscoveryUnitTests(unittest.TestCase):
         self.assertNotIn("fixture-secret-token", payload)
         self.assertNotIn("PHNlY3JldD4=", payload)
 
+    def test_feed_fixture_discovery_emits_local_feed_facts(self):
+        observations = discover_observations(FIXTURE_ROOT / "feed_static_basic")
+
+        payload = "\n".join(item.to_json_line() for item in observations)
+        kinds = [observation.kind for observation in observations]
+        references = [
+            observation
+            for observation in observations
+            if observation.kind in ("feed.link", "feed.enclosure")
+        ]
+
+        self.assertIn("feed.document", kinds)
+        self.assertIn("feed.channel", kinds)
+        self.assertIn("feed.item", kinds)
+        self.assertIn("feed.link", kinds)
+        self.assertIn("feed.enclosure", kinds)
+        self.assertIn("feed.author", kinds)
+        self.assertIn("feed.category", kinds)
+        self.assertIn("feed.content", kinds)
+        self.assertIn("feed.parse_error", kinds)
+        self.assertNotIn("fixture-feed-secret", payload)
+        self.assertNotIn("throw new Error", payload)
+        self.assertTrue(
+            any(
+                observation.target
+                == "external.url:https%3A%2F%2Fexample.com%2Frepomap%2Frss%2F1"
+                for observation in references
+            )
+        )
+        self.assertTrue(
+            any(
+                observation.target
+                == "file:media/rss-audio.mp3"
+                or observation.target == "file:feeds/media/rss-audio.mp3"
+                for observation in references
+            )
+        )
+
     def test_css_file_extraction_skips_non_utf8_content(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -392,6 +431,16 @@ class DiscoveryUnitTests(unittest.TestCase):
             css_file.write_bytes(b"\xff\xfe\x00")
 
             observations = extract_css_file_observations_from_file(root, "bad.css")
+
+        self.assertEqual(observations, ())
+
+    def test_feed_file_extraction_skips_non_utf8_content(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            feed_file = root / "bad.xml"
+            feed_file.write_bytes(b"\xff\xfe\x00")
+
+            observations = extract_feed_file_observations_from_file(root, "bad.xml")
 
         self.assertEqual(observations, ())
 

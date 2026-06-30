@@ -19,7 +19,11 @@ from repomap_kg.canonicalization import canonicalize_observations
 from repomap_kg.config_extractor import extract_config_file_observations
 from repomap_kg.css import extract_css_file_observations
 from repomap_kg.css_html_matching import extract_css_selector_match_observations
-from repomap_kg.discovery import extract_css_file_observations_from_file
+from repomap_kg.discovery import (
+    extract_css_file_observations_from_file,
+    extract_feed_file_observations_from_file,
+)
+from repomap_kg.feed import extract_feed_file_observations
 from repomap_kg.graph_keys import (
     GRAPH_KEY_VERSION,
     GraphKeyError,
@@ -28,6 +32,11 @@ from repomap_kg.graph_keys import (
     dynamic_key,
     env_key,
     external_key,
+    feed_author_key,
+    feed_category_key,
+    feed_channel_key,
+    feed_document_key,
+    feed_item_key,
     file_key,
     host_category_key,
     html_anchor_key,
@@ -63,6 +72,7 @@ from repomap_kg.observations import RawObservation, read_observations_jsonl
 
 
 FIXTURE_ROOT = Path(__file__).parents[3] / "fixtures" / "canonicalization"
+DISCOVERY_FIXTURE_ROOT = Path(__file__).parents[3] / "fixtures" / "discovery"
 
 
 class CanonicalContractIntegrationTests(unittest.TestCase):
@@ -93,6 +103,7 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             "xml_java_spring_maven_basic",
             "html_static_basic",
             "css_static_basic",
+            "feed_static_basic",
         )
 
         for fixture_name in fixture_names:
@@ -149,6 +160,32 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             html_document_key("site/index.html"),
             html_element_key("site/index.html", "/html/body/main/a[2]"),
             html_anchor_key("site/index.html", "intro"),
+            feed_document_key("feeds/rss.xml"),
+            feed_channel_key(
+                feed_document_key("feeds/rss.xml"),
+                "link:https://example.com/feed.xml",
+            ),
+            feed_item_key(
+                feed_channel_key(
+                    feed_document_key("feeds/rss.xml"),
+                    "link:https://example.com/feed.xml",
+                ),
+                "guid:release:1",
+            ),
+            feed_author_key(
+                feed_channel_key(
+                    feed_document_key("feeds/rss.xml"),
+                    "link:https://example.com/feed.xml",
+                ),
+                "Fixture Writer",
+            ),
+            feed_category_key(
+                feed_channel_key(
+                    feed_document_key("feeds/rss.xml"),
+                    "link:https://example.com/feed.xml",
+                ),
+                "Release Notes",
+            ),
         ]
 
         self.assertEqual(keys[0], "file:bin/tool")
@@ -164,21 +201,38 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             "nix.output:repo-map:packages%2Faarch64-darwin%2Fdefault",
         )
         self.assertEqual(keys[16], "ruby.class:RepoMap%3A%3ARunner")
-        self.assertEqual(keys[-6], "xml.document:file%3Apom.xml")
+        self.assertEqual(keys[-11], "xml.document:file%3Apom.xml")
         self.assertEqual(
-            keys[-5],
+            keys[-10],
             "xml.element:file%3Apom.xml:%2Fproject%2Fdependencies%2Fdependency%5B2%5D",
         )
         self.assertEqual(
-            keys[-4],
+            keys[-9],
             "xml.attribute:file%3Asrc%2Fmain%2Fresources%2FapplicationContext.xml:%2Fbeans%2Fbean:class",
         )
-        self.assertEqual(keys[-3], "html.document:file%3Asite%2Findex.html")
+        self.assertEqual(keys[-8], "html.document:file%3Asite%2Findex.html")
         self.assertEqual(
-            keys[-2],
+            keys[-7],
             "html.element:file%3Asite%2Findex.html:%2Fhtml%2Fbody%2Fmain%2Fa%5B2%5D",
         )
-        self.assertEqual(keys[-1], "html.anchor:file%3Asite%2Findex.html:intro")
+        self.assertEqual(keys[-6], "html.anchor:file%3Asite%2Findex.html:intro")
+        self.assertEqual(keys[-5], "feed.document:file%3Afeeds%2Frss.xml")
+        self.assertEqual(
+            keys[-4],
+            "feed.channel:feed.document%3Afile%253Afeeds%252Frss.xml:link%3Ahttps%3A%2F%2Fexample.com%2Ffeed.xml",
+        )
+        self.assertEqual(
+            keys[-3],
+            "feed.item:feed.channel%3Afeed.document%253Afile%25253Afeeds%25252Frss.xml%3Alink%253Ahttps%253A%252F%252Fexample.com%252Ffeed.xml:guid%3Arelease%3A1",
+        )
+        self.assertEqual(
+            keys[-2],
+            "feed.author:feed.channel%3Afeed.document%253Afile%25253Afeeds%25252Frss.xml%3Alink%253Ahttps%253A%252F%252Fexample.com%252Ffeed.xml:Fixture%20Writer",
+        )
+        self.assertEqual(
+            keys[-1],
+            "feed.category:feed.channel%3Afeed.document%253Afile%25253Afeeds%25252Frss.xml%3Alink%253Ahttps%253A%252F%252Fexample.com%252Ffeed.xml:Release%20Notes",
+        )
 
         for key in keys:
             with self.subTest(key=key):
@@ -195,6 +249,9 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
         self.assertEqual(parsed_file.path, "docs/My Tool:guide#1.md")
         self.assertEqual(parsed_file.segments, ("docs", "My Tool:guide#1.md"))
         self.assertIsNone(parse_key(keys[9]).path)
+        self.assertEqual(parse_key(keys[-5]).namespace, "feed.document")
+        self.assertEqual(parse_key(keys[-4]).namespace, "feed.channel")
+        self.assertEqual(parse_key(keys[-3]).namespace, "feed.item")
 
     def test_canonical_key_parser_rejects_malformed_examples(self):
         cases = (
@@ -482,6 +539,374 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             bad_path_payload["diagnostics"][0]["category"],
             "repo_escaping_path",
         )
+
+    def test_local_feed_extraction_and_canonicalization_contract(self):
+        fixture = DISCOVERY_FIXTURE_ROOT / "feed_static_basic"
+        rss = extract_feed_file_observations(
+            "rss.xml",
+            (fixture / "rss.xml").read_text(encoding="utf-8"),
+        )
+        atom = extract_feed_file_observations(
+            "atom.xml",
+            (fixture / "atom.xml").read_text(encoding="utf-8"),
+        )
+        json_feed = extract_feed_file_observations(
+            "feed.json",
+            (fixture / "feed.json").read_text(encoding="utf-8"),
+        )
+        malformed = extract_feed_file_observations(
+            "malformed-rss.xml",
+            (fixture / "malformed-rss.xml").read_text(encoding="utf-8"),
+        )
+        secret = extract_feed_file_observations(
+            "secret-feed.xml",
+            (fixture / "secret-feed.xml").read_text(encoding="utf-8"),
+        )
+        dangerous = extract_feed_file_observations(
+            "dangerous.xml",
+            '<!DOCTYPE rss [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><rss />',
+        )
+
+        observations = [*rss, *atom, *json_feed, *malformed, *secret, *dangerous]
+        kinds = {observation.kind for observation in observations}
+        self.assertTrue(
+            {
+                "feed.document",
+                "feed.channel",
+                "feed.item",
+                "feed.link",
+                "feed.enclosure",
+                "feed.author",
+                "feed.category",
+                "feed.content",
+                "feed.parse_error",
+            }.issubset(kinds)
+        )
+        serialized = json.dumps(
+            [observation.to_dict() for observation in observations],
+            sort_keys=True,
+        )
+        self.assertNotIn("fixture-feed-secret", serialized)
+        self.assertNotIn("throw new Error", serialized)
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["summary"]["errors"], 0)
+        self.assertGreaterEqual(payload["summary"]["nodes"], 10)
+        self.assertGreaterEqual(payload["summary"]["edges"], 10)
+
+        nodes = {record["canonical_key"]: record for record in payload["nodes"]}
+        edges = {
+            (record["source_key"].split(":", 1)[0], record["kind"], record["target_key"])
+            for record in payload["edges"]
+        }
+        self.assertIn("feed.document:file%3Arss.xml", nodes)
+        self.assertTrue(any(key.startswith("feed.channel:") for key in nodes))
+        self.assertTrue(any(key.startswith("feed.item:") for key in nodes))
+        self.assertTrue(any(key.startswith("feed.author:") for key in nodes))
+        self.assertTrue(any(key.startswith("feed.category:") for key in nodes))
+        self.assertIn(
+            (
+                "feed.item",
+                "references",
+                "external.url:https%3A%2F%2Fexample.com%2Frepomap%2Frss%2F1",
+            ),
+            edges,
+        )
+        self.assertIn(("feed.item", "references", "file:media/rss-audio.mp3"), edges)
+        evidence_kinds = {record["raw_kind"] for record in payload["evidence"]}
+        self.assertIn("feed.content", evidence_kinds)
+        self.assertIn("feed.parse_error", evidence_kinds)
+        graph_text = json.dumps(
+            {"nodes": payload["nodes"], "edges": payload["edges"]},
+            sort_keys=True,
+        )
+        self.assertNotIn("feed.content:", graph_text)
+        self.assertNotIn("feed.parse_error:", graph_text)
+
+    def test_feed_error_identity_and_placeholder_contracts(self):
+        self.assertEqual(
+            extract_feed_file_observations("settings.json", '{"enabled": true}'),
+            (),
+        )
+        self.assertEqual(
+            extract_feed_file_observations("project.xml", "<project />"),
+            (),
+        )
+
+        error_cases = [
+            (
+                "malformed.xml",
+                "<rss><channel>",
+                "xml-parse-error",
+            ),
+            (
+                "unsafe.xml",
+                '<!DOCTYPE rss [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><rss />',
+                "unsafe-xml-declaration",
+            ),
+            (
+                "unsafe-pi.xml",
+                '<?xml version="1.0"?><rss><?xml-stylesheet href="remote.xsl"?></rss>',
+                "unsafe-processing-instruction",
+            ),
+            (
+                "missing-channel.xml",
+                '<rss version="2.0" />',
+                "rss-missing-channel",
+            ),
+        ]
+        for path, content, error_kind in error_cases:
+            with self.subTest(error_kind=error_kind):
+                observations = extract_feed_file_observations(path, content)
+                self.assertEqual([observation.kind for observation in observations], ["feed.parse_error"])
+                self.assertEqual(observations[0].metadata["error_kind"], error_kind)
+
+        references = extract_feed_file_observations(
+            "feeds/rss.xml",
+            """\
+<rss version="2.0">
+  <channel>
+    <title>Reference Fixture</title>
+    <item><guid>outside</guid><link>../../outside.html</link></item>
+    <item><guid>absolute</guid><link>/Library/file.txt</link></item>
+    <item><guid>dynamic</guid><link>${ARTICLE_URL}</link></item>
+    <item><guid>unsupported</guid><link>ftp://example.com/file</link></item>
+    <item><guid>malformed-http</guid><link>https:///missing-host</link></item>
+  </channel>
+</rss>
+""",
+        )
+        targets = {
+            observation.target
+            for observation in references
+            if observation.kind == "feed.link"
+        }
+        self.assertTrue(
+            {
+                "unknown:file:repo-escaping-feed-reference",
+                "external:file:absolute-feed-reference",
+                "dynamic:file:feed-reference-expanded-from-variable",
+                "dynamic:url:unsupported-url-scheme",
+                "unknown:external.url:malformed-feed-reference",
+            }.issubset(targets)
+        )
+
+        rss = extract_feed_file_observations(
+            "rss.xml",
+            """\
+<rss version="2.0">
+  <channel>
+    <title>Fallback Channel</title>
+    <item>
+      <title>Ordinal Item</title>
+      <author>email-only@example.com</author>
+    </item>
+    <item>
+      <title>Weak Item</title>
+      <pubDate>not a real date</pubDate>
+      <description>""" + ("summary " * 40) + """</description>
+    </item>
+  </channel>
+</rss>
+""",
+        )
+        atom = extract_feed_file_observations(
+            "atom.xml",
+            """\
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>urn:example:atom-id-only</id>
+  <entry>
+    <title>Atom Structural</title>
+  </entry>
+</feed>
+""",
+        )
+        json_feed = extract_feed_file_observations(
+            "feed.json",
+            json.dumps(
+                {
+                    "version": "https://jsonfeed.org/version/1.1",
+                    "title": "JSON Fallback Feed",
+                    "items": [
+                        {"external_url": "https://example.com/external"},
+                        {"id": "duplicate", "title": "Duplicate One"},
+                        {"id": "duplicate", "title": "Duplicate Two"},
+                        {"title": "Structural JSON"},
+                    ],
+                }
+            ),
+        )
+        atom_alternate = extract_feed_file_observations(
+            "atom-alternate.xml",
+            """\
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Atom Alternate Fallback</title>
+  <link rel="alternate" href="https://example.com/atom/" />
+  <entry>
+    <title>Atom Alternate Entry</title>
+    <published>2026-06-30T16:00:00</published>
+    <link href="relative-entry.html" />
+    <author><uri>https://example.com/writer</uri></author>
+    <category label="Atom Label" />
+    <content type="html"><p>Atom content</p></content>
+  </entry>
+</feed>
+""",
+        )
+        json_extra = extract_feed_file_observations(
+            "feed-extra.json",
+            json.dumps(
+                {
+                    "version": "https://jsonfeed.org/version/1.1",
+                    "title": "JSON Extra Feed",
+                    "feed_url": "https://example.com/extra/feed.json",
+                    "items": [
+                        {
+                            "id": "extra",
+                            "date_modified": "2026-06-30T17:00:00",
+                            "content_text": "JSON text content",
+                            "authors": [{"name": "JSON Writer"}],
+                            "tags": ["json-extra", 17],
+                            "attachments": [
+                                "not an object",
+                                {},
+                                {"url": "media/extra.bin", "size_in_bytes": 12},
+                            ],
+                        }
+                    ],
+                }
+            ),
+        )
+        rss_by_kind = _observations_by_kind(rss)
+        atom_by_kind = _observations_by_kind(atom)
+        json_by_kind = _observations_by_kind(json_feed)
+        atom_alternate_by_kind = _observations_by_kind(atom_alternate)
+        json_extra_by_kind = _observations_by_kind(json_extra)
+
+        self.assertEqual(rss_by_kind["feed.channel"][0].metadata["identity_strength"], "weak")
+        self.assertEqual(rss_by_kind["feed.item"][0].metadata["identity_source"], "structural-ordinal")
+        self.assertTrue(rss_by_kind["feed.author"][0].metadata["email_redacted"])
+        self.assertEqual(rss_by_kind["feed.item"][1].metadata["identity_source"], "title+pubDate")
+        self.assertTrue(rss_by_kind["feed.content"][0].metadata["value_summary"].endswith("..."))
+        self.assertEqual(atom_by_kind["feed.channel"][0].metadata["identity_source"], "id")
+        self.assertEqual(atom_by_kind["feed.item"][0].metadata["identity_source"], "structural-ordinal")
+        self.assertEqual(json_by_kind["feed.channel"][0].metadata["identity_source"], "title+document")
+        self.assertEqual(json_by_kind["feed.item"][0].metadata["identity_source"], "url")
+        self.assertEqual(json_by_kind["feed.item"][-1].metadata["identity_source"], "structural-ordinal")
+        self.assertEqual(
+            atom_alternate_by_kind["feed.channel"][0].metadata["identity_source"],
+            "link",
+        )
+        self.assertEqual(
+            atom_alternate_by_kind["feed.item"][0].metadata["published_at"],
+            "2026-06-30T16:00:00Z",
+        )
+        self.assertEqual(atom_alternate_by_kind["feed.link"][1].target, "file:relative-entry.html")
+        self.assertIn("feed.author", atom_alternate_by_kind)
+        self.assertIn("feed.category", atom_alternate_by_kind)
+        self.assertEqual(json_extra_by_kind["feed.channel"][0].metadata["identity_source"], "feed_url")
+        self.assertEqual(json_extra_by_kind["feed.item"][0].metadata["updated_at"], "2026-06-30T17:00:00Z")
+        self.assertEqual(json_extra_by_kind["feed.enclosure"][0].target, "file:media/extra.bin")
+        self.assertIn("feed.author", json_extra_by_kind)
+        self.assertEqual(
+            len(
+                [
+                    item
+                    for item in json_by_kind["feed.item"]
+                    if item.metadata.get("duplicate_identity")
+                ]
+            ),
+            2,
+        )
+
+        feed_item_key_for_diagnostics = (
+            "feed.item:feed.channel%3Afeed.document%253Afile%25253A"
+            "feed.xml%3Aself:item"
+        )
+        diagnostics = canonicalize_observations(
+            [
+                RawObservation(
+                    kind="feed.document",
+                    source_id="feed.xml#feed-document:bad-target",
+                    path="feed.xml",
+                    target="bad target",
+                    confidence="extracted",
+                    extractor="repo-feed",
+                    extractor_version="0.1.0",
+                    metadata={"feed_format": "rss"},
+                ),
+                RawObservation(
+                    kind="feed.item",
+                    source_id="feed.xml#feed-item:missing-channel",
+                    path="feed.xml",
+                    target=feed_item_key_for_diagnostics,
+                    confidence="extracted",
+                    extractor="repo-feed",
+                    extractor_version="0.1.0",
+                    metadata={"feed_format": "rss"},
+                ),
+                RawObservation(
+                    kind="feed.item",
+                    source_id="feed.xml#feed-item:bad-parent",
+                    path="feed.xml",
+                    target="feed.item:bad-parent:item",
+                    confidence="extracted",
+                    extractor="repo-feed",
+                    extractor_version="0.1.0",
+                    metadata={"channel_key": "feed.channel:bad-parent:channel"},
+                ),
+                RawObservation(
+                    kind="feed.link",
+                    source_id="feed.xml#feed-link:missing",
+                    path="feed.xml",
+                    confidence="extracted",
+                    extractor="repo-feed",
+                    extractor_version="0.1.0",
+                    metadata={"source_key": "feed.item:bad-parent:item"},
+                ),
+                RawObservation(
+                    kind="feed.link",
+                    source_id="feed.xml#feed-link:bad-target",
+                    path="feed.xml",
+                    target="bad target",
+                    confidence="extracted",
+                    extractor="repo-feed",
+                    extractor_version="0.1.0",
+                    metadata={"source_key": feed_item_key_for_diagnostics},
+                ),
+                RawObservation(
+                    kind="feed.link",
+                    source_id="feed.xml#feed-link:bad-source",
+                    path="feed.xml",
+                    target="external.url:https%3A%2F%2Fexample.com",
+                    confidence="extracted",
+                    extractor="repo-feed",
+                    extractor_version="0.1.0",
+                    metadata={"source_key": "file:feed.xml"},
+                ),
+            ]
+        ).to_dict()["diagnostics"]
+        self.assertEqual(
+            [diagnostic["category"] for diagnostic in diagnostics],
+            [
+                "invalid_canonical_key",
+                "invalid_canonical_key",
+                "missing_required_metadata",
+                "invalid_canonical_key",
+                "invalid_canonical_key",
+            ],
+        )
+
+    def test_feed_file_extraction_skips_non_utf8_local_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "feed.xml").write_bytes(b"\xff\xfe<rss></rss>")
+
+            observations = extract_feed_file_observations_from_file(root, "feed.xml")
+
+        self.assertEqual(observations, ())
 
     def test_config_canonicalization_placeholder_and_raw_only_contracts(self):
         result = canonicalize_observations(
@@ -1964,6 +2389,15 @@ a.external,
             [diagnostic["field"] for diagnostic in payload["diagnostics"]],
             ["target", "target", "target", "metadata.page_key"],
         )
+
+
+def _observations_by_kind(
+    observations: tuple[RawObservation, ...],
+) -> dict[str, list[RawObservation]]:
+    grouped: dict[str, list[RawObservation]] = {}
+    for observation in observations:
+        grouped.setdefault(observation.kind, []).append(observation)
+    return grouped
 
 
 if __name__ == "__main__":

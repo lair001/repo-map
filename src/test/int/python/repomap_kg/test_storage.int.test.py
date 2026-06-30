@@ -2316,6 +2316,213 @@ FROM canonical_edges;
         )
         self.assertNotIn("fixture-secret-placeholder", explain_stdout)
 
+    def test_storage_loads_feed_discovery_into_canonical_readback(self):
+        require_postgres_binaries()
+        fixture_root = discovery_fixture("feed_static_basic")
+
+        discover_exit_code, discover_stdout, discover_stderr = (
+            run_repo_map_in_process(
+                "discover",
+                str(fixture_root),
+                "--jsonl",
+            )
+        )
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as jsonl_file:
+            jsonl_file.write(discover_stdout)
+            jsonl_file.flush()
+
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                storage_args = (
+                    "--root-path",
+                    str(fixture_root),
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                )
+                load_exit_code, _load_stdout, load_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "load-files",
+                        jsonl_file.name,
+                        "--repository-name",
+                        "feed-fixture",
+                        *storage_args,
+                        "--json",
+                    )
+                )
+
+                def canonical_nodes(kind):
+                    return run_repo_map_in_process(
+                        "storage",
+                        "canonical-nodes",
+                        *storage_args,
+                        "--kind",
+                        kind,
+                        "--json",
+                    )
+
+                document_exit, document_stdout, document_stderr = (
+                    canonical_nodes("feed.document")
+                )
+                channel_exit, channel_stdout, channel_stderr = (
+                    canonical_nodes("feed.channel")
+                )
+                item_exit, item_stdout, item_stderr = canonical_nodes("feed.item")
+                author_exit, author_stdout, author_stderr = (
+                    canonical_nodes("feed.author")
+                )
+                category_exit, category_stdout, category_stderr = (
+                    canonical_nodes("feed.category")
+                )
+
+                def canonical_edges(kind):
+                    return run_repo_map_in_process(
+                        "storage",
+                        "canonical-edges",
+                        *storage_args,
+                        "--kind",
+                        kind,
+                        "--json",
+                    )
+
+                defines_exit, defines_stdout, defines_stderr = canonical_edges(
+                    "defines"
+                )
+                references_exit, references_stdout, references_stderr = (
+                    canonical_edges("references")
+                )
+                references = (
+                    json.loads(references_stdout) if references_exit == 0 else []
+                )
+                item_link_edge = next(
+                    (
+                        record
+                        for record in references
+                        if record["source_key"].startswith("feed.item:")
+                        and record["target_key"]
+                        == "external.url:https%3A%2F%2Fexample.com%2Frepomap%2Frss%2F1"
+                    ),
+                    None,
+                )
+                if item_link_edge is not None:
+                    explain_exit, explain_stdout, explain_stderr = (
+                        run_repo_map_in_process(
+                            "storage",
+                            "explain-canonical-edge",
+                            *storage_args,
+                            "--source-key",
+                            item_link_edge["source_key"],
+                            "--kind",
+                            "references",
+                            "--target-key",
+                            item_link_edge["target_key"],
+                            "--json",
+                        )
+                    )
+                else:
+                    explain_exit, explain_stdout, explain_stderr = (
+                        1,
+                        "",
+                        "missing feed item link edge",
+                    )
+
+        self.assertEqual(discover_exit_code, 0, discover_stderr)
+        discovered = [
+            json.loads(line)
+            for line in discover_stdout.splitlines()
+            if line.strip()
+        ]
+        discovered_kinds = {record["kind"] for record in discovered}
+        self.assertTrue(
+            {
+                "feed.document",
+                "feed.channel",
+                "feed.item",
+                "feed.link",
+                "feed.enclosure",
+                "feed.author",
+                "feed.category",
+                "feed.content",
+                "feed.parse_error",
+            }.issubset(discovered_kinds)
+        )
+        self.assertNotIn("fixture-feed-secret", discover_stdout)
+        self.assertNotIn("throw new Error", discover_stdout)
+
+        self.assertEqual(load_exit_code, 0, load_stderr)
+        self.assertEqual(document_exit, 0, document_stderr)
+        document_keys = {record["canonical_key"] for record in json.loads(document_stdout)}
+        self.assertTrue(
+            {
+                "feed.document:file%3Arss.xml",
+                "feed.document:file%3Aatom.xml",
+                "feed.document:file%3Afeed.json",
+            }.issubset(document_keys)
+        )
+
+        self.assertEqual(channel_exit, 0, channel_stderr)
+        self.assertGreaterEqual(len(json.loads(channel_stdout)), 3)
+        self.assertEqual(item_exit, 0, item_stderr)
+        items = json.loads(item_stdout)
+        self.assertTrue(any(record["metadata"].get("duplicate_identity") for record in items))
+        self.assertTrue(
+            any(record["metadata"].get("identity_strength") == "weak" for record in items)
+        )
+        self.assertEqual(author_exit, 0, author_stderr)
+        self.assertGreaterEqual(len(json.loads(author_stdout)), 2)
+        self.assertEqual(category_exit, 0, category_stderr)
+        self.assertGreaterEqual(len(json.loads(category_stdout)), 2)
+
+        self.assertEqual(defines_exit, 0, defines_stderr)
+        define_targets = {record["target_key"] for record in json.loads(defines_stdout)}
+        self.assertIn("feed.document:file%3Arss.xml", define_targets)
+        self.assertTrue(any(target.startswith("feed.item:") for target in define_targets))
+
+        self.assertEqual(references_exit, 0, references_stderr)
+        reference_pairs = {
+            (record["source_key"].split(":", 1)[0], record["target_key"])
+            for record in references
+        }
+        self.assertIn(
+            (
+                "feed.item",
+                "external.url:https%3A%2F%2Fexample.com%2Frepomap%2Frss%2F1",
+            ),
+            reference_pairs,
+        )
+        self.assertIn(("feed.item", "file:media/rss-audio.mp3"), reference_pairs)
+        self.assertTrue(
+            any(target.startswith("feed.author:") for _, target in reference_pairs)
+        )
+        self.assertTrue(
+            any(target.startswith("feed.category:") for _, target in reference_pairs)
+        )
+
+        self.assertEqual(explain_exit, 0, explain_stderr)
+        explanation = json.loads(explain_stdout)
+        self.assertEqual(explanation["edge"]["edge_kind"], "references")
+        self.assertEqual(
+            explanation["edge"]["target_key"],
+            "external.url:https%3A%2F%2Fexample.com%2Frepomap%2Frss%2F1",
+        )
+        self.assertEqual(
+            explanation["evidence"][0]["raw_observation"]["kind"],
+            "feed.link",
+        )
+        self.assertNotIn("fixture-feed-secret", explain_stdout)
+
     def test_storage_loads_toml_config_discovery_into_canonical_readback(self):
         require_postgres_binaries()
         fixture_root = discovery_fixture("config_toml_basic")
