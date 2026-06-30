@@ -9,8 +9,12 @@ from repomap_kg.source_ingestion import (
     FeedFetchResponse,
     SourceAcquisitionError,
     SourcePolicyError,
+    archive_observations_from_manifest,
+    build_archive_manifest,
     fetch_feed_source,
+    import_archive_source,
     ingest_feed_source,
+    load_archive_source_config,
     load_feed_source_config,
 )
 from repomap_kg.storage import LoadSummary
@@ -33,6 +37,121 @@ class SourceIngestionIntegrationTests(unittest.TestCase):
             with self.subTest(filename=filename):
                 with self.assertRaises(SourcePolicyError):
                     load_feed_source_config(source_fixture(filename))
+
+    def test_archive_source_fixture_policy_and_manifest_matrix(self):
+        allowed = load_archive_source_config(
+            archive_source_fixture("allowed-test-report.toml")
+        )
+        saved_page = load_archive_source_config(
+            archive_source_fixture("allowed-saved-page.toml")
+        )
+        manifest = build_archive_manifest(
+            allowed,
+            root_path=source_ingestion_fixture_root(),
+            clock=fixed_clock,
+        )
+        limited = build_archive_manifest(
+            load_archive_source_config(archive_source_fixture("limited-files.toml")),
+            root_path=source_ingestion_fixture_root(),
+            clock=fixed_clock,
+        )
+
+        self.assertEqual(allowed.source_type, "test_report.artifact")
+        self.assertEqual(saved_page.source_type, "saved_page.archive")
+        self.assertEqual(manifest.file_count, 6)
+        self.assertEqual(
+            [item.relative_path for item in manifest.included_files],
+            [
+                "assets/logo.svg",
+                "config/settings.json",
+                "feed/feed.json",
+                "index.html",
+                "static/app.js",
+                "static/report.css",
+            ],
+        )
+        self.assertTrue(
+            any(skipped.reason == "hidden" for skipped in manifest.skipped_files)
+        )
+        self.assertTrue(
+            any(
+                skipped.reason == "excluded-directory"
+                for skipped in manifest.skipped_files
+            )
+        )
+        self.assertEqual(limited.file_count, 1)
+        self.assertTrue(
+            any(skipped.reason == "max_file_count" for skipped in limited.skipped_files)
+        )
+        for filename in ("blocked-policy.toml", "manual-review.toml"):
+            with self.subTest(filename=filename):
+                with self.assertRaises(SourcePolicyError):
+                    load_archive_source_config(archive_source_fixture(filename))
+
+    def test_archive_fixture_observations_are_local_and_redacted(self):
+        config = load_archive_source_config(
+            archive_source_fixture("allowed-test-report.toml")
+        )
+        manifest = build_archive_manifest(
+            config,
+            root_path=source_ingestion_fixture_root(),
+            clock=fixed_clock,
+        )
+
+        observations = archive_observations_from_manifest(
+            config,
+            manifest,
+            root_path=source_ingestion_fixture_root(),
+        )
+
+        kinds = {observation.kind for observation in observations}
+        payload = json.dumps(
+            [observation.to_dict() for observation in observations],
+            sort_keys=True,
+        )
+        self.assertIn("html.document", kinds)
+        self.assertIn("css.document", kinds)
+        self.assertIn("css.selector_match", kinds)
+        self.assertIn("config.document", kinds)
+        self.assertIn("feed.document", kinds)
+        self.assertIn('"source_id": "example-test-report"', payload)
+        self.assertIn('"artifact_manifest_id"', payload)
+        self.assertIn(
+            '"artifact_relative_path": '
+            '"archive_artifacts/example-test-report/index.html"',
+            payload,
+        )
+        self.assertNotIn("fixture-secret", payload)
+
+    def test_archive_import_uses_existing_loader_path_without_network(self):
+        captured = {}
+
+        def loader(_psql_args, observations, **kwargs):
+            captured["observations"] = tuple(observations)
+            captured["kwargs"] = dict(kwargs)
+            return LoadSummary(repository_id=42, run_id=43, files=6)
+
+        summary = import_archive_source(
+            archive_source_fixture("allowed-test-report.toml"),
+            repository_name="fixture",
+            root_path=source_ingestion_fixture_root(),
+            psql_args=("--no-network-placeholder",),
+            psql_command="psql",
+            loader=loader,
+            clock=fixed_clock,
+        )
+
+        self.assertEqual(summary.source_id, "example-test-report")
+        self.assertEqual(summary.included_files, 6)
+        self.assertEqual(summary.load_summary.repository_id, 42)
+        self.assertEqual(captured["kwargs"]["repository_name"], "fixture")
+        self.assertGreater(len(captured["observations"]), 6)
+        payload = json.dumps(
+            [observation.to_dict() for observation in captured["observations"]],
+            sort_keys=True,
+        )
+        self.assertIn('"source_id": "example-test-report"', payload)
+        self.assertNotIn("fixture-secret", payload)
 
     def test_default_fetcher_uses_configured_timeout_method_and_user_agent(self):
         config = load_feed_source_config(source_fixture("allowed-rss.toml"))
@@ -293,6 +412,14 @@ def source_fixture(filename: str) -> Path:
         / "feed_sources"
         / filename
     )
+
+
+def archive_source_fixture(filename: str) -> Path:
+    return source_ingestion_fixture_root() / "archive_sources" / filename
+
+
+def source_ingestion_fixture_root() -> Path:
+    return Path(__file__).parents[3] / "fixtures" / "source_ingestion"
 
 
 if __name__ == "__main__":

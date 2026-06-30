@@ -15,7 +15,11 @@ from repomap_test_support.postgres_harness import (
 
 from repomap_kg.cli import main
 from repomap_kg.observations import RawObservation
-from repomap_kg.source_ingestion import FeedFetchResponse, ingest_feed_source
+from repomap_kg.source_ingestion import (
+    FeedFetchResponse,
+    import_archive_source,
+    ingest_feed_source,
+)
 from repomap_kg.storage import (
     StorageSchemaError,
     apply_migrations,
@@ -2598,6 +2602,125 @@ FROM canonical_edges;
         )
         self.assertIn('"source_id_configured": "example-rss-feed"', source_metadata)
         self.assertNotIn("fixture-secret", source_metadata)
+
+    def test_sources_import_archive_loads_local_static_artifact_fixture(self):
+        require_postgres_binaries()
+        config_path = archive_source_fixture("allowed-test-report.toml")
+        root_path = source_ingestion_fixture_root()
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            summary = import_archive_source(
+                config_path,
+                repository_name="fixture",
+                root_path=root_path,
+                psql_args=postgres.psql_args,
+                psql_command=postgres.psql_command,
+                clock=fixed_source_clock,
+            )
+            html_documents = query_canonical_node_records(
+                postgres.psql_args,
+                root_path=str(root_path),
+                kind="html.document",
+                psql_command=postgres.psql_command,
+            )
+            css_documents = query_canonical_node_records(
+                postgres.psql_args,
+                root_path=str(root_path),
+                kind="css.document",
+                psql_command=postgres.psql_command,
+            )
+            config_documents = query_canonical_node_records(
+                postgres.psql_args,
+                root_path=str(root_path),
+                kind="config.document",
+                psql_command=postgres.psql_command,
+            )
+            feed_documents = query_canonical_node_records(
+                postgres.psql_args,
+                root_path=str(root_path),
+                kind="feed.document",
+                psql_command=postgres.psql_command,
+            )
+            references = query_canonical_edge_records(
+                postgres.psql_args,
+                root_path=str(root_path),
+                kind="references",
+                psql_command=postgres.psql_command,
+            )
+            styles = query_canonical_edge_records(
+                postgres.psql_args,
+                root_path=str(root_path),
+                kind="styles",
+                psql_command=postgres.psql_command,
+            )
+            raw_count = postgres.psql_scalar("SELECT count(*) FROM raw_observations;")
+
+        self.assertEqual(summary.source_id, "example-test-report")
+        self.assertEqual(summary.included_files, 6)
+        self.assertEqual(summary.load_summary.files, 6)
+        self.assertEqual(raw_count, str(summary.observations))
+        self.assertTrue(html_documents)
+        self.assertTrue(css_documents)
+        self.assertTrue(config_documents)
+        self.assertTrue(feed_documents)
+        self.assertTrue(
+            any(edge.target_key.startswith("external.url:") for edge in references)
+        )
+        self.assertTrue(styles)
+        source_metadata = json.dumps(
+            [observation.to_dict() for observation in summary.raw_observations],
+            sort_keys=True,
+        )
+        self.assertIn('"source_id": "example-test-report"', source_metadata)
+        self.assertIn('"artifact_manifest_id"', source_metadata)
+        self.assertNotIn("fixture-secret", source_metadata)
+
+    def test_sources_import_archive_cli_loads_fixture_and_preserves_json_summary(self):
+        require_postgres_binaries()
+        config_path = archive_source_fixture("allowed-test-report.toml")
+        root_path = source_ingestion_fixture_root()
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            exit_code, stdout, stderr = run_repo_map_in_process(
+                "sources",
+                "import-archive",
+                "--config",
+                str(config_path),
+                "--repository-name",
+                "fixture",
+                "--root-path",
+                str(root_path),
+                "--psql-command",
+                postgres.psql_command,
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--json",
+            )
+            raw_count = postgres.psql_scalar("SELECT count(*) FROM raw_observations;")
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(stderr, "")
+        payload = json.loads(stdout)
+        self.assertEqual(payload["source_id"], "example-test-report")
+        self.assertEqual(payload["source_type"], "test_report.artifact")
+        self.assertEqual(payload["included_files"], 6)
+        self.assertEqual(str(payload["observations"]), raw_count)
 
     def test_mcp_read_only_source_feed_tools_read_rss2_loaded_rows(self):
         require_postgres_binaries()
@@ -6323,6 +6446,14 @@ def source_fixture(filename: str) -> Path:
         / "feed_sources"
         / filename
     )
+
+
+def archive_source_fixture(filename: str) -> Path:
+    return source_ingestion_fixture_root() / "archive_sources" / filename
+
+
+def source_ingestion_fixture_root() -> Path:
+    return Path(__file__).parents[3] / "fixtures" / "source_ingestion"
 
 
 def fixed_source_clock() -> datetime:

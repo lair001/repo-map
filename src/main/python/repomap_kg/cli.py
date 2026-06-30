@@ -44,6 +44,7 @@ from repomap_kg.project_identity import PROJECT_IDENTITY
 from repomap_kg.source_ingestion import (
     SourceAcquisitionError,
     SourcePolicyError,
+    import_archive_source,
     ingest_feed_source,
 )
 from repomap_kg.storage import (
@@ -255,6 +256,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit feed ingestion summary as JSON",
+    )
+    import_archive = source_subcommands.add_parser(
+        "import-archive",
+        help="import one configured local saved-page/static artifact source",
+    )
+    import_archive.add_argument(
+        "--config",
+        required=True,
+        help="path to a configured local artifact source TOML file",
+    )
+    import_archive.add_argument("--repository-name", required=True)
+    add_storage_root_argument(import_archive)
+    import_archive.add_argument("--git-commit")
+    add_storage_connection_arguments(import_archive)
+    import_archive.add_argument(
+        "--json",
+        action="store_true",
+        help="emit local artifact import summary as JSON",
     )
 
     storage = subparsers.add_parser(
@@ -862,6 +881,31 @@ def main(argv: list[str] | None = None) -> int:
                 f"{summary.load_summary.repository_id} run "
                 f"{summary.load_summary.run_id} "
                 f"({summary.feed_observations} feed observations)"
+            )
+        return 0
+
+    if args.command == "sources" and args.source_command == "import-archive":
+        try:
+            summary = import_archive_source(
+                config_path=args.config,
+                repository_name=args.repository_name,
+                root_path=args.root_path,
+                psql_args=psql_args_from_args(args),
+                git_commit=args.git_commit,
+                psql_command=args.psql_command,
+            )
+        except (SourcePolicyError, SourceAcquisitionError, StorageSchemaError) as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(summary.to_jsonable(), sort_keys=True))
+        else:
+            print(
+                "imported local artifact source "
+                f"{summary.source_id} into repository "
+                f"{summary.load_summary.repository_id} run "
+                f"{summary.load_summary.run_id} "
+                f"({summary.observations} observations)"
             )
         return 0
 
