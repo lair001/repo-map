@@ -2599,6 +2599,120 @@ FROM canonical_edges;
         self.assertIn('"source_id_configured": "example-rss-feed"', source_metadata)
         self.assertNotIn("fixture-secret", source_metadata)
 
+    def test_mcp_read_only_source_feed_tools_read_rss2_loaded_rows(self):
+        require_postgres_binaries()
+        config_path = source_fixture("allowed-rss.toml")
+        feed_body = (discovery_fixture("feed_static_basic") / "rss.xml").read_bytes()
+        calls = []
+
+        def fetcher(config):
+            calls.append(config.url)
+            return FeedFetchResponse(
+                status=200,
+                headers={"content-type": "application/rss+xml"},
+                body=feed_body,
+            )
+
+        from repomap_kg.mcp_server import (
+            repomap_explain_source_feed_item,
+            repomap_ingested_sources,
+            repomap_source_feed_items,
+            repomap_source_references,
+            repomap_source_runs,
+            repomap_source_summary,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root_path = Path(tmpdir) / "fixture-repo"
+            root_path.mkdir()
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                ingest_feed_source(
+                    config_path,
+                    repository_name="fixture",
+                    root_path=root_path,
+                    psql_args=postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                    fetcher=fetcher,
+                    clock=fixed_source_clock,
+                )
+                mcp_args = {
+                    "root_path": str(root_path),
+                    "pg_host": str(postgres.socket_dir),
+                    "pg_port": str(postgres.port),
+                    "pg_user": postgres.user,
+                    "pg_database": "postgres",
+                    "psql_command": postgres.psql_command,
+                }
+                sources = repomap_ingested_sources(
+                    **mcp_args,
+                    source_type="feed.rss",
+                )
+                summary = repomap_source_summary(
+                    **mcp_args,
+                    source_id="example-rss-feed",
+                )
+                runs = repomap_source_runs(
+                    **mcp_args,
+                    source_id="example-rss-feed",
+                )
+                items = repomap_source_feed_items(
+                    **mcp_args,
+                    source_id="example-rss-feed",
+                )
+                references = repomap_source_references(
+                    **mcp_args,
+                    source_id="example-rss-feed",
+                    target_kind="external.url",
+                )
+                explanation = repomap_explain_source_feed_item(
+                    **mcp_args,
+                    item_key=items[0]["item_key"],
+                    source_id="example-rss-feed",
+                )
+
+        self.assertEqual(calls, ["https://example.invalid/rss.xml"])
+        self.assertEqual([record["source_id"] for record in sources], ["example-rss-feed"])
+        self.assertEqual(sources[0]["source_type"], "feed.rss")
+        self.assertEqual(sources[0]["policy_status"], "allowed_with_limits")
+        self.assertGreaterEqual(sources[0]["canonical_feed_item_count"], 1)
+        self.assertEqual(summary["source_id"], "example-rss-feed")
+        self.assertEqual(summary["feed_documents"], 1)
+        self.assertEqual(summary["feed_channels"], 1)
+        self.assertGreaterEqual(summary["feed_items"], 1)
+        self.assertEqual(runs[0]["source_run_id"], "20260630T120000Z")
+        self.assertEqual(runs[0]["http_status"], 200)
+        self.assertGreaterEqual(len(items), 1)
+        self.assertTrue(items[0]["item_key"].startswith("feed.item:"))
+        self.assertIn(items[0]["identity_strength"], {"strong", "weak", "structural"})
+        self.assertTrue(
+            all(reference["not_fetched"] for reference in references),
+            references,
+        )
+        self.assertTrue(
+            all(reference["target_key"].startswith("external.url:") for reference in references),
+            references,
+        )
+        self.assertEqual(explanation["item"]["canonical_key"], items[0]["item_key"])
+        self.assertEqual(explanation["source"]["source_id"], "example-rss-feed")
+        serialized = json.dumps(
+            {
+                "sources": sources,
+                "summary": summary,
+                "runs": runs,
+                "items": items,
+                "references": references,
+                "explanation": explanation,
+            },
+            sort_keys=True,
+        )
+        self.assertNotIn("fixture-secret", serialized)
+        self.assertNotIn("fixture-feed-secret", serialized)
+
     def test_storage_loads_toml_config_discovery_into_canonical_readback(self):
         require_postgres_binaries()
         fixture_root = discovery_fixture("config_toml_basic")
@@ -4348,6 +4462,12 @@ FROM canonical_edges;
                 "repomap_canonical_edges",
                 "repomap_explain_canonical_edge",
                 "repomap_canonical_neighborhood",
+                "repomap_ingested_sources",
+                "repomap_source_summary",
+                "repomap_source_runs",
+                "repomap_source_feed_items",
+                "repomap_explain_source_feed_item",
+                "repomap_source_references",
             ],
         )
         self.assertEqual(projects_payload["default_project"], "fixture")

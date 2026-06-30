@@ -250,6 +250,101 @@ class CanonicalNeighborhoodRecord:
 
 
 @dataclass(frozen=True)
+class IngestedSourceRecord:
+    source_id: str
+    source_type: str
+    display_name: str | None
+    policy_status: str
+    latest_source_run_id: str | None
+    latest_artifact_id: str | None
+    latest_artifact_path: str | None
+    latest_acquired_at: str | None
+    feed_observation_count: int
+    canonical_feed_item_count: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class SourceSummaryRecord:
+    source_id: str
+    source_type: str
+    display_name: str | None
+    policy_status: str
+    configured_url_summary: str | None
+    latest_source_run_id: str | None
+    latest_artifact_id: str | None
+    latest_artifact_path: str | None
+    latest_acquired_at: str | None
+    feed_documents: int
+    feed_channels: int
+    feed_items: int
+    feed_authors: int
+    feed_categories: int
+    link_references: int
+    enclosure_references: int
+    parse_errors: int
+    known_limitations: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class SourceRunRecord:
+    source_run_id: str
+    acquired_at: str | None
+    artifact_id: str | None
+    artifact_path: str | None
+    artifact_byte_length: int | None
+    artifact_sha256: str | None
+    http_status: int | None
+    content_type: str | None
+    observation_count: int
+    status_summary: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class SourceFeedItemRecord:
+    item_key: str
+    title: str | None
+    published_at: str | None
+    updated_at: str | None
+    identity_source: str | None
+    identity_strength: str | None
+    duplicate_identity: bool
+    link_targets: tuple[str, ...]
+    authors: tuple[str, ...]
+    categories: tuple[str, ...]
+    source_run_id: str | None
+    artifact_id: str | None
+    artifact_path: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class SourceReferenceRecord:
+    source_item_key: str
+    relation: str
+    target_key: str
+    target_display: str | None
+    not_fetched: bool
+    media_type: str | None
+    source_run_id: str | None
+    artifact_id: str | None
+    artifact_path: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class FileNodeRecord:
     path: str
     node_kind: str
@@ -999,6 +1094,150 @@ def query_canonical_storage_summary(
     return canonical_storage_summary_from_payload(
         parse_psql_json(result.stdout, "canonical storage summary")
     )
+
+
+def query_ingested_source_records(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    source_type: str | None = None,
+    policy_status: str | None = None,
+    limit: int = 50,
+    psql_command: str = "psql",
+) -> tuple[IngestedSourceRecord, ...]:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_ingested_source_query_sql(
+            root_path,
+            source_type=source_type,
+            policy_status=policy_status,
+            limit=limit,
+        ),
+    )
+    payload = parse_psql_json(result.stdout, "ingested source records")
+    if not isinstance(payload, list):
+        raise StorageSchemaError(
+            "psql did not return ingested source records as a JSON array"
+        )
+    return tuple(ingested_source_record_from_storage_payload(item) for item in payload)
+
+
+def query_source_summary(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    source_id: str,
+    psql_command: str = "psql",
+) -> SourceSummaryRecord:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_source_summary_query_sql(root_path, source_id=source_id),
+    )
+    return source_summary_from_storage_payload(
+        parse_psql_json(result.stdout, "source summary")
+    )
+
+
+def query_source_run_records(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    source_id: str,
+    limit: int = 25,
+    psql_command: str = "psql",
+) -> tuple[SourceRunRecord, ...]:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_source_run_query_sql(
+            root_path,
+            source_id=source_id,
+            limit=limit,
+        ),
+    )
+    payload = parse_psql_json(result.stdout, "source run records")
+    if not isinstance(payload, list):
+        raise StorageSchemaError(
+            "psql did not return source run records as a JSON array"
+        )
+    return tuple(source_run_record_from_storage_payload(item) for item in payload)
+
+
+def query_source_feed_item_records(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    source_id: str,
+    source_run_id: str | None = None,
+    limit: int = 50,
+    psql_command: str = "psql",
+) -> tuple[SourceFeedItemRecord, ...]:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_source_feed_item_query_sql(
+            root_path,
+            source_id=source_id,
+            source_run_id=source_run_id,
+            limit=limit,
+        ),
+    )
+    payload = parse_psql_json(result.stdout, "source feed item records")
+    if not isinstance(payload, list):
+        raise StorageSchemaError(
+            "psql did not return source feed item records as a JSON array"
+        )
+    return tuple(source_feed_item_record_from_storage_payload(item) for item in payload)
+
+
+def query_source_reference_records(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    source_id: str,
+    source_run_id: str | None = None,
+    target_kind: str | None = None,
+    limit: int = 50,
+    psql_command: str = "psql",
+) -> tuple[SourceReferenceRecord, ...]:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_source_reference_query_sql(
+            root_path,
+            source_id=source_id,
+            source_run_id=source_run_id,
+            target_kind=target_kind,
+            limit=limit,
+        ),
+    )
+    payload = parse_psql_json(result.stdout, "source reference records")
+    if not isinstance(payload, list):
+        raise StorageSchemaError(
+            "psql did not return source reference records as a JSON array"
+        )
+    return tuple(source_reference_record_from_storage_payload(item) for item in payload)
+
+
+def query_source_feed_item_explanation(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    item_key: str,
+    source_id: str | None = None,
+    psql_command: str = "psql",
+) -> dict[str, Any]:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_source_feed_item_explanation_query_sql(
+            root_path,
+            item_key=item_key,
+            source_id=source_id,
+        ),
+    )
+    payload = parse_psql_json(result.stdout, "source feed item explanation")
+    if not isinstance(payload, dict):
+        raise StorageSchemaError(
+            "psql did not return source feed item explanation as a JSON object"
+        )
+    return payload
 
 
 def build_file_ingest_sql(
@@ -1953,6 +2192,454 @@ def build_canonical_storage_summary_query_sql(root_path: str) -> str:
     )
 
 
+def build_ingested_source_query_sql(
+    root_path: str,
+    *,
+    source_type: str | None = None,
+    policy_status: str | None = None,
+    limit: int = 50,
+) -> str:
+    filters = ["source_observations.metadata_json->>'source_id_configured' IS NOT NULL"]
+    if source_type is not None:
+        filters.append(f"source_observations.source_type = {sql_literal(source_type)}")
+    if policy_status is not None:
+        filters.append(
+            "source_observations.source_policy_status = "
+            f"{sql_literal(policy_status)}"
+        )
+    where_sql = " AND ".join(filters)
+    return (
+        f"{source_observations_cte(root_path)} "
+        "SELECT COALESCE(json_agg(json_build_object("
+        "'source_id', source_id_configured, "
+        "'source_type', source_type, "
+        "'display_name', display_name, "
+        "'policy_status', source_policy_status, "
+        "'latest_source_run_id', latest_source_run_id, "
+        "'latest_artifact_id', latest_artifact_id, "
+        "'latest_artifact_path', latest_artifact_path, "
+        "'latest_acquired_at', latest_acquired_at, "
+        "'feed_observation_count', feed_observation_count, "
+        "'canonical_feed_item_count', canonical_feed_item_count"
+        ") ORDER BY source_id_configured), '[]'::json)::text "
+        "FROM ("
+        "SELECT source_id_configured, "
+        "MIN(source_type) AS source_type, "
+        "MIN(source_display_name) AS display_name, "
+        "MIN(source_policy_status) AS source_policy_status, "
+        "(ARRAY_AGG(source_run_id ORDER BY source_acquired_at DESC NULLS LAST))[1] "
+        "AS latest_source_run_id, "
+        "(ARRAY_AGG(source_artifact_id ORDER BY source_acquired_at DESC NULLS LAST))[1] "
+        "AS latest_artifact_id, "
+        "(ARRAY_AGG(source_artifact_path ORDER BY source_acquired_at DESC NULLS LAST))[1] "
+        "AS latest_artifact_path, "
+        "MAX(source_acquired_at) AS latest_acquired_at, "
+        "COUNT(*) AS feed_observation_count, "
+        "COUNT(DISTINCT canonical_nodes.canonical_key) FILTER "
+        "(WHERE canonical_nodes.kind = 'feed.item') AS canonical_feed_item_count "
+        "FROM source_observations "
+        "LEFT JOIN canonical_evidence "
+        "ON canonical_evidence.raw_observation_id = source_observations.id "
+        "LEFT JOIN canonical_node_evidence "
+        "ON canonical_node_evidence.canonical_evidence_id = canonical_evidence.id "
+        "LEFT JOIN canonical_nodes "
+        "ON canonical_nodes.id = canonical_node_evidence.canonical_node_id "
+        f"WHERE {where_sql} "
+        "GROUP BY source_id_configured "
+        "ORDER BY source_id_configured "
+        f"LIMIT {positive_limit(limit)}"
+        ") source_rows;"
+    )
+
+
+def build_source_summary_query_sql(root_path: str, *, source_id: str) -> str:
+    source_filter = f"source_id_configured = {sql_literal(source_id)}"
+    return (
+        f"{source_observations_cte(root_path)} "
+        "SELECT COALESCE(("
+        "SELECT json_build_object("
+        "'source_id', source_id_configured, "
+        "'source_type', MIN(source_type), "
+        "'display_name', MIN(source_display_name), "
+        "'policy_status', MIN(source_policy_status), "
+        "'configured_url_summary', MIN(acquisition_url_summary), "
+        "'latest_source_run_id', "
+        "(ARRAY_AGG(source_run_id ORDER BY source_acquired_at DESC NULLS LAST))[1], "
+        "'latest_artifact_id', "
+        "(ARRAY_AGG(source_artifact_id ORDER BY source_acquired_at DESC NULLS LAST))[1], "
+        "'latest_artifact_path', "
+        "(ARRAY_AGG(source_artifact_path ORDER BY source_acquired_at DESC NULLS LAST))[1], "
+        "'latest_acquired_at', MAX(source_acquired_at), "
+        "'feed_documents', COUNT(DISTINCT canonical_nodes.canonical_key) FILTER "
+        "(WHERE canonical_nodes.kind = 'feed.document'), "
+        "'feed_channels', COUNT(DISTINCT canonical_nodes.canonical_key) FILTER "
+        "(WHERE canonical_nodes.kind = 'feed.channel'), "
+        "'feed_items', COUNT(DISTINCT canonical_nodes.canonical_key) FILTER "
+        "(WHERE canonical_nodes.kind = 'feed.item'), "
+        "'feed_authors', COUNT(DISTINCT canonical_nodes.canonical_key) FILTER "
+        "(WHERE canonical_nodes.kind = 'feed.author'), "
+        "'feed_categories', COUNT(DISTINCT canonical_nodes.canonical_key) FILTER "
+        "(WHERE canonical_nodes.kind = 'feed.category'), "
+        "'link_references', COUNT(DISTINCT canonical_edges.id) FILTER "
+        "(WHERE canonical_edges.edge_kind = 'references' "
+        "AND canonical_edges.metadata_json->>'scope' = 'link'), "
+        "'enclosure_references', COUNT(DISTINCT canonical_edges.id) FILTER "
+        "(WHERE canonical_edges.edge_kind = 'references' "
+        "AND canonical_edges.metadata_json->>'scope' = 'enclosure'), "
+        "'parse_errors', COUNT(*) FILTER "
+        "(WHERE source_observations.kind = 'feed.parse_error'), "
+        "'known_limitations', json_build_array("
+        "'source metadata is inferred from RSS2 evidence'"
+        ")"
+        ") FROM source_observations "
+        "LEFT JOIN canonical_evidence "
+        "ON canonical_evidence.raw_observation_id = source_observations.id "
+        "LEFT JOIN canonical_node_evidence "
+        "ON canonical_node_evidence.canonical_evidence_id = canonical_evidence.id "
+        "LEFT JOIN canonical_nodes "
+        "ON canonical_nodes.id = canonical_node_evidence.canonical_node_id "
+        "LEFT JOIN canonical_edge_evidence "
+        "ON canonical_edge_evidence.canonical_evidence_id = canonical_evidence.id "
+        "LEFT JOIN canonical_edges "
+        "ON canonical_edges.id = canonical_edge_evidence.canonical_edge_id "
+        f"WHERE {source_filter} "
+        "GROUP BY source_id_configured"
+        "), json_build_object("
+        f"'source_id', {sql_literal(source_id)}, "
+        "'source_type', null, "
+        "'display_name', null, "
+        "'policy_status', 'unknown', "
+        "'configured_url_summary', null, "
+        "'latest_source_run_id', null, "
+        "'latest_artifact_id', null, "
+        "'latest_artifact_path', null, "
+        "'latest_acquired_at', null, "
+        "'feed_documents', 0, "
+        "'feed_channels', 0, "
+        "'feed_items', 0, "
+        "'feed_authors', 0, "
+        "'feed_categories', 0, "
+        "'link_references', 0, "
+        "'enclosure_references', 0, "
+        "'parse_errors', 0, "
+        "'known_limitations', json_build_array('source metadata unavailable')"
+        "))::text;"
+    )
+
+
+def build_source_run_query_sql(
+    root_path: str,
+    *,
+    source_id: str,
+    limit: int = 25,
+) -> str:
+    return (
+        f"{source_observations_cte(root_path)} "
+        "SELECT COALESCE(json_agg(json_build_object("
+        "'source_run_id', source_run_id, "
+        "'acquired_at', source_acquired_at, "
+        "'artifact_id', source_artifact_id, "
+        "'artifact_path', source_artifact_path, "
+        "'artifact_byte_length', source_artifact_bytes, "
+        "'artifact_sha256', source_artifact_sha256, "
+        "'http_status', acquisition_http_status, "
+        "'content_type', acquisition_content_type, "
+        "'observation_count', observation_count, "
+        "'status_summary', status_summary"
+        ") ORDER BY source_acquired_at DESC NULLS LAST, source_run_id DESC), "
+        "'[]'::json)::text FROM ("
+        "SELECT source_run_id, "
+        "MAX(source_acquired_at) AS source_acquired_at, "
+        "MAX(source_artifact_id) AS source_artifact_id, "
+        "MAX(source_artifact_path) AS source_artifact_path, "
+        "MAX(source_artifact_bytes) AS source_artifact_bytes, "
+        "MAX(source_artifact_sha256) AS source_artifact_sha256, "
+        "MAX(acquisition_http_status) AS acquisition_http_status, "
+        "MAX(acquisition_content_type) AS acquisition_content_type, "
+        "COUNT(*) AS observation_count, "
+        "CASE WHEN COUNT(*) FILTER (WHERE kind = 'feed.parse_error') > 0 "
+        "THEN 'parse_errors' ELSE 'ok' END AS status_summary "
+        "FROM source_observations "
+        f"WHERE source_id_configured = {sql_literal(source_id)} "
+        "AND source_run_id IS NOT NULL "
+        "GROUP BY source_run_id "
+        "ORDER BY source_acquired_at DESC NULLS LAST, source_run_id DESC "
+        f"LIMIT {positive_limit(limit)}"
+        ") run_rows;"
+    )
+
+
+def build_source_feed_item_query_sql(
+    root_path: str,
+    *,
+    source_id: str,
+    source_run_id: str | None = None,
+    limit: int = 50,
+) -> str:
+    filters = [f"source_id_configured = {sql_literal(source_id)}"]
+    if source_run_id is not None:
+        filters.append(f"source_run_id = {sql_literal(source_run_id)}")
+    where_sql = " AND ".join(filters)
+    return (
+        f"{source_observations_cte(root_path)} "
+        "SELECT COALESCE(json_agg(item_rows.payload "
+        "ORDER BY item_rows.published_at DESC NULLS LAST, item_rows.item_key), "
+        "'[]'::json)::text "
+        "FROM ("
+        "SELECT canonical_nodes.canonical_key AS item_key, "
+        "canonical_nodes.metadata_json->>'published_at' AS published_at, "
+        "json_build_object("
+        "'item_key', canonical_nodes.canonical_key, "
+        "'title', canonical_nodes.metadata_json->>'title', "
+        "'published_at', canonical_nodes.metadata_json->>'published_at', "
+        "'updated_at', canonical_nodes.metadata_json->>'updated_at', "
+        "'identity_source', canonical_nodes.metadata_json->>'identity_source', "
+        "'identity_strength', canonical_nodes.metadata_json->>'identity_strength', "
+        "'duplicate_identity', COALESCE((canonical_nodes.metadata_json->>'duplicate_identity')::boolean, false), "
+        "'link_targets', COALESCE(link_targets.targets, '[]'::json), "
+        "'authors', COALESCE(authors.names, '[]'::json), "
+        "'categories', COALESCE(categories.names, '[]'::json), "
+        "'source_run_id', source_rows.source_run_id, "
+        "'artifact_id', source_rows.source_artifact_id, "
+        "'artifact_path', source_rows.source_artifact_path"
+        ") AS payload "
+        "FROM canonical_nodes "
+        "JOIN ("
+        "SELECT canonical_node_evidence.canonical_node_id, "
+        "MAX(source_observations.source_run_id) AS source_run_id, "
+        "MAX(source_observations.source_artifact_id) AS source_artifact_id, "
+        "MAX(source_observations.source_artifact_path) AS source_artifact_path "
+        "FROM source_observations "
+        "JOIN canonical_evidence "
+        "ON canonical_evidence.raw_observation_id = source_observations.id "
+        "JOIN canonical_node_evidence "
+        "ON canonical_node_evidence.canonical_evidence_id = canonical_evidence.id "
+        f"WHERE {where_sql} "
+        "GROUP BY canonical_node_evidence.canonical_node_id"
+        ") source_rows ON source_rows.canonical_node_id = canonical_nodes.id "
+        "LEFT JOIN LATERAL ("
+        "SELECT json_agg(DISTINCT canonical_edges.target_canonical_key) AS targets "
+        "FROM canonical_edges "
+        "WHERE canonical_edges.source_canonical_key = canonical_nodes.canonical_key "
+        "AND canonical_edges.edge_kind = 'references' "
+        "AND canonical_edges.metadata_json->>'scope' IN ('link', 'enclosure')"
+        ") link_targets ON true "
+        "LEFT JOIN LATERAL ("
+        "SELECT json_agg(DISTINCT target_nodes.display_name) AS names "
+        "FROM canonical_edges "
+        "JOIN canonical_nodes target_nodes "
+        "ON target_nodes.canonical_key = canonical_edges.target_canonical_key "
+        "AND target_nodes.repository_id = canonical_edges.repository_id "
+        "WHERE canonical_edges.source_canonical_key = canonical_nodes.canonical_key "
+        "AND canonical_edges.edge_kind = 'references' "
+        "AND target_nodes.kind = 'feed.author'"
+        ") authors ON true "
+        "LEFT JOIN LATERAL ("
+        "SELECT json_agg(DISTINCT target_nodes.display_name) AS names "
+        "FROM canonical_edges "
+        "JOIN canonical_nodes target_nodes "
+        "ON target_nodes.canonical_key = canonical_edges.target_canonical_key "
+        "AND target_nodes.repository_id = canonical_edges.repository_id "
+        "WHERE canonical_edges.source_canonical_key = canonical_nodes.canonical_key "
+        "AND canonical_edges.edge_kind = 'references' "
+        "AND target_nodes.kind = 'feed.category'"
+        ") categories ON true "
+        "WHERE canonical_nodes.kind = 'feed.item' "
+        "ORDER BY canonical_nodes.metadata_json->>'published_at' DESC NULLS LAST, "
+        "canonical_nodes.canonical_key "
+        f"LIMIT {positive_limit(limit)}"
+        ") item_rows;"
+    )
+
+
+def build_source_reference_query_sql(
+    root_path: str,
+    *,
+    source_id: str,
+    source_run_id: str | None = None,
+    target_kind: str | None = None,
+    limit: int = 50,
+) -> str:
+    filters = [f"source_id_configured = {sql_literal(source_id)}"]
+    if source_run_id is not None:
+        filters.append(f"source_run_id = {sql_literal(source_run_id)}")
+    if target_kind is not None:
+        filters.append(
+            "split_part(canonical_edges.target_canonical_key, ':', 1) = "
+            f"{sql_literal(target_kind)}"
+        )
+    where_sql = " AND ".join(filters)
+    return (
+        f"{source_observations_cte(root_path)} "
+        "SELECT COALESCE(json_agg(reference_rows.payload "
+        "ORDER BY reference_rows.source_item_key, reference_rows.target_key), "
+        "'[]'::json)::text "
+        "FROM ("
+        "SELECT canonical_edges.source_canonical_key AS source_item_key, "
+        "canonical_edges.target_canonical_key AS target_key, "
+        "json_build_object("
+        "'source_item_key', canonical_edges.source_canonical_key, "
+        "'relation', canonical_edges.edge_kind, "
+        "'target_key', canonical_edges.target_canonical_key, "
+        "'target_display', canonical_edges.metadata_json->>'raw_target_summary', "
+        "'not_fetched', COALESCE((canonical_edges.metadata_json->>'not_fetched')::boolean, true), "
+        "'media_type', canonical_edges.metadata_json->>'mime_type', "
+        "'source_run_id', source_observations.source_run_id, "
+        "'artifact_id', source_observations.source_artifact_id, "
+        "'artifact_path', source_observations.source_artifact_path"
+        ") AS payload "
+        "FROM canonical_edges "
+        "JOIN canonical_edge_evidence "
+        "ON canonical_edge_evidence.canonical_edge_id = canonical_edges.id "
+        "JOIN canonical_evidence "
+        "ON canonical_evidence.id = canonical_edge_evidence.canonical_evidence_id "
+        "JOIN source_observations "
+        "ON source_observations.id = canonical_evidence.raw_observation_id "
+        "WHERE canonical_edges.edge_kind = 'references' "
+        "AND split_part(canonical_edges.source_canonical_key, ':', 1) = 'feed.item' "
+        f"AND {where_sql} "
+        "ORDER BY canonical_edges.source_canonical_key, "
+        "canonical_edges.target_canonical_key "
+        f"LIMIT {positive_limit(limit)}"
+        ") reference_rows;"
+    )
+
+
+def build_source_feed_item_explanation_query_sql(
+    root_path: str,
+    *,
+    item_key: str,
+    source_id: str | None = None,
+) -> str:
+    filters = [f"canonical_nodes.canonical_key = {sql_literal(item_key)}"]
+    source_summary_filter = "source_id_configured IS NOT NULL"
+    if source_id is not None:
+        filters.append(f"source_observations.source_id_configured = {sql_literal(source_id)}")
+        source_summary_filter += f" AND source_id_configured = {sql_literal(source_id)}"
+    where_sql = " AND ".join(filters)
+    return (
+        f"{source_observations_cte(root_path)} "
+        "SELECT json_build_object("
+        "'item', ("
+        "SELECT json_build_object("
+        "'canonical_key', canonical_nodes.canonical_key, "
+        "'graph_key_version', canonical_nodes.graph_key_version, "
+        "'kind', canonical_nodes.kind, "
+        "'display_name', canonical_nodes.display_name, "
+        "'confidence', canonical_nodes.confidence, "
+        "'conflict', canonical_nodes.conflict, "
+        "'metadata', canonical_nodes.metadata_json"
+        ") FROM canonical_nodes "
+        "JOIN canonical_node_evidence "
+        "ON canonical_node_evidence.canonical_node_id = canonical_nodes.id "
+        "JOIN canonical_evidence "
+        "ON canonical_evidence.id = canonical_node_evidence.canonical_evidence_id "
+        "JOIN source_observations "
+        "ON source_observations.id = canonical_evidence.raw_observation_id "
+        f"WHERE {where_sql} "
+        "LIMIT 1"
+        "), "
+        "'source', ("
+        "SELECT json_build_object("
+        "'source_id', source_id_configured, "
+        "'source_type', MIN(source_type), "
+        "'policy_status', MIN(source_policy_status), "
+        "'source_run_id', MAX(source_run_id), "
+        "'artifact_id', MAX(source_artifact_id), "
+        "'artifact_path', MAX(source_artifact_path), "
+        "'acquired_at', MAX(source_acquired_at)"
+        ") FROM source_observations "
+        f"WHERE {source_summary_filter} "
+        "GROUP BY source_id_configured "
+        "ORDER BY MAX(source_acquired_at) DESC NULLS LAST "
+        "LIMIT 1"
+        "), "
+        "'evidence', COALESCE(("
+        "SELECT json_agg(json_build_object("
+        "'evidence_key', canonical_evidence.evidence_key, "
+        "'raw_kind', canonical_evidence.raw_kind, "
+        "'raw_source_id', canonical_evidence.raw_source_id, "
+        "'path', canonical_evidence.path, "
+        "'start_line', canonical_evidence.start_line, "
+        "'end_line', canonical_evidence.end_line, "
+        "'extractor', canonical_evidence.extractor, "
+        "'extractor_version', canonical_evidence.extractor_version, "
+        "'confidence', canonical_evidence.confidence, "
+        "'metadata', canonical_evidence.metadata_json"
+        ") ORDER BY canonical_evidence.raw_observation_ordinal) "
+        "FROM canonical_nodes "
+        "JOIN canonical_node_evidence "
+        "ON canonical_node_evidence.canonical_node_id = canonical_nodes.id "
+        "JOIN canonical_evidence "
+        "ON canonical_evidence.id = canonical_node_evidence.canonical_evidence_id "
+        "JOIN source_observations "
+        "ON source_observations.id = canonical_evidence.raw_observation_id "
+        f"WHERE {where_sql} "
+        "), '[]'::json), "
+        "'references', COALESCE(("
+        "SELECT json_agg(json_build_object("
+        "'target_key', canonical_edges.target_canonical_key, "
+        "'metadata', canonical_edges.metadata_json"
+        ") ORDER BY canonical_edges.target_canonical_key) "
+        "FROM canonical_edges "
+        f"WHERE canonical_edges.source_canonical_key = {sql_literal(item_key)} "
+        "AND canonical_edges.edge_kind = 'references' "
+        "), '[]'::json), "
+        "'content_policy', 'full feed bodies are not exposed'"
+        ")::text;"
+    )
+
+
+def source_observations_cte(root_path: str) -> str:
+    return (
+        "WITH repo AS ("
+        "SELECT id FROM repositories "
+        f"WHERE repositories.root_path = {sql_literal(root_path)}"
+        "), source_observations AS ("
+        "SELECT raw_observations.*, "
+        "raw_observations.payload_json->'metadata' AS metadata_json, "
+        "raw_observations.payload_json->'metadata'->>'source_id_configured' "
+        "AS source_id_configured, "
+        "raw_observations.payload_json->'metadata'->>'source_type' AS source_type, "
+        "raw_observations.payload_json->'metadata'->>'source_display_name' "
+        "AS source_display_name, "
+        "raw_observations.payload_json->'metadata'->>'source_policy_status' "
+        "AS source_policy_status, "
+        "raw_observations.payload_json->'metadata'->>'source_run_id' AS source_run_id, "
+        "raw_observations.payload_json->'metadata'->>'source_artifact_id' "
+        "AS source_artifact_id, "
+        "raw_observations.payload_json->'metadata'->>'source_artifact_path' "
+        "AS source_artifact_path, "
+        "raw_observations.payload_json->'metadata'->>'source_artifact_sha256' "
+        "AS source_artifact_sha256, "
+        "(raw_observations.payload_json->'metadata'->>'source_artifact_bytes')::bigint "
+        "AS source_artifact_bytes, "
+        "raw_observations.payload_json->'metadata'->>'source_acquired_at' "
+        "AS source_acquired_at, "
+        "(raw_observations.payload_json->'metadata'->>'acquisition_http_status')::int "
+        "AS acquisition_http_status, "
+        "raw_observations.payload_json->'metadata'->>'acquisition_content_type' "
+        "AS acquisition_content_type, "
+        "raw_observations.payload_json->'metadata'->>'acquisition_url_summary' "
+        "AS acquisition_url_summary "
+        "FROM raw_observations "
+        "JOIN repo ON repo.id = raw_observations.repository_id "
+        "WHERE raw_observations.payload_json->'metadata'->>'source_id_configured' "
+        "IS NOT NULL"
+        ")"
+    )
+
+
+def positive_limit(limit: int) -> int:
+    try:
+        parsed = int(limit)
+    except (TypeError, ValueError) as error:
+        raise StorageSchemaError("limit must be a positive integer") from error
+    if parsed < 1:
+        raise StorageSchemaError("limit must be a positive integer")
+    return parsed
+
+
 def file_upsert_sql(row: FileRow) -> str:
     return (
         "INSERT INTO files("
@@ -2624,6 +3311,292 @@ def raw_observation_reference_from_storage_payload(payload: Any) -> dict[str, An
     }
 
 
+def ingested_source_record_from_storage_payload(payload: Any) -> IngestedSourceRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed ingested source record")
+    return IngestedSourceRecord(
+        source_id=payload_text(payload, "source_id", label="ingested source record"),
+        source_type=payload_text(payload, "source_type", label="ingested source record"),
+        display_name=payload_optional_text(
+            payload,
+            "display_name",
+            label="ingested source record",
+        ),
+        policy_status=payload_text(
+            payload,
+            "policy_status",
+            label="ingested source record",
+        ),
+        latest_source_run_id=payload_optional_text(
+            payload,
+            "latest_source_run_id",
+            label="ingested source record",
+        ),
+        latest_artifact_id=payload_optional_text(
+            payload,
+            "latest_artifact_id",
+            label="ingested source record",
+        ),
+        latest_artifact_path=payload_optional_text(
+            payload,
+            "latest_artifact_path",
+            label="ingested source record",
+        ),
+        latest_acquired_at=payload_optional_text(
+            payload,
+            "latest_acquired_at",
+            label="ingested source record",
+        ),
+        feed_observation_count=payload_int(
+            payload,
+            "feed_observation_count",
+            label="ingested source record",
+        ),
+        canonical_feed_item_count=payload_int(
+            payload,
+            "canonical_feed_item_count",
+            label="ingested source record",
+        ),
+    )
+
+
+def source_summary_from_storage_payload(payload: Any) -> SourceSummaryRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed source summary")
+    return SourceSummaryRecord(
+        source_id=payload_text(payload, "source_id", label="source summary"),
+        source_type=payload_optional_text(
+            payload,
+            "source_type",
+            label="source summary",
+        )
+        or "unknown",
+        display_name=payload_optional_text(
+            payload,
+            "display_name",
+            label="source summary",
+        ),
+        policy_status=payload_text(payload, "policy_status", label="source summary"),
+        configured_url_summary=payload_optional_text(
+            payload,
+            "configured_url_summary",
+            label="source summary",
+        ),
+        latest_source_run_id=payload_optional_text(
+            payload,
+            "latest_source_run_id",
+            label="source summary",
+        ),
+        latest_artifact_id=payload_optional_text(
+            payload,
+            "latest_artifact_id",
+            label="source summary",
+        ),
+        latest_artifact_path=payload_optional_text(
+            payload,
+            "latest_artifact_path",
+            label="source summary",
+        ),
+        latest_acquired_at=payload_optional_text(
+            payload,
+            "latest_acquired_at",
+            label="source summary",
+        ),
+        feed_documents=payload_int(payload, "feed_documents", label="source summary"),
+        feed_channels=payload_int(payload, "feed_channels", label="source summary"),
+        feed_items=payload_int(payload, "feed_items", label="source summary"),
+        feed_authors=payload_int(payload, "feed_authors", label="source summary"),
+        feed_categories=payload_int(
+            payload,
+            "feed_categories",
+            label="source summary",
+        ),
+        link_references=payload_int(
+            payload,
+            "link_references",
+            label="source summary",
+        ),
+        enclosure_references=payload_int(
+            payload,
+            "enclosure_references",
+            label="source summary",
+        ),
+        parse_errors=payload_int(payload, "parse_errors", label="source summary"),
+        known_limitations=payload_string_tuple(
+            payload,
+            "known_limitations",
+            label="source summary",
+        ),
+    )
+
+
+def source_run_record_from_storage_payload(payload: Any) -> SourceRunRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed source run record")
+    return SourceRunRecord(
+        source_run_id=payload_text(payload, "source_run_id", label="source run record"),
+        acquired_at=payload_optional_text(
+            payload,
+            "acquired_at",
+            label="source run record",
+        ),
+        artifact_id=payload_optional_text(
+            payload,
+            "artifact_id",
+            label="source run record",
+        ),
+        artifact_path=payload_optional_text(
+            payload,
+            "artifact_path",
+            label="source run record",
+        ),
+        artifact_byte_length=payload_optional_int(
+            payload,
+            "artifact_byte_length",
+            label="source run record",
+        ),
+        artifact_sha256=payload_optional_text(
+            payload,
+            "artifact_sha256",
+            label="source run record",
+        ),
+        http_status=payload_optional_int(
+            payload,
+            "http_status",
+            label="source run record",
+        ),
+        content_type=payload_optional_text(
+            payload,
+            "content_type",
+            label="source run record",
+        ),
+        observation_count=payload_int(
+            payload,
+            "observation_count",
+            label="source run record",
+        ),
+        status_summary=payload_text(
+            payload,
+            "status_summary",
+            label="source run record",
+        ),
+    )
+
+
+def source_feed_item_record_from_storage_payload(payload: Any) -> SourceFeedItemRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed source feed item record")
+    return SourceFeedItemRecord(
+        item_key=payload_text(payload, "item_key", label="source feed item record"),
+        title=payload_optional_text(
+            payload,
+            "title",
+            label="source feed item record",
+        ),
+        published_at=payload_optional_text(
+            payload,
+            "published_at",
+            label="source feed item record",
+        ),
+        updated_at=payload_optional_text(
+            payload,
+            "updated_at",
+            label="source feed item record",
+        ),
+        identity_source=payload_optional_text(
+            payload,
+            "identity_source",
+            label="source feed item record",
+        ),
+        identity_strength=payload_optional_text(
+            payload,
+            "identity_strength",
+            label="source feed item record",
+        ),
+        duplicate_identity=payload_optional_bool(
+            payload,
+            "duplicate_identity",
+            label="source feed item record",
+        )
+        or False,
+        link_targets=payload_string_tuple(
+            payload,
+            "link_targets",
+            label="source feed item record",
+        ),
+        authors=payload_string_tuple(
+            payload,
+            "authors",
+            label="source feed item record",
+        ),
+        categories=payload_string_tuple(
+            payload,
+            "categories",
+            label="source feed item record",
+        ),
+        source_run_id=payload_optional_text(
+            payload,
+            "source_run_id",
+            label="source feed item record",
+        ),
+        artifact_id=payload_optional_text(
+            payload,
+            "artifact_id",
+            label="source feed item record",
+        ),
+        artifact_path=payload_optional_text(
+            payload,
+            "artifact_path",
+            label="source feed item record",
+        ),
+    )
+
+
+def source_reference_record_from_storage_payload(payload: Any) -> SourceReferenceRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed source reference record")
+    return SourceReferenceRecord(
+        source_item_key=payload_text(
+            payload,
+            "source_item_key",
+            label="source reference record",
+        ),
+        relation=payload_text(payload, "relation", label="source reference record"),
+        target_key=payload_text(payload, "target_key", label="source reference record"),
+        target_display=payload_optional_text(
+            payload,
+            "target_display",
+            label="source reference record",
+        ),
+        not_fetched=payload_optional_bool(
+            payload,
+            "not_fetched",
+            label="source reference record",
+        )
+        or False,
+        media_type=payload_optional_text(
+            payload,
+            "media_type",
+            label="source reference record",
+        ),
+        source_run_id=payload_optional_text(
+            payload,
+            "source_run_id",
+            label="source reference record",
+        ),
+        artifact_id=payload_optional_text(
+            payload,
+            "artifact_id",
+            label="source reference record",
+        ),
+        artifact_path=payload_optional_text(
+            payload,
+            "artifact_path",
+            label="source reference record",
+        ),
+    )
+
+
 def host_mutator_record_from_storage_payload(payload: Any) -> HostMutatorRecord:
     if not isinstance(payload, dict):
         raise StorageSchemaError("psql returned a malformed host-mutator record")
@@ -2851,6 +3824,34 @@ def canonical_storage_summary_to_jsonable(
     record: CanonicalStorageSummaryRecord,
 ) -> dict[str, Any]:
     return record.to_dict()
+
+
+def ingested_source_records_to_jsonable(
+    records: Sequence[IngestedSourceRecord],
+) -> list[dict[str, Any]]:
+    return [record.to_dict() for record in records]
+
+
+def source_summary_to_jsonable(record: SourceSummaryRecord) -> dict[str, Any]:
+    return record.to_dict()
+
+
+def source_run_records_to_jsonable(
+    records: Sequence[SourceRunRecord],
+) -> list[dict[str, Any]]:
+    return [record.to_dict() for record in records]
+
+
+def source_feed_item_records_to_jsonable(
+    records: Sequence[SourceFeedItemRecord],
+) -> list[dict[str, Any]]:
+    return [record.to_dict() for record in records]
+
+
+def source_reference_records_to_jsonable(
+    records: Sequence[SourceReferenceRecord],
+) -> list[dict[str, Any]]:
+    return [record.to_dict() for record in records]
 
 
 def format_file_node_table(records: Sequence[FileNodeRecord]) -> str:
@@ -3257,6 +4258,17 @@ def payload_bool(
     payload: dict[str, Any], key: str, *, label: str = "file record"
 ) -> bool:
     value = payload.get(key)
+    if not isinstance(value, bool):
+        raise StorageSchemaError(f"psql returned a malformed {label}: {key}")
+    return value
+
+
+def payload_optional_bool(
+    payload: dict[str, Any], key: str, *, label: str = "file record"
+) -> bool | None:
+    value = payload.get(key)
+    if value is None:
+        return None
     if not isinstance(value, bool):
         raise StorageSchemaError(f"psql returned a malformed {label}: {key}")
     return value

@@ -17,6 +17,7 @@ from repomap_kg.cli import (
     canonical_node_kind_from_args,
 )
 from repomap_kg.graph_keys import GRAPH_KEY_VERSION
+from repomap_kg.graph_keys import parse_key
 from repomap_kg.storage import (
     StorageSchemaError,
     canonical_edge_explanation_to_jsonable,
@@ -24,11 +25,22 @@ from repomap_kg.storage import (
     canonical_neighborhood_to_jsonable,
     canonical_node_records_to_jsonable,
     identity_metadata_hash,
+    ingested_source_records_to_jsonable,
     query_canonical_edge_explanation,
     query_canonical_edge_records,
     query_canonical_neighborhood,
     query_canonical_node_records,
+    query_ingested_source_records,
+    query_source_feed_item_explanation,
+    query_source_feed_item_records,
+    query_source_reference_records,
+    query_source_run_records,
+    query_source_summary,
     query_storage_summary,
+    source_feed_item_records_to_jsonable,
+    source_reference_records_to_jsonable,
+    source_run_records_to_jsonable,
+    source_summary_to_jsonable,
 )
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
@@ -385,6 +397,208 @@ def repomap_canonical_neighborhood(
     return canonical_neighborhood_to_jsonable(record)
 
 
+def repomap_ingested_sources(
+    *,
+    root_path: str | None = None,
+    project: str | None = None,
+    pg_database: str | None = None,
+    pg_host: str | None = None,
+    pg_port: str | int | None = None,
+    pg_user: str | None = None,
+    psql_command: str | None = None,
+    source_type: str | None = None,
+    policy_status: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    connection = storage_connection(
+        root_path=root_path,
+        project=project,
+        pg_database=pg_database,
+        pg_host=pg_host,
+        pg_port=pg_port,
+        pg_user=pg_user,
+        psql_command=psql_command,
+    )
+    validate_optional_text_filter(source_type, "source_type")
+    validate_optional_text_filter(policy_status, "policy_status")
+    records = query_ingested_source_records(
+        connection.psql_args(),
+        root_path=connection.root_path,
+        source_type=source_type,
+        policy_status=policy_status,
+        limit=validate_limit(limit),
+        psql_command=connection.psql_command,
+    )
+    return ingested_source_records_to_jsonable(records)
+
+
+def repomap_source_summary(
+    *,
+    source_id: str,
+    root_path: str | None = None,
+    project: str | None = None,
+    pg_database: str | None = None,
+    pg_host: str | None = None,
+    pg_port: str | int | None = None,
+    pg_user: str | None = None,
+    psql_command: str | None = None,
+) -> dict[str, Any]:
+    connection = storage_connection(
+        root_path=root_path,
+        project=project,
+        pg_database=pg_database,
+        pg_host=pg_host,
+        pg_port=pg_port,
+        pg_user=pg_user,
+        psql_command=psql_command,
+    )
+    valid_source_id = validate_source_id_arg(source_id)
+    return source_summary_to_jsonable(
+        query_source_summary(
+            connection.psql_args(),
+            root_path=connection.root_path,
+            source_id=valid_source_id,
+            psql_command=connection.psql_command,
+        )
+    )
+
+
+def repomap_source_runs(
+    *,
+    source_id: str,
+    root_path: str | None = None,
+    project: str | None = None,
+    pg_database: str | None = None,
+    pg_host: str | None = None,
+    pg_port: str | int | None = None,
+    pg_user: str | None = None,
+    psql_command: str | None = None,
+    limit: int = 25,
+) -> list[dict[str, Any]]:
+    connection = storage_connection(
+        root_path=root_path,
+        project=project,
+        pg_database=pg_database,
+        pg_host=pg_host,
+        pg_port=pg_port,
+        pg_user=pg_user,
+        psql_command=psql_command,
+    )
+    records = query_source_run_records(
+        connection.psql_args(),
+        root_path=connection.root_path,
+        source_id=validate_source_id_arg(source_id),
+        limit=validate_limit(limit),
+        psql_command=connection.psql_command,
+    )
+    return source_run_records_to_jsonable(records)
+
+
+def repomap_source_feed_items(
+    *,
+    source_id: str,
+    root_path: str | None = None,
+    project: str | None = None,
+    pg_database: str | None = None,
+    pg_host: str | None = None,
+    pg_port: str | int | None = None,
+    pg_user: str | None = None,
+    psql_command: str | None = None,
+    source_run_id: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    connection = storage_connection(
+        root_path=root_path,
+        project=project,
+        pg_database=pg_database,
+        pg_host=pg_host,
+        pg_port=pg_port,
+        pg_user=pg_user,
+        psql_command=psql_command,
+    )
+    validate_optional_text_filter(source_run_id, "source_run_id")
+    records = query_source_feed_item_records(
+        connection.psql_args(),
+        root_path=connection.root_path,
+        source_id=validate_source_id_arg(source_id),
+        source_run_id=source_run_id,
+        limit=validate_limit(limit),
+        psql_command=connection.psql_command,
+    )
+    return source_feed_item_records_to_jsonable(records)
+
+
+def repomap_explain_source_feed_item(
+    *,
+    item_key: str,
+    root_path: str | None = None,
+    project: str | None = None,
+    pg_database: str | None = None,
+    pg_host: str | None = None,
+    pg_port: str | int | None = None,
+    pg_user: str | None = None,
+    psql_command: str | None = None,
+    source_id: str | None = None,
+) -> dict[str, Any]:
+    connection = storage_connection(
+        root_path=root_path,
+        project=project,
+        pg_database=pg_database,
+        pg_host=pg_host,
+        pg_port=pg_port,
+        pg_user=pg_user,
+        psql_command=psql_command,
+    )
+    validate_feed_item_key(item_key)
+    validated_source_id = (
+        validate_source_id_arg(source_id) if source_id is not None else None
+    )
+    return query_source_feed_item_explanation(
+        connection.psql_args(),
+        root_path=connection.root_path,
+        item_key=item_key,
+        source_id=validated_source_id,
+        psql_command=connection.psql_command,
+    )
+
+
+def repomap_source_references(
+    *,
+    source_id: str,
+    root_path: str | None = None,
+    project: str | None = None,
+    pg_database: str | None = None,
+    pg_host: str | None = None,
+    pg_port: str | int | None = None,
+    pg_user: str | None = None,
+    psql_command: str | None = None,
+    source_run_id: str | None = None,
+    target_kind: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    connection = storage_connection(
+        root_path=root_path,
+        project=project,
+        pg_database=pg_database,
+        pg_host=pg_host,
+        pg_port=pg_port,
+        pg_user=pg_user,
+        psql_command=psql_command,
+    )
+    validate_optional_text_filter(source_run_id, "source_run_id")
+    validate_optional_text_filter(target_kind, "target_kind")
+    records = query_source_reference_records(
+        connection.psql_args(),
+        root_path=connection.root_path,
+        source_id=validate_source_id_arg(source_id),
+        source_run_id=source_run_id,
+        target_kind=target_kind,
+        limit=validate_limit(limit),
+        psql_command=connection.psql_command,
+    )
+    return source_reference_records_to_jsonable(records)
+
+
 def storage_connection(
     *,
     root_path: str | None = None,
@@ -532,6 +746,43 @@ def validate_canonical_neighborhood_args(
         raise RepoMapMcpError(str(error)) from error
 
 
+def validate_source_id_arg(source_id: str) -> str:
+    value = require_non_blank(source_id, "source_id")
+    if "://" in value:
+        raise RepoMapMcpError("source_id must not be a URL")
+    if any(character.isspace() for character in value):
+        raise RepoMapMcpError("source_id must not contain whitespace")
+    return value
+
+
+def validate_feed_item_key(item_key: str) -> None:
+    value = require_non_blank(item_key, "item_key")
+    try:
+        parsed = parse_key(value)
+    except Exception as error:
+        raise RepoMapMcpError(f"invalid feed item canonical key: {error}") from error
+    if parsed.namespace != "feed.item":
+        raise RepoMapMcpError("item_key must use the feed.item namespace")
+
+
+def validate_limit(limit: int) -> int:
+    try:
+        value = int(limit)
+    except (TypeError, ValueError) as error:
+        raise RepoMapMcpError("limit must be a positive integer") from error
+    if value < 1 or value > 500:
+        raise RepoMapMcpError("limit must be between 1 and 500")
+    return value
+
+
+def validate_optional_text_filter(value: str | None, label: str) -> None:
+    if value is None:
+        return
+    require_non_blank(value, label)
+    if "://" in value:
+        raise RepoMapMcpError(f"{label} must not be a URL")
+
+
 def validate_identity_metadata(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
@@ -641,6 +892,60 @@ def tool_definitions() -> list[dict[str, Any]]:
             },
             required=("node",),
         ),
+        tool_definition(
+            "repomap_ingested_sources",
+            "List read-only RSS2-ingested source summaries from RepoMap storage.",
+            {
+                "source_type": {"type": "string"},
+                "policy_status": {"type": "string"},
+                "limit": {"type": "integer", "default": 50},
+            },
+        ),
+        tool_definition(
+            "repomap_source_summary",
+            "Show safe metadata and feed graph counts for one ingested source.",
+            {"source_id": {"type": "string"}},
+            required=("source_id",),
+        ),
+        tool_definition(
+            "repomap_source_runs",
+            "List read-only ingestion runs inferred from RSS2 source metadata.",
+            {
+                "source_id": {"type": "string"},
+                "limit": {"type": "integer", "default": 25},
+            },
+            required=("source_id",),
+        ),
+        tool_definition(
+            "repomap_source_feed_items",
+            "List canonical feed items for one already-ingested source.",
+            {
+                "source_id": {"type": "string"},
+                "source_run_id": {"type": "string"},
+                "limit": {"type": "integer", "default": 50},
+            },
+            required=("source_id",),
+        ),
+        tool_definition(
+            "repomap_explain_source_feed_item",
+            "Explain one canonical feed item from stored evidence only.",
+            {
+                "item_key": {"type": "string"},
+                "source_id": {"type": "string"},
+            },
+            required=("item_key",),
+        ),
+        tool_definition(
+            "repomap_source_references",
+            "List not-fetched references from feed items for one ingested source.",
+            {
+                "source_id": {"type": "string"},
+                "source_run_id": {"type": "string"},
+                "target_kind": {"type": "string"},
+                "limit": {"type": "integer", "default": 50},
+            },
+            required=("source_id",),
+        ),
     ]
 
 
@@ -679,6 +984,12 @@ TOOL_FUNCTIONS: dict[str, str] = {
     "repomap_canonical_edges": "repomap_canonical_edges",
     "repomap_explain_canonical_edge": "repomap_explain_canonical_edge",
     "repomap_canonical_neighborhood": "repomap_canonical_neighborhood",
+    "repomap_ingested_sources": "repomap_ingested_sources",
+    "repomap_source_summary": "repomap_source_summary",
+    "repomap_source_runs": "repomap_source_runs",
+    "repomap_source_feed_items": "repomap_source_feed_items",
+    "repomap_explain_source_feed_item": "repomap_explain_source_feed_item",
+    "repomap_source_references": "repomap_source_references",
 }
 
 

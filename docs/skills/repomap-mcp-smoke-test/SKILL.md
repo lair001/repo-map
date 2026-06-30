@@ -46,6 +46,15 @@ Call these tools and summarize whether each call succeeded:
 5. repomap_explain_canonical_edge for a known canonical edge
 6. repomap_canonical_neighborhood for a known node
 
+If the graph includes RSS2-ingested feed source artifacts, also call:
+7. repomap_ingested_sources
+8. repomap_source_summary for a known source_id
+9. repomap_source_feed_items for that source_id
+10. repomap_source_references for that source_id
+
+Do not call any ingestion, fetch, load, discovery, scheduler, source-editing, or
+arbitrary URL tool through MCP.
+
 Return a concise report with concrete counts and exact error text for failures.
 ```
 
@@ -64,6 +73,10 @@ The smoke test passes only when all of these succeed:
 - `repomap_explain_canonical_edge` finds a known edge and returns evidence.
 - `repomap_canonical_neighborhood` returns a center node and adjacent graph
   structure.
+- If RSS2 source data is expected, `repomap_ingested_sources`,
+  `repomap_source_summary`, `repomap_source_feed_items`, and
+  `repomap_source_references` return stored source/feed metadata without
+  fetching anything.
 
 ## Approval and Session Gotchas
 

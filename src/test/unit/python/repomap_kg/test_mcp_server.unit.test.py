@@ -11,6 +11,11 @@ from repomap_kg.storage import (
     CanonicalEdgeRecord,
     CanonicalNeighborhoodRecord,
     CanonicalNodeRecord,
+    IngestedSourceRecord,
+    SourceFeedItemRecord,
+    SourceReferenceRecord,
+    SourceRunRecord,
+    SourceSummaryRecord,
     StorageSummaryRecord,
     identity_metadata_hash,
 )
@@ -707,7 +712,191 @@ class McpServerUnitTests(unittest.TestCase):
 
         query.assert_not_called()
 
-    def test_mcp_tools_list_contains_only_read_only_m1_tools(self):
+    def test_source_feed_mcp_tools_are_read_only_and_project_scoped(self):
+        from repomap_kg.mcp_server import (
+            repomap_explain_source_feed_item,
+            repomap_ingested_sources,
+            repomap_source_feed_items,
+            repomap_source_references,
+            repomap_source_runs,
+            repomap_source_summary,
+        )
+
+        config_path = self.write_mcp_config(
+            {
+                "default_project": "repo-map",
+                "projects": {
+                    "repo-map": {
+                        "root_path": "/Users/slair/projs/repo-map",
+                        "pg_database": "repomap_repo_map",
+                    },
+                },
+            }
+        )
+        item_key = (
+            "feed.item:feed.channel%3Afeed.document%253Afile%25253Arss.xml%3Aself:item-1"
+        )
+        with patch.dict("os.environ", {"REPOMAP_MCP_CONFIG": str(config_path)}):
+            with patch(
+                "repomap_kg.mcp_server.query_ingested_source_records",
+                return_value=(
+                    IngestedSourceRecord(
+                        source_id="example-news-feed",
+                        source_type="feed.rss",
+                        display_name="Example News Feed",
+                        policy_status="allowed_with_limits",
+                        latest_source_run_id="20260630T120000Z",
+                        latest_artifact_id="abc123",
+                        latest_artifact_path=".repomap/source-artifacts/example/rss.xml",
+                        latest_acquired_at="2026-06-30T12:00:00Z",
+                        feed_observation_count=8,
+                        canonical_feed_item_count=2,
+                    ),
+                ),
+            ) as sources_query:
+                sources_payload = repomap_ingested_sources(source_type="feed.rss")
+            with patch(
+                "repomap_kg.mcp_server.query_source_summary",
+                return_value=SourceSummaryRecord(
+                    source_id="example-news-feed",
+                    source_type="feed.rss",
+                    display_name="Example News Feed",
+                    policy_status="allowed_with_limits",
+                    configured_url_summary="https://example.invalid/feed.xml",
+                    latest_source_run_id="20260630T120000Z",
+                    latest_artifact_id="abc123",
+                    latest_artifact_path=".repomap/source-artifacts/example/rss.xml",
+                    latest_acquired_at="2026-06-30T12:00:00Z",
+                    feed_documents=1,
+                    feed_channels=1,
+                    feed_items=2,
+                    feed_authors=1,
+                    feed_categories=2,
+                    link_references=2,
+                    enclosure_references=1,
+                    parse_errors=0,
+                    known_limitations=("source metadata is inferred from RSS2 evidence",),
+                ),
+            ) as summary_query:
+                summary_payload = repomap_source_summary(
+                    source_id="example-news-feed",
+                )
+            with patch(
+                "repomap_kg.mcp_server.query_source_run_records",
+                return_value=(
+                    SourceRunRecord(
+                        source_run_id="20260630T120000Z",
+                        acquired_at="2026-06-30T12:00:00Z",
+                        artifact_id="abc123",
+                        artifact_path=".repomap/source-artifacts/example/rss.xml",
+                        artifact_byte_length=512,
+                        artifact_sha256="0" * 64,
+                        http_status=200,
+                        content_type="application/rss+xml",
+                        observation_count=8,
+                        status_summary="ok",
+                    ),
+                ),
+            ) as runs_query:
+                runs_payload = repomap_source_runs(source_id="example-news-feed")
+            with patch(
+                "repomap_kg.mcp_server.query_source_feed_item_records",
+                return_value=(
+                    SourceFeedItemRecord(
+                        item_key=item_key,
+                        title="Release note",
+                        published_at="2026-06-30T12:00:00Z",
+                        updated_at=None,
+                        identity_source="guid",
+                        identity_strength="strong",
+                        duplicate_identity=False,
+                        link_targets=(),
+                        authors=("Example Author",),
+                        categories=("release",),
+                        source_run_id="20260630T120000Z",
+                        artifact_id="abc123",
+                        artifact_path=".repomap/source-artifacts/example/rss.xml",
+                    ),
+                ),
+            ) as items_query:
+                items_payload = repomap_source_feed_items(
+                    source_id="example-news-feed",
+                )
+            with patch(
+                "repomap_kg.mcp_server.query_source_reference_records",
+                return_value=(
+                    SourceReferenceRecord(
+                        source_item_key=item_key,
+                        relation="references",
+                        target_key="external.url:https%3A%2F%2Fexample.invalid%2Fitems%2F1",
+                        target_display="https://example.invalid/items/1",
+                        not_fetched=True,
+                        media_type=None,
+                        source_run_id="20260630T120000Z",
+                        artifact_id="abc123",
+                        artifact_path=".repomap/source-artifacts/example/rss.xml",
+                    ),
+                ),
+            ) as references_query:
+                references_payload = repomap_source_references(
+                    source_id="example-news-feed",
+                    target_kind="external.url",
+                )
+            with patch(
+                "repomap_kg.mcp_server.query_source_feed_item_explanation",
+                return_value={
+                    "item": {"canonical_key": item_key, "kind": "feed.item"},
+                    "source": {"source_id": "example-news-feed"},
+                    "evidence": [],
+                    "references": [],
+                    "content_policy": "full feed bodies are not exposed",
+                },
+            ) as explain_query:
+                explanation_payload = repomap_explain_source_feed_item(
+                    item_key=item_key,
+                )
+
+        self.assertEqual(sources_payload[0]["source_id"], "example-news-feed")
+        self.assertEqual(summary_payload["feed_items"], 2)
+        self.assertEqual(runs_payload[0]["source_run_id"], "20260630T120000Z")
+        self.assertEqual(items_payload[0]["item_key"], item_key)
+        self.assertTrue(references_payload[0]["not_fetched"])
+        self.assertEqual(explanation_payload["item"]["canonical_key"], item_key)
+        self.assertEqual(sources_query.call_args.args[0], ["-d", "repomap_repo_map"])
+        self.assertEqual(sources_query.call_args.kwargs["root_path"], "/Users/slair/projs/repo-map")
+        self.assertEqual(summary_query.call_args.kwargs["source_id"], "example-news-feed")
+        self.assertEqual(runs_query.call_args.kwargs["source_id"], "example-news-feed")
+        self.assertEqual(items_query.call_args.kwargs["source_id"], "example-news-feed")
+        self.assertEqual(references_query.call_args.kwargs["target_kind"], "external.url")
+        self.assertEqual(explain_query.call_args.kwargs["item_key"], item_key)
+
+    def test_source_feed_mcp_tools_reject_arbitrary_url_inputs(self):
+        from repomap_kg.mcp_server import RepoMapMcpError, tool_input_schema
+
+        for name in (
+            "repomap_ingested_sources",
+            "repomap_source_summary",
+            "repomap_source_runs",
+            "repomap_source_feed_items",
+            "repomap_explain_source_feed_item",
+            "repomap_source_references",
+        ):
+            with self.subTest(tool=name):
+                schema = tool_input_schema(name)
+                self.assertNotIn("url", schema["properties"])
+                self.assertNotIn("feed_url", schema["properties"])
+                self.assertNotIn("config_path", schema["properties"])
+
+        from repomap_kg.mcp_server import repomap_source_summary
+
+        with self.assertRaisesRegex(RepoMapMcpError, "source_id must not be a URL"):
+            repomap_source_summary(
+                root_path="/tmp/fixture",
+                pg_database="postgres",
+                source_id="https://example.invalid/feed.xml",
+            )
+
+    def test_mcp_tools_list_contains_only_read_only_tools(self):
         from repomap_kg.mcp_server import tool_definitions
 
         names = [tool["name"] for tool in tool_definitions()]
@@ -721,12 +910,21 @@ class McpServerUnitTests(unittest.TestCase):
                 "repomap_canonical_edges",
                 "repomap_explain_canonical_edge",
                 "repomap_canonical_neighborhood",
+                "repomap_ingested_sources",
+                "repomap_source_summary",
+                "repomap_source_runs",
+                "repomap_source_feed_items",
+                "repomap_explain_source_feed_item",
+                "repomap_source_references",
             ],
         )
         serialized = json.dumps(tool_definitions(), sort_keys=True)
         self.assertNotIn("discover", serialized)
         self.assertNotIn("load-files", serialized)
+        self.assertNotIn("ingest-feed", serialized)
+        self.assertNotIn("fetch-feed", serialized)
         self.assertNotIn("write", serialized)
+        self.assertNotIn("url", serialized)
 
     def test_mcp_tool_schemas_do_not_expose_psql_command(self):
         from repomap_kg.mcp_server import tool_definitions
