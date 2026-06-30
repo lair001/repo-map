@@ -11,6 +11,7 @@ from typing import Any
 from repomap_kg import __version__
 from repomap_kg.config_extractor import extract_config_file_observations
 from repomap_kg.css import extract_css_file_observations
+from repomap_kg.css_html_matching import extract_css_selector_match_observations
 from repomap_kg.html import extract_html_file_observations
 from repomap_kg.markdown import (
     extract_markdown_file_observations,
@@ -184,6 +185,7 @@ def discover_observations(
                     file_info.path,
                 )
             )
+    observations.extend(extract_css_selector_match_observations(observations))
     return observations
 
 

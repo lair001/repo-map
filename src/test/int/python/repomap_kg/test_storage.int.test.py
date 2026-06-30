@@ -3121,6 +3121,140 @@ FROM canonical_edges;
         self.assertNotIn("fixture-secret-token", explain_stdout)
         self.assertNotIn("PHNlY3JldD4=", explain_stdout)
 
+    def test_storage_loads_css_html_selector_matches_into_canonical_readback(self):
+        require_postgres_binaries()
+        fixture_root = discovery_fixture("css_html_matching_basic")
+
+        discover_exit_code, discover_stdout, discover_stderr = (
+            run_repo_map_in_process(
+                "discover",
+                str(fixture_root),
+                "--jsonl",
+            )
+        )
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as jsonl_file:
+            jsonl_file.write(discover_stdout)
+            jsonl_file.flush()
+
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                storage_args = (
+                    "--root-path",
+                    str(fixture_root),
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                )
+                load_exit_code, _load_stdout, load_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "load-files",
+                        jsonl_file.name,
+                        "--repository-name",
+                        "css-html-matching-fixture",
+                        *storage_args,
+                        "--json",
+                    )
+                )
+
+                def canonical_edges(kind):
+                    return run_repo_map_in_process(
+                        "storage",
+                        "canonical-edges",
+                        *storage_args,
+                        "--kind",
+                        kind,
+                        "--json",
+                    )
+
+                styles_exit, styles_stdout, styles_stderr = canonical_edges("styles")
+                explain_exit, explain_stdout, explain_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "explain-canonical-edge",
+                        *storage_args,
+                        "--source-key",
+                        (
+                            "css.selector:"
+                            "file%3Astatic%2Freport.css:"
+                            "%2Frule%3A1%2Fselector%3A1"
+                        ),
+                        "--kind",
+                        "styles",
+                        "--target-key",
+                        (
+                            "html.element:"
+                            "file%3Aindex.html:"
+                            "%2Fhtml%2Fbody%2Fheader%2Fspan"
+                        ),
+                        "--json",
+                    )
+                )
+
+        self.assertEqual(discover_exit_code, 0, discover_stderr)
+        discovered = [
+            json.loads(line)
+            for line in discover_stdout.splitlines()
+            if line.strip()
+        ]
+        self.assertIn(
+            "css.selector_match",
+            {record["kind"] for record in discovered},
+        )
+        self.assertFalse(
+            any(
+                record["kind"] == "css.selector_match"
+                and record["metadata"]["css_file"] == "static/unlinked.css"
+                for record in discovered
+            )
+        )
+        self.assertEqual(load_exit_code, 0, load_stderr)
+
+        self.assertEqual(styles_exit, 0, styles_stderr)
+        style_edges = json.loads(styles_stdout)
+        style_pairs = {
+            (record["source_key"], record["target_key"])
+            for record in style_edges
+        }
+        self.assertIn(
+            (
+                (
+                    "css.selector:"
+                    "file%3Astatic%2Freport.css:"
+                    "%2Frule%3A1%2Fselector%3A1"
+                ),
+                (
+                    "html.element:"
+                    "file%3Aindex.html:"
+                    "%2Fhtml%2Fbody%2Fheader%2Fspan"
+                ),
+            ),
+            style_pairs,
+        )
+        self.assertTrue(
+            all(record["metadata"]["not_runtime_style_observed"] for record in style_edges)
+        )
+
+        self.assertEqual(explain_exit, 0, explain_stderr)
+        explanation = json.loads(explain_stdout)
+        self.assertEqual(explanation["edge"]["edge_kind"], "styles")
+        self.assertEqual(
+            explanation["evidence"][0]["raw_observation"]["kind"],
+            "css.selector_match",
+        )
+        self.assertTrue(explanation["edge"]["metadata"]["not_runtime_style_observed"])
+
     def test_storage_loads_codex_mcp_config_dogfood_into_canonical_readback(self):
         require_postgres_binaries()
         fixture_root = discovery_fixture("config_codex_mcp_dogfood")

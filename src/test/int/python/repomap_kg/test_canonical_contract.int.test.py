@@ -18,6 +18,7 @@ from repomap_kg.canonical_diagnostics import CanonicalizationDiagnostic
 from repomap_kg.canonicalization import canonicalize_observations
 from repomap_kg.config_extractor import extract_config_file_observations
 from repomap_kg.css import extract_css_file_observations
+from repomap_kg.css_html_matching import extract_css_selector_match_observations
 from repomap_kg.discovery import extract_css_file_observations_from_file
 from repomap_kg.graph_keys import (
     GRAPH_KEY_VERSION,
@@ -935,6 +936,226 @@ main[role="main"] > .tree-grid .row + .row {
             ),
             edge_keys,
         )
+
+    def test_css_html_selector_matching_and_canonicalization_contract(self):
+        html_observations = extract_html_file_observations(
+            "index.html",
+            """<!doctype html>
+<html>
+  <head>
+    <link rel="stylesheet" href="static/report.css">
+    <link rel="stylesheet" href="https://example.com/remote.css">
+  </head>
+  <body>
+    <header class="report-header">
+      <span class="status-badge status-passed">Passed</span>
+    </header>
+    <main id="welcome">
+      <a class="external" href="https://example.com/docs">Docs</a>
+      <h1 id="heading">Heading</h1>
+      <div id="dup" class="status-badge">dup one</div>
+      <div id="dup">dup two</div>
+      <script>window.generated = true;</script>
+    </main>
+  </body>
+</html>
+""",
+        )
+        css_observations = extract_css_file_observations(
+            "static/report.css",
+            """.status-badge,
+#welcome,
+#heading,
+a.external,
+.status-badge.status-passed,
+.report-header .status-badge,
+.a > .b,
+.status-badge:hover,
+#dup {
+  color: #f8fafc;
+}
+""",
+        )
+        observations = html_observations + css_observations
+        matches = extract_css_selector_match_observations(observations)
+        result = canonicalize_observations(observations + matches)
+        payload = result.to_dict()
+
+        self.assertTrue(matches)
+        self.assertTrue(all(item.kind == "css.selector_match" for item in matches))
+        self.assertTrue(
+            all(item.metadata["not_runtime_style"] is True for item in matches)
+        )
+        self.assertNotIn(
+            ".status-badge:hover",
+            {item.metadata["selector_text"] for item in matches},
+        )
+        self.assertNotIn("#dup", {item.metadata["selector_text"] for item in matches})
+        self.assertTrue(result.ok)
+        styles = [edge for edge in payload["edges"] if edge["kind"] == "styles"]
+        self.assertTrue(styles)
+        self.assertIn(
+            (
+                (
+                    "css.selector:"
+                    "file%3Astatic%2Freport.css:"
+                    "%2Frule%3A1%2Fselector%3A1"
+                ),
+                (
+                    "html.element:"
+                    "file%3Aindex.html:"
+                    "%2Fhtml%2Fbody%2Fheader%2Fspan"
+                ),
+            ),
+            {(edge["source_key"], edge["target_key"]) for edge in styles},
+        )
+        self.assertIn(
+            "html.anchor:file%3Aindex.html:heading",
+            {edge["target_key"] for edge in styles},
+        )
+        self.assertTrue(
+            all(edge["metadata"]["not_runtime_style_observed"] for edge in styles)
+        )
+
+    def test_css_html_selector_matching_skip_contracts(self):
+        self.assertEqual(extract_css_selector_match_observations(()), ())
+
+        observations = (
+            RawObservation(
+                kind="html.asset",
+                source_id="index.html#stylesheet:local",
+                path="index.html",
+                target="file:static/report.css",
+                confidence="extracted",
+                extractor="repo-html",
+                extractor_version="0.1.0",
+                metadata={"tag": "link", "attribute": "href"},
+            ),
+            RawObservation(
+                kind="html.asset",
+                source_id="index.html#stylesheet:remote",
+                path="index.html",
+                target="external.url:https%3A%2F%2Fexample.com%2Fremote.css",
+                confidence="extracted",
+                extractor="repo-html",
+                extractor_version="0.1.0",
+                metadata={"tag": "link", "attribute": "href"},
+            ),
+            RawObservation(
+                kind="html.asset",
+                source_id="index.html#stylesheet:bad-key",
+                path="index.html",
+                target="bad%zz",
+                confidence="extracted",
+                extractor="repo-html",
+                extractor_version="0.1.0",
+                metadata={"tag": "link", "attribute": "href"},
+            ),
+            RawObservation(
+                kind="html.asset",
+                source_id="index.html#stylesheet:not-css",
+                path="index.html",
+                target="file:static/not-css.txt",
+                confidence="extracted",
+                extractor="repo-html",
+                extractor_version="0.1.0",
+                metadata={"tag": "link", "attribute": "href"},
+            ),
+            RawObservation(
+                kind="css.selector",
+                source_id="static/report.css#selector:missing",
+                path="static/report.css",
+                target=(
+                    "css.selector:"
+                    "file%3Astatic%2Freport.css:"
+                    "%2Frule%3A1%2Fselector%3A1"
+                ),
+                confidence="extracted",
+                extractor="repo-css",
+                extractor_version="0.1.0",
+                metadata={
+                    "selector_pointer": "/rule:1/selector:1",
+                    "selector_text": ".missing",
+                },
+            ),
+            RawObservation(
+                kind="css.selector",
+                source_id="static/report.css#selector:malformed",
+                path="static/report.css",
+                target="bad%zz",
+                confidence="extracted",
+                extractor="repo-css",
+                extractor_version="0.1.0",
+                metadata={
+                    "selector_pointer": "/rule:1/selector:2",
+                    "selector_text": ".missing",
+                },
+            ),
+            RawObservation(
+                kind="css.selector",
+                source_id="static/report.css#selector:not-selector",
+                path="static/report.css",
+                target="file:static/report.css",
+                confidence="extracted",
+                extractor="repo-css",
+                extractor_version="0.1.0",
+                metadata={
+                    "selector_pointer": "/rule:1/selector:3",
+                    "selector_text": ".missing",
+                },
+            ),
+            RawObservation(
+                kind="css.selector",
+                source_id="static/report.css#selector:missing-text",
+                path="static/report.css",
+                target=(
+                    "css.selector:"
+                    "file%3Astatic%2Freport.css:"
+                    "%2Frule%3A1%2Fselector%3A4"
+                ),
+                confidence="extracted",
+                extractor="repo-css",
+                extractor_version="0.1.0",
+                metadata={"selector_pointer": "/rule:1/selector:4"},
+            ),
+            RawObservation(
+                kind="html.element",
+                source_id="index.html#element:div",
+                path="index.html",
+                confidence="extracted",
+                extractor="repo-html",
+                extractor_version="0.1.0",
+                metadata={
+                    "pointer": "/html/body/div",
+                    "tag": "div",
+                    "classes": "not-a-list",
+                },
+            ),
+            RawObservation(
+                kind="html.element",
+                source_id="index.html#element:missing-pointer",
+                path="index.html",
+                confidence="extracted",
+                extractor="repo-html",
+                extractor_version="0.1.0",
+                metadata={"tag": "div"},
+            ),
+            RawObservation(
+                kind="html.heading",
+                source_id="index.html#heading:bad-anchor",
+                path="index.html",
+                target="bad%zz",
+                confidence="extracted",
+                extractor="repo-html",
+                extractor_version="0.1.0",
+                metadata={
+                    "source_element_pointer": "/html/body/h1",
+                    "id_is_unique": True,
+                },
+            ),
+        )
+
+        self.assertEqual(extract_css_selector_match_observations(observations), ())
 
     def test_static_html_canonicalization_error_and_placeholder_contracts(self):
         warning_result = canonicalize_observations(

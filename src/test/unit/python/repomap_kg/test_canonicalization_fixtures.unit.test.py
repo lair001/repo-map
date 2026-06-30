@@ -37,6 +37,7 @@ class CanonicalizationFixtureTests(unittest.TestCase):
             "xml_plist_chrome_policy_basic",
             "html_static_basic",
             "css_static_basic",
+            "css_html_matching_basic",
         )
 
         for fixture_name in fixture_names:
