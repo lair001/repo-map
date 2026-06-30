@@ -2897,7 +2897,7 @@ class CliUnitTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("psql did not return host-mutators", stderr.getvalue())
 
-    def test_storage_summary_prints_json_record(self):
+    def test_storage_summary_legacy_prints_json_record(self):
         summary = StorageSummaryRecord(
             root_path="/tmp/fixture",
             repository_id=7,
@@ -2920,6 +2920,7 @@ class CliUnitTests(unittest.TestCase):
                     [
                         "storage",
                         "summary",
+                        "--legacy",
                         "--root-path",
                         "/tmp/fixture",
                         "--pg-database",
@@ -2936,7 +2937,55 @@ class CliUnitTests(unittest.TestCase):
         self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
         self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
 
-    def test_storage_summary_canonical_prints_json_record(self):
+    def test_storage_summary_prints_canonical_json_by_default(self):
+        summary = CanonicalStorageSummaryRecord(
+            root_path="/tmp/fixture",
+            repository_name="fixture",
+            runs=1,
+            files=2,
+            legacy_nodes=5,
+            legacy_edges=2,
+            legacy_evidence=3,
+            raw_observations=4,
+            canonical_nodes=6,
+            canonical_edges=7,
+            canonical_evidence=8,
+        )
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_canonical_storage_summary",
+            return_value=summary,
+        ) as canonical_query:
+            with patch("repomap_kg.cli.query_storage_summary") as legacy_query:
+                with redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            "storage",
+                            "summary",
+                            "--root-path",
+                            "/tmp/fixture",
+                            "--pg-database",
+                            "postgres",
+                            "--json",
+                        ]
+                    )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["root_path"], "/tmp/fixture")
+        self.assertEqual(payload["repository_name"], "fixture")
+        self.assertEqual(payload["legacy_nodes"], 5)
+        self.assertEqual(payload["canonical_nodes"], 6)
+        self.assertEqual(payload["canonical_edges"], 7)
+        self.assertEqual(payload["canonical_evidence"], 8)
+        self.assertNotIn("repository_id", payload)
+        self.assertNotIn("nodes", payload)
+        self.assertEqual(canonical_query.call_args.args[0], ["-d", "postgres"])
+        self.assertEqual(canonical_query.call_args.kwargs["root_path"], "/tmp/fixture")
+        legacy_query.assert_not_called()
+
+    def test_storage_summary_canonical_alias_prints_json_record(self):
         summary = CanonicalStorageSummaryRecord(
             root_path="/tmp/fixture",
             repository_name="fixture",
@@ -2973,24 +3022,40 @@ class CliUnitTests(unittest.TestCase):
 
         payload = json.loads(stdout.getvalue())
         self.assertEqual(exit_code, 0)
-        self.assertEqual(payload["root_path"], "/tmp/fixture")
-        self.assertEqual(payload["repository_name"], "fixture")
-        self.assertEqual(payload["legacy_nodes"], 5)
-        self.assertEqual(payload["canonical_nodes"], 6)
-        self.assertEqual(payload["canonical_edges"], 7)
-        self.assertEqual(payload["canonical_evidence"], 8)
-        self.assertNotIn("repository_id", payload)
-        self.assertNotIn("nodes", payload)
+        self.assertEqual(payload, summary.to_dict())
         self.assertEqual(canonical_query.call_args.args[0], ["-d", "postgres"])
-        self.assertEqual(canonical_query.call_args.kwargs["root_path"], "/tmp/fixture")
+        legacy_query.assert_not_called()
+
+    def test_storage_summary_rejects_canonical_and_legacy_together(self):
+        stderr = io.StringIO()
+
+        with patch("repomap_kg.cli.query_canonical_storage_summary") as canonical_query:
+            with patch("repomap_kg.cli.query_storage_summary") as legacy_query:
+                with redirect_stderr(stderr):
+                    exit_code = main(
+                        [
+                            "storage",
+                            "summary",
+                            "--canonical",
+                            "--legacy",
+                            "--root-path",
+                            "/tmp/fixture",
+                        ]
+                    )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("cannot combine --canonical and --legacy", stderr.getvalue())
+        canonical_query.assert_not_called()
         legacy_query.assert_not_called()
 
     def test_storage_summary_reports_query_errors(self):
         stderr = io.StringIO()
 
         with patch(
-            "repomap_kg.cli.query_storage_summary",
-            side_effect=StorageSchemaError("psql did not return storage summary"),
+            "repomap_kg.cli.query_canonical_storage_summary",
+            side_effect=StorageSchemaError(
+                "psql did not return canonical storage summary"
+            ),
         ):
             with redirect_stderr(stderr):
                 exit_code = main(
@@ -3003,7 +3068,7 @@ class CliUnitTests(unittest.TestCase):
                 )
 
         self.assertEqual(exit_code, 1)
-        self.assertIn("psql did not return storage summary", stderr.getvalue())
+        self.assertIn("psql did not return canonical storage summary", stderr.getvalue())
 
     def test_discover_prints_text_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:

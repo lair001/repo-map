@@ -48,6 +48,8 @@ transaction while preserving existing public output and legacy readback
 behavior. Phase D added public canonical readback commands for canonical nodes,
 canonical edges, edge explanations, and depth-1 canonical neighborhoods under
 [ADR 0007](docs/adr/0007-canonical-readback-and-explain-query-contracts.md).
+Phase E3 made `storage summary` canonical-aware by default while preserving the
+previous observation-derived summary shape behind `--legacy`.
 N1 added a static Nix extractor for imports, obvious flake outputs, app program
 paths, and raw-only path references without evaluating Nix. The initial specs
 live under `docs/specs/`.
@@ -77,11 +79,15 @@ PYTHONPATH=src/main/python python3 -m repomap_kg storage edges --root-path . --k
 PYTHONPATH=src/main/python python3 -m repomap_kg storage host-mutators --root-path . --category filesystem-mutation --tool rm --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage host-mutators-summary --root-path . --category filesystem-mutation --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage summary --root-path . --json
+PYTHONPATH=src/main/python python3 -m repomap_kg storage summary --legacy --root-path . --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage canonical-nodes --root-path . --kind file --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage canonical-edges --root-path . --kind executes --target-key tool:nix --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage explain-canonical-edge --root-path . --source-key file:bin/tool --kind executes --target-key tool:nix --json
 PYTHONPATH=src/main/python python3 -m repomap_kg storage canonical-neighborhood --root-path . --node tool:nix --direction in --json
 ```
+
+`storage summary` is canonical-aware by default; use `--legacy` when the older
+observation-derived summary shape is required.
 
 Run the host-safe test suites with coverage gates:
 

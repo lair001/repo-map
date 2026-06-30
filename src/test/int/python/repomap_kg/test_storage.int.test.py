@@ -1173,9 +1173,18 @@ FROM canonical_edges;
                     run_repo_map_in_process(
                         "storage",
                         "summary",
+                        "--legacy",
                         *storage_args,
                         "--json",
                     )
+                )
+                default_summary_exit, default_summary_stdout, (
+                    default_summary_stderr
+                ) = run_repo_map_in_process(
+                    "storage",
+                    "summary",
+                    *storage_args,
+                    "--json",
                 )
                 canonical_summary_exit, canonical_summary_stdout, (
                     canonical_summary_stderr
@@ -1251,8 +1260,14 @@ FROM canonical_edges;
         self.assertIn("edges", legacy_summary)
         self.assertNotIn("canonical_nodes", legacy_summary)
 
+        self.assertEqual(default_summary_exit, 0, default_summary_stderr)
+        default_summary = json.loads(default_summary_stdout)
+        self.assertNotIn("nodes", default_summary)
+        self.assertNotIn("repository_id", default_summary)
+
         self.assertEqual(canonical_summary_exit, 0, canonical_summary_stderr)
         canonical_summary = json.loads(canonical_summary_stdout)
+        self.assertEqual(default_summary, canonical_summary)
         self.assertEqual(canonical_summary["root_path"], "/tmp/fixture")
         self.assertEqual(canonical_summary["repository_name"], "fixture")
         self.assertEqual(canonical_summary["runs"], 1)
@@ -3864,7 +3879,7 @@ SELECT (SELECT count(*) FROM raw_observations)::text
             }
         ])
 
-    def test_storage_summary_cli_reads_repository_counts(self):
+    def test_storage_summary_cli_defaults_to_canonical_counts(self):
         require_postgres_binaries()
         observations = [
             RawObservation(
@@ -3956,6 +3971,24 @@ SELECT (SELECT count(*) FROM raw_observations)::text
                 "--psql-command",
                 postgres.psql_command,
             )
+            legacy_exit_code, legacy_stdout, legacy_stderr = run_repo_map_in_process(
+                "storage",
+                "summary",
+                "--legacy",
+                "--root-path",
+                "/tmp/fixture",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+                "--json",
+            )
 
         self.assertEqual(exit_code, 0, stderr)
         payload = json.loads(stdout)
@@ -3963,15 +3996,30 @@ SELECT (SELECT count(*) FROM raw_observations)::text
         self.assertEqual(payload["repository_name"], "fixture")
         self.assertEqual(payload["runs"], 1)
         self.assertEqual(payload["files"], 1)
-        self.assertEqual(payload["nodes"], 5)
-        self.assertEqual(payload["edges"], 2)
-        self.assertEqual(payload["evidence"], 3)
-        self.assertIsInstance(payload["repository_id"], int)
-        self.assertIsInstance(payload["latest_run_id"], int)
+        self.assertEqual(payload["raw_observations"], 3)
+        self.assertEqual(payload["canonical_nodes"], 4)
+        self.assertEqual(payload["canonical_edges"], 2)
+        self.assertEqual(payload["canonical_evidence"], 3)
+        self.assertIn("legacy_nodes", payload)
+        self.assertIn("legacy_edges", payload)
+        self.assertIn("legacy_evidence", payload)
+        self.assertNotIn("repository_id", payload)
+        self.assertNotIn("latest_run_id", payload)
+        self.assertNotIn("nodes", payload)
         self.assertEqual(text_exit_code, 0, text_stderr)
         self.assertIn("root_path", text_stdout)
-        self.assertIn("latest_run_id", text_stdout)
+        self.assertIn("canonical_nodes", text_stdout)
+        self.assertNotIn("latest_run_id", text_stdout)
+        self.assertNotIn("repository_id", text_stdout)
         self.assertIn("/tmp/fixture", text_stdout)
+        self.assertEqual(legacy_exit_code, 0, legacy_stderr)
+        legacy_payload = json.loads(legacy_stdout)
+        self.assertEqual(legacy_payload["nodes"], 5)
+        self.assertEqual(legacy_payload["edges"], 2)
+        self.assertEqual(legacy_payload["evidence"], 3)
+        self.assertIsInstance(legacy_payload["repository_id"], int)
+        self.assertIsInstance(legacy_payload["latest_run_id"], int)
+        self.assertNotIn("canonical_nodes", legacy_payload)
 
     def test_temporary_postgres_teardown_runs_after_start_failure(self):
         clusters = []

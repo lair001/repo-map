@@ -639,7 +639,12 @@ def build_parser() -> argparse.ArgumentParser:
     storage_summary.add_argument(
         "--canonical",
         action="store_true",
-        help="include canonical graph storage counts instead of legacy summary fields",
+        help="emit canonical graph storage counts; this is the default",
+    )
+    storage_summary.add_argument(
+        "--legacy",
+        action="store_true",
+        help="emit the legacy observation-derived summary fields",
     )
     storage_summary.add_argument(
         "--json",
@@ -1296,7 +1301,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "storage" and args.storage_command == "summary":
-        if args.canonical:
+        if args.canonical and args.legacy:
+            print("ERROR: cannot combine --canonical and --legacy", file=sys.stderr)
+            return 1
+        if not args.legacy:
             try:
                 summary = query_canonical_storage_summary(
                     psql_args_from_args(args),
