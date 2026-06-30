@@ -33,10 +33,10 @@ files, and command-line tools.
 ## Current Status
 
 RepoMap has a working deterministic raw-observation pipeline, legacy
-observation-derived Postgres readback, and the first canonical graph storage
-path. Discovery emits file, entrypoint, shell command, sourced-file,
-environment, and host-mutation observations as JSONL. Legacy storage commands
-still read from the observation-derived `files`, `nodes`, `edges`, and
+observation-derived Postgres readback, and canonical graph storage/readback.
+Discovery emits file, entrypoint, shell command, sourced-file, environment,
+host-mutation, Python AST, and static Nix observations as JSONL. Legacy storage
+commands still read from the observation-derived `files`, `nodes`, `edges`, and
 `evidence` tables for compatibility.
 
 Canonicalization now runs as a tested pure layer before storage. Phase C1 added
@@ -48,7 +48,9 @@ transaction while preserving existing public output and legacy readback
 behavior. Phase D added public canonical readback commands for canonical nodes,
 canonical edges, edge explanations, and depth-1 canonical neighborhoods under
 [ADR 0007](docs/adr/0007-canonical-readback-and-explain-query-contracts.md).
-The initial specs live under `docs/specs/`.
+N1 added a static Nix extractor for imports, obvious flake outputs, app program
+paths, and raw-only path references without evaluating Nix. The initial specs
+live under `docs/specs/`.
 
 ## Development
 

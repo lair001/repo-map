@@ -92,6 +92,32 @@ class DiscoveryUnitTests(unittest.TestCase):
         self.assertEqual(command.target, "tool:nix")
         self.assertEqual(command.start_line, 2)
 
+    def test_discover_observations_includes_nix_facts_for_nix_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            flake = root / "flake.nix"
+            self.write(
+                flake,
+                (
+                    "{ self }: {\n"
+                    "  imports = [ ./module.nix ];\n"
+                    "  apps.aarch64-darwin.tool = {\n"
+                    "    program = \"${self}/bin/tool\";\n"
+                    "  };\n"
+                    "}\n"
+                ),
+            )
+            self.write(root / "module.nix", "{ ... }: {}\n")
+
+            observations = discover_observations(root)
+
+        kinds = [observation.kind for observation in observations]
+        self.assertIn("nix.import", kinds)
+        self.assertIn("nix.app", kinds)
+        app = next(item for item in observations if item.kind == "nix.app")
+        self.assertEqual(app.metadata["flake_ref"], root.name)
+        self.assertEqual(app.metadata["program_path"], "bin/tool")
+
     def test_unknown_language_and_role_fall_back_honestly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

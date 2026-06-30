@@ -9,6 +9,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
+from repomap_kg.nix import resolve_repo_path
 from repomap_kg.observations import RawObservation, write_observations_jsonl
 
 
@@ -305,6 +306,234 @@ class CliIntegrationTests(unittest.TestCase):
             metadata_by_path["src/test/unit/python/app.unit.test.py"]["role"],
             "test",
         )
+
+    def test_discover_command_emits_nix_static_observations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "nix-fixture"
+            self.write_fixture(fixture / "bin" / "tool", "#!/usr/bin/env bash\n")
+            self.write_fixture(
+                fixture / "bin" / "to-string-tool",
+                "#!/usr/bin/env bash\n",
+            )
+            self.write_fixture(
+                fixture / "bin" / "literal-tool",
+                "#!/usr/bin/env bash\n",
+            )
+            self.write_fixture(fixture / "modules" / "base.nix", "{ ... }: {}\n")
+            self.write_fixture(fixture / "pkgs" / "default.nix", "{ stdenv }: {}\n")
+            self.write_fixture(fixture / "README.md", "Fixture docs\n")
+            self.write_fixture(fixture / "config" / "settings.json", "{}\n")
+            self.write_fixture(
+                fixture / "flake.nix",
+                (
+                    "{ self }: {\n"
+                    "  imports = [ (import ./modules/base.nix) ./README.md ];\n"
+                    "  apps.aarch64-darwin.tool = {\n"
+                    "    program = \"${self}/bin/tool\";\n"
+                    "  };\n"
+                    "  apps.aarch64-darwin.toStringTool = {\n"
+                    "    program = toString ./bin/to-string-tool;\n"
+                    "  };\n"
+                    "  apps.aarch64-darwin.literalTool = {\n"
+                    "    program = ./bin/literal-tool;\n"
+                    "  };\n"
+                    "  apps.aarch64-darwin.noProgram = { type = \"app\"; };\n"
+                    "  packages.aarch64-darwin.default = ./pkgs/default.nix;\n"
+                    "  devShells.aarch64-darwin.default = {};\n"
+                    "  checks.aarch64-darwin.unit = {};\n"
+                    "  root = ./.;\n"
+                    "  scripts = [ ./config/settings.json ];\n"
+                    "}\n"
+                ),
+            )
+
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "discover", str(fixture), "--jsonl"
+            )
+
+        observations = [json.loads(line) for line in stdout.splitlines()]
+        nix_observations = [
+            observation
+            for observation in observations
+            if observation["kind"].startswith("nix.")
+        ]
+        kinds_and_targets = [
+            (observation["kind"], observation["target"])
+            for observation in nix_observations
+        ]
+        app = next(
+            observation
+            for observation in nix_observations
+            if observation["kind"] == "nix.app"
+            and observation["name"] == "tool"
+        )
+        apps_by_name = {
+            observation["name"]: observation
+            for observation in nix_observations
+            if observation["kind"] == "nix.app"
+        }
+        path_refs = [
+            observation
+            for observation in nix_observations
+            if observation["kind"] == "nix.path_ref"
+        ]
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, "")
+        self.assertIn(("nix.import", "file:modules/base.nix"), kinds_and_targets)
+        self.assertIn(
+            (
+                "nix.app",
+                "nix.app:nix-fixture:aarch64-darwin:tool",
+            ),
+            kinds_and_targets,
+        )
+        self.assertIn(
+            (
+                "nix.package",
+                "nix.package:nix-fixture:aarch64-darwin:default",
+            ),
+            kinds_and_targets,
+        )
+        self.assertIn(
+            (
+                "nix.devShell",
+                "nix.devShell:nix-fixture:aarch64-darwin:default",
+            ),
+            kinds_and_targets,
+        )
+        self.assertIn(
+            (
+                "nix.check",
+                "nix.check:nix-fixture:aarch64-darwin:unit",
+            ),
+            kinds_and_targets,
+        )
+        self.assertEqual(app["metadata"]["program_path"], "bin/tool")
+        self.assertEqual(app["metadata"]["program_resolution"], "local")
+        self.assertEqual(
+            apps_by_name["toStringTool"]["metadata"]["program_path"],
+            "bin/to-string-tool",
+        )
+        self.assertEqual(
+            apps_by_name["literalTool"]["metadata"]["program_path"],
+            "bin/literal-tool",
+        )
+        self.assertNotIn("program", apps_by_name["noProgram"]["metadata"])
+        self.assertEqual(
+            [observation["target"] for observation in path_refs],
+            [
+                "file:README.md",
+                "file:pkgs/default.nix",
+                "file:.",
+                "file:config/settings.json",
+            ],
+        )
+
+    def test_discover_command_emits_nix_unknown_and_dynamic_observations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "nix-fixture"
+            self.write_fixture(
+                fixture / "flake.nix",
+                (
+                    "{ self, name, pkgs }: {\n"
+                    "  escaped = import ../outside.nix;\n"
+                    "  apps.aarch64-darwin.dynamic = {\n"
+                    "    program = \"${self}/${name}\";\n"
+                    "  };\n"
+                    "  apps.aarch64-darwin.external = {\n"
+                    "    program = pkgs.hello + \"/bin/hello\";\n"
+                    "  };\n"
+                    "  apps.aarch64-darwin.bad = {\n"
+                    "    program = ../outside/tool;\n"
+                    "  };\n"
+                    "  apps.aarch64-darwin.selfBad = {\n"
+                    "    program = \"${self}/../outside/tool\";\n"
+                    "  };\n"
+                    "  scripts = [ ../outside/resource ];\n"
+                    "}\n"
+                ),
+            )
+
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "discover", str(fixture), "--jsonl"
+            )
+
+        observations = [json.loads(line) for line in stdout.splitlines()]
+        nix_observations = [
+            observation
+            for observation in observations
+            if observation["kind"].startswith("nix.")
+        ]
+        imports = [
+            observation
+            for observation in nix_observations
+            if observation["kind"] == "nix.import"
+        ]
+        apps_by_name = {
+            observation["name"]: observation
+            for observation in nix_observations
+            if observation["kind"] == "nix.app"
+        }
+        path_refs = [
+            observation
+            for observation in nix_observations
+            if observation["kind"] == "nix.path_ref"
+        ]
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            imports[0]["target"],
+            "unknown:file:repo-escaping-nix-import",
+        )
+        self.assertEqual(
+            apps_by_name["dynamic"]["metadata"]["program_resolution"],
+            "dynamic",
+        )
+        self.assertEqual(
+            apps_by_name["dynamic"]["metadata"]["dynamic_reason"],
+            "nix-app-program-interpolation",
+        )
+        self.assertEqual(
+            apps_by_name["external"]["metadata"]["program_resolution"],
+            "external",
+        )
+        self.assertEqual(
+            apps_by_name["bad"]["metadata"]["program_target"],
+            "unknown:file:repo-escaping-nix-app-program",
+        )
+        self.assertEqual(
+            apps_by_name["bad"]["metadata"]["program_resolution"],
+            "unknown",
+        )
+        self.assertEqual(
+            apps_by_name["selfBad"]["metadata"]["program_target"],
+            "unknown:file:repo-escaping-nix-app-program",
+        )
+        self.assertEqual(
+            apps_by_name["selfBad"]["metadata"]["program_resolution"],
+            "unknown",
+        )
+        self.assertEqual(
+            [observation["target"] for observation in path_refs],
+            [
+                "unknown:file:repo-escaping-nix-path-ref",
+                "unknown:file:repo-escaping-nix-path-ref",
+                "unknown:file:repo-escaping-nix-path-ref",
+            ],
+        )
+
+    def test_nix_repo_path_resolution_contract(self):
+        self.assertEqual(
+            resolve_repo_path("flake.nix", "${self}/bin/tool"),
+            "bin/tool",
+        )
+        self.assertEqual(
+            resolve_repo_path("modules/base.nix", "../lib/shared.nix"),
+            "lib/shared.nix",
+        )
+        self.assertIsNone(resolve_repo_path("flake.nix", "pkgs.hello"))
 
     def test_discover_command_emits_shell_source_observations(self):
         with tempfile.TemporaryDirectory() as tmpdir:

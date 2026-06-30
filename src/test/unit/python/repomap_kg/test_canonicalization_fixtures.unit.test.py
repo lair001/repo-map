@@ -29,6 +29,7 @@ class CanonicalizationFixtureTests(unittest.TestCase):
             "shell_env_missing_variable",
             "unsupported_kind",
             "python_package",
+            "nix_flake_basic",
         )
 
         for fixture_name in fixture_names:

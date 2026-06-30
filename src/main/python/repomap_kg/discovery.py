@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from repomap_kg import __version__
+from repomap_kg.nix import extract_nix_file_observations
 from repomap_kg.observations import RawObservation
 from repomap_kg.profiles import ProjectProfile
 from repomap_kg.python_extractor import (
@@ -132,6 +133,10 @@ def discover_observations(
                     module_index=module_index,
                 )
             )
+        if file_info.language == "nix":
+            observations.extend(
+                extract_nix_file_observations_from_file(repository_root, file_info.path)
+            )
     return observations
 
 
@@ -160,6 +165,20 @@ def extract_python_file_observations_from_file(
         content,
         module_index=module_index,
         repository_root=repository_root,
+    )
+
+
+def extract_nix_file_observations_from_file(
+    repository_root: Path, relative_path: str
+) -> tuple[RawObservation, ...]:
+    try:
+        content = (repository_root / relative_path).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return ()
+    return extract_nix_file_observations(
+        relative_path,
+        content,
+        flake_ref=repository_root.name,
     )
 
 
