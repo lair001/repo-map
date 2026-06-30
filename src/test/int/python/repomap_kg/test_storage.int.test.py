@@ -1672,6 +1672,7 @@ FROM canonical_edges;
             repomap_canonical_neighborhood,
             repomap_canonical_nodes,
             repomap_explain_canonical_edge,
+            repomap_projects,
             repomap_status,
             serve_stdio,
         )
@@ -1734,6 +1735,81 @@ FROM canonical_edges;
                 node="python.module:pkg.app",
                 direction="out",
             )
+            with tempfile.TemporaryDirectory() as mcp_config_tmpdir:
+                mcp_config_path = Path(mcp_config_tmpdir) / "config.json"
+                mcp_config_path.write_text(
+                    json.dumps(
+                        {
+                            "default_project": "fixture",
+                            "projects": {
+                                "fixture": {
+                                    "root_path": "/tmp/fixture",
+                                    "pg_host": str(postgres.socket_dir),
+                                    "pg_port": str(postgres.port),
+                                    "pg_user": postgres.user,
+                                    "pg_database": "postgres",
+                                }
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                with patch.dict(
+                    "os.environ",
+                    {
+                        "REPOMAP_MCP_CONFIG": str(mcp_config_path),
+                        "REPOMAP_PSQL_COMMAND": postgres.psql_command,
+                    },
+                    clear=False,
+                ):
+                    projects_payload = repomap_projects()
+                    project_status = repomap_status()
+                    project_modules = repomap_canonical_nodes(
+                        project="fixture",
+                        kind="python.module",
+                    )
+                    project_imports = repomap_canonical_edges(
+                        project="fixture",
+                        kind="imports",
+                        source_key="python.module:pkg.app",
+                    )
+                    project_explanation = repomap_explain_canonical_edge(
+                        project="fixture",
+                        source_key="python.module:pkg.app",
+                        kind="imports",
+                        target_key="python.module:pkg.lib.helper",
+                        identity_metadata={},
+                    )
+                    project_neighborhood = repomap_canonical_neighborhood(
+                        project="fixture",
+                        node="python.module:pkg.app",
+                        direction="out",
+                    )
+                    jsonrpc_project_status = handle_jsonrpc_message(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 13,
+                            "method": "tools/call",
+                            "params": {
+                                "name": "repomap_status",
+                                "arguments": {},
+                            },
+                        }
+                    )
+                    jsonrpc_project_modules = handle_jsonrpc_message(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 14,
+                            "method": "tools/call",
+                            "params": {
+                                "name": "repomap_canonical_nodes",
+                                "arguments": {
+                                    "project": "fixture",
+                                    "kind": "python.module",
+                                },
+                            },
+                        }
+                    )
             initialize_response = handle_jsonrpc_message(
                 {"jsonrpc": "2.0", "id": 1, "method": "initialize"}
             )
@@ -1892,11 +1968,60 @@ FROM canonical_edges;
             [tool["name"] for tool in tools_response["result"]["tools"]],
             [
                 "repomap_status",
+                "repomap_projects",
                 "repomap_canonical_nodes",
                 "repomap_canonical_edges",
                 "repomap_explain_canonical_edge",
                 "repomap_canonical_neighborhood",
             ],
+        )
+        self.assertEqual(projects_payload["default_project"], "fixture")
+        self.assertEqual(
+            projects_payload["projects"],
+            [
+                {
+                    "name": "fixture",
+                    "default": True,
+                    "root_path": "/tmp/fixture",
+                    "pg_database": "postgres",
+                    "pg_host": str(postgres.socket_dir),
+                    "pg_port": str(postgres.port),
+                    "pg_user": postgres.user,
+                }
+            ],
+        )
+        self.assertEqual(project_status["project"], "fixture")
+        self.assertEqual(project_status["repository_name"], "fixture")
+        self.assertEqual(
+            [record["canonical_key"] for record in project_modules],
+            ["python.module:pkg.app", "python.module:pkg.lib.helper"],
+        )
+        self.assertEqual(
+            [record["target_key"] for record in project_imports],
+            [
+                "external:python.module:json",
+                "python.module:pkg.lib.helper",
+                "unknown:python.module:missing-module",
+            ],
+        )
+        self.assertEqual(
+            project_explanation["edge"]["target_key"],
+            "python.module:pkg.lib.helper",
+        )
+        self.assertEqual(
+            project_neighborhood["center"]["canonical_key"],
+            "python.module:pkg.app",
+        )
+        self.assertEqual(
+            jsonrpc_project_status["result"]["structuredContent"]["project"],
+            "fixture",
+        )
+        self.assertEqual(
+            [
+                record["canonical_key"]
+                for record in jsonrpc_project_modules["result"]["structuredContent"]
+            ],
+            ["python.module:pkg.app", "python.module:pkg.lib.helper"],
         )
         self.assertEqual(
             jsonrpc_status["result"]["structuredContent"]["repository_name"],

@@ -1,5 +1,7 @@
 import json
 from io import StringIO
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -15,6 +17,298 @@ from repomap_kg.storage import (
 
 
 class McpServerUnitTests(unittest.TestCase):
+    def write_mcp_config(self, payload):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        config_path = Path(tmpdir.name) / "config.json"
+        config_path.write_text(json.dumps(payload))
+        return config_path
+
+    def test_load_mcp_config_reads_environment_override(self):
+        from repomap_kg.mcp_server import load_mcp_config
+
+        config_path = self.write_mcp_config(
+            {
+                "default_project": "repo-map",
+                "projects": {
+                    "repo-map": {
+                        "root_path": "/Users/slair/projs/repo-map",
+                        "pg_database": "repomap_repo_map",
+                        "pg_host": "/tmp/pg",
+                        "pg_port": "55432",
+                        "pg_user": "repo_map",
+                    },
+                    "codex-vc": {
+                        "root_path": "/Users/slair/.codex/codex-vc",
+                        "pg_database": "repomap_codex_vc",
+                    },
+                },
+            }
+        )
+
+        with patch.dict("os.environ", {"REPOMAP_MCP_CONFIG": str(config_path)}):
+            config = load_mcp_config()
+
+        self.assertEqual(config.default_project, "repo-map")
+        self.assertFalse(config.allow_project_overrides)
+        self.assertEqual(
+            config.projects["repo-map"].root_path,
+            "/Users/slair/projs/repo-map",
+        )
+        self.assertEqual(config.projects["repo-map"].pg_database, "repomap_repo_map")
+        self.assertEqual(config.projects["repo-map"].pg_host, "/tmp/pg")
+        self.assertEqual(config.projects["repo-map"].pg_port, "55432")
+        self.assertEqual(config.projects["repo-map"].pg_user, "repo_map")
+
+    def test_repomap_projects_lists_configured_projects(self):
+        from repomap_kg.mcp_server import repomap_projects
+
+        config_path = self.write_mcp_config(
+            {
+                "default_project": "repo-map",
+                "projects": {
+                    "repo-map": {
+                        "root_path": "/Users/slair/projs/repo-map",
+                        "pg_database": "repomap_repo_map",
+                    },
+                    "codex-vc": {
+                        "root_path": "/Users/slair/.codex/codex-vc",
+                        "pg_database": "repomap_codex_vc",
+                    },
+                },
+            }
+        )
+
+        with patch.dict("os.environ", {"REPOMAP_MCP_CONFIG": str(config_path)}):
+            payload = repomap_projects()
+
+        self.assertEqual(payload["default_project"], "repo-map")
+        self.assertEqual(
+            [(project["name"], project["default"]) for project in payload["projects"]],
+            [("codex-vc", False), ("repo-map", True)],
+        )
+        self.assertEqual(
+            payload["projects"][1]["root_path"],
+            "/Users/slair/projs/repo-map",
+        )
+        self.assertEqual(
+            payload["projects"][1]["pg_database"],
+            "repomap_repo_map",
+        )
+
+    def test_status_uses_default_project_from_config(self):
+        from repomap_kg.mcp_server import repomap_status
+
+        config_path = self.write_mcp_config(
+            {
+                "default_project": "repo-map",
+                "projects": {
+                    "repo-map": {
+                        "root_path": "/Users/slair/projs/repo-map",
+                        "pg_database": "repomap_repo_map",
+                        "pg_host": "/tmp/pg",
+                        "pg_port": "55432",
+                        "pg_user": "repo_map",
+                    },
+                },
+            }
+        )
+
+        with patch.dict("os.environ", {"REPOMAP_MCP_CONFIG": str(config_path)}):
+            with patch(
+                "repomap_kg.mcp_server.query_storage_summary",
+                return_value=StorageSummaryRecord(
+                    root_path="/Users/slair/projs/repo-map",
+                    repository_id=10,
+                    repository_name="repo-map",
+                    latest_run_id=22,
+                    runs=2,
+                    files=3,
+                    nodes=5,
+                    edges=7,
+                    evidence=11,
+                ),
+            ) as query:
+                payload = repomap_status()
+
+        self.assertEqual(payload["project"], "repo-map")
+        self.assertEqual(payload["repository_name"], "repo-map")
+        self.assertEqual(
+            query.call_args.args[0],
+            ["-h", "/tmp/pg", "-p", "55432", "-U", "repo_map", "-d", "repomap_repo_map"],
+        )
+        self.assertEqual(query.call_args.kwargs["root_path"], "/Users/slair/projs/repo-map")
+
+    def test_canonical_nodes_resolves_named_project_config(self):
+        from repomap_kg.mcp_server import repomap_canonical_nodes
+
+        config_path = self.write_mcp_config(
+            {
+                "projects": {
+                    "repo-map": {
+                        "root_path": "/Users/slair/projs/repo-map",
+                        "pg_database": "repomap_repo_map",
+                    },
+                },
+            }
+        )
+        record = CanonicalNodeRecord(
+            canonical_key="python.module:repomap_kg.cli",
+            graph_key_version=1,
+            kind="python.module",
+            display_name="repomap_kg.cli",
+            confidence="extracted",
+            conflict=False,
+            metadata={},
+            first_seen_run_id=1,
+            last_seen_run_id=2,
+        )
+        with patch.dict("os.environ", {"REPOMAP_MCP_CONFIG": str(config_path)}):
+            with patch(
+                "repomap_kg.mcp_server.query_canonical_node_records",
+                return_value=(record,),
+            ) as query:
+                payload = repomap_canonical_nodes(
+                    project="repo-map",
+                    kind="python.module",
+                )
+
+        self.assertEqual(payload[0]["canonical_key"], "python.module:repomap_kg.cli")
+        self.assertEqual(query.call_args.args[0], ["-d", "repomap_repo_map"])
+        self.assertEqual(query.call_args.kwargs["root_path"], "/Users/slair/projs/repo-map")
+
+    def test_missing_project_and_default_are_rejected_before_query(self):
+        from repomap_kg.mcp_server import RepoMapMcpError, repomap_status
+
+        config_path = self.write_mcp_config(
+            {
+                "projects": {
+                    "repo-map": {
+                        "root_path": "/Users/slair/projs/repo-map",
+                        "pg_database": "repomap_repo_map",
+                    },
+                },
+            }
+        )
+
+        with patch.dict("os.environ", {"REPOMAP_MCP_CONFIG": str(config_path)}):
+            with patch("repomap_kg.mcp_server.query_storage_summary") as query:
+                with self.assertRaisesRegex(RepoMapMcpError, "unknown project"):
+                    repomap_status(project="missing")
+                with self.assertRaisesRegex(RepoMapMcpError, "root_path is required"):
+                    repomap_status()
+
+        query.assert_not_called()
+
+    def test_project_and_explicit_overrides_are_rejected_unless_allowed(self):
+        from repomap_kg.mcp_server import RepoMapMcpError, repomap_status
+
+        config_path = self.write_mcp_config(
+            {
+                "projects": {
+                    "repo-map": {
+                        "root_path": "/Users/slair/projs/repo-map",
+                        "pg_database": "repomap_repo_map",
+                    },
+                },
+            }
+        )
+
+        with patch.dict("os.environ", {"REPOMAP_MCP_CONFIG": str(config_path)}):
+            with patch("repomap_kg.mcp_server.query_storage_summary") as query:
+                with self.assertRaisesRegex(
+                    RepoMapMcpError,
+                    "project cannot be combined with explicit",
+                ):
+                    repomap_status(
+                        project="repo-map",
+                        root_path="/tmp/other",
+                    )
+                with self.assertRaisesRegex(
+                    RepoMapMcpError,
+                    "project cannot be combined with explicit",
+                ):
+                    repomap_status(
+                        project="repo-map",
+                        pg_database="other",
+                    )
+
+        query.assert_not_called()
+
+        allowed_config_path = self.write_mcp_config(
+            {
+                "allow_project_overrides": True,
+                "projects": {
+                    "repo-map": {
+                        "root_path": "/Users/slair/projs/repo-map",
+                        "pg_database": "repomap_repo_map",
+                    },
+                },
+            }
+        )
+        with patch.dict("os.environ", {"REPOMAP_MCP_CONFIG": str(allowed_config_path)}):
+            with patch(
+                "repomap_kg.mcp_server.query_storage_summary",
+                return_value=StorageSummaryRecord(
+                    root_path="/tmp/other",
+                    repository_id=10,
+                    repository_name="other",
+                    latest_run_id=22,
+                    runs=2,
+                    files=3,
+                    nodes=5,
+                    edges=7,
+                    evidence=11,
+                ),
+            ) as query:
+                payload = repomap_status(
+                    project="repo-map",
+                    root_path="/tmp/other",
+                    pg_database="other_db",
+                )
+
+        self.assertEqual(payload["root_path"], "/tmp/other")
+        self.assertEqual(query.call_args.args[0], ["-d", "other_db"])
+
+    def test_explicit_mode_wins_over_default_project_for_development(self):
+        from repomap_kg.mcp_server import repomap_status
+
+        config_path = self.write_mcp_config(
+            {
+                "default_project": "repo-map",
+                "projects": {
+                    "repo-map": {
+                        "root_path": "/Users/slair/projs/repo-map",
+                        "pg_database": "repomap_repo_map",
+                    },
+                },
+            }
+        )
+
+        with patch.dict("os.environ", {"REPOMAP_MCP_CONFIG": str(config_path)}):
+            with patch(
+                "repomap_kg.mcp_server.query_storage_summary",
+                return_value=StorageSummaryRecord(
+                    root_path="/tmp/fixture",
+                    repository_id=10,
+                    repository_name="fixture",
+                    latest_run_id=22,
+                    runs=2,
+                    files=3,
+                    nodes=5,
+                    edges=7,
+                    evidence=11,
+                ),
+            ) as query:
+                payload = repomap_status(
+                    root_path="/tmp/fixture",
+                    pg_database="postgres",
+                )
+
+        self.assertNotIn("project", payload)
+        self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
+        self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+
     def test_status_requires_explicit_root_path_and_database(self):
         from repomap_kg.mcp_server import RepoMapMcpError, repomap_status
 
@@ -422,6 +716,7 @@ class McpServerUnitTests(unittest.TestCase):
             names,
             [
                 "repomap_status",
+                "repomap_projects",
                 "repomap_canonical_nodes",
                 "repomap_canonical_edges",
                 "repomap_explain_canonical_edge",
@@ -431,6 +726,7 @@ class McpServerUnitTests(unittest.TestCase):
         serialized = json.dumps(tool_definitions(), sort_keys=True)
         self.assertNotIn("discover", serialized)
         self.assertNotIn("load-files", serialized)
+        self.assertNotIn("write", serialized)
 
     def test_mcp_tool_schemas_do_not_expose_psql_command(self):
         from repomap_kg.mcp_server import tool_definitions
@@ -441,6 +737,31 @@ class McpServerUnitTests(unittest.TestCase):
                     "psql_command",
                     tool["inputSchema"]["properties"],
                 )
+
+    def test_mcp_read_tools_accept_project_and_do_not_require_root_path(self):
+        from repomap_kg.mcp_server import tool_input_schema
+
+        self.assertEqual(tool_input_schema("repomap_status")["required"], [])
+        self.assertEqual(tool_input_schema("repomap_canonical_nodes")["required"], [])
+        self.assertEqual(tool_input_schema("repomap_canonical_edges")["required"], [])
+        self.assertEqual(
+            tool_input_schema("repomap_explain_canonical_edge")["required"],
+            ["source_key", "kind", "target_key"],
+        )
+        self.assertEqual(
+            tool_input_schema("repomap_canonical_neighborhood")["required"],
+            ["node"],
+        )
+        for name in (
+            "repomap_status",
+            "repomap_canonical_nodes",
+            "repomap_canonical_edges",
+            "repomap_explain_canonical_edge",
+            "repomap_canonical_neighborhood",
+        ):
+            with self.subTest(tool=name):
+                self.assertIn("project", tool_input_schema(name)["properties"])
+                self.assertIn("root_path", tool_input_schema(name)["properties"])
 
     def test_handle_tool_call_rejects_unknown_tool_and_non_object_args(self):
         from repomap_kg.mcp_server import RepoMapMcpError, handle_tool_call

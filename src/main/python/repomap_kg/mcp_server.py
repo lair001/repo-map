@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, TextIO
 
@@ -36,6 +37,11 @@ ENV_PG_PORT = "REPOMAP_PG_PORT"
 ENV_PG_USER = "REPOMAP_PG_USER"
 ENV_PG_DATABASE = "REPOMAP_PG_DATABASE"
 ENV_PSQL_COMMAND = "REPOMAP_PSQL_COMMAND"
+ENV_MCP_CONFIG = "REPOMAP_MCP_CONFIG"
+
+
+def default_mcp_config_path() -> Path:
+    return Path.home() / ".codex" / "codex-vc" / "mcp" / "repo-map" / "config.json"
 
 
 class RepoMapMcpError(ValueError):
@@ -50,6 +56,7 @@ class StorageConnection:
     pg_port: str | None = None
     pg_user: str | None = None
     psql_command: str = "psql"
+    project: str | None = None
 
     def psql_args(self) -> list[str]:
         args: list[str] = []
@@ -63,9 +70,114 @@ class StorageConnection:
         return args
 
 
+@dataclass(frozen=True)
+class McpProjectConfig:
+    name: str
+    root_path: str
+    pg_database: str
+    pg_host: str | None = None
+    pg_port: str | None = None
+    pg_user: str | None = None
+    psql_command: str | None = None
+
+
+@dataclass(frozen=True)
+class McpConfig:
+    default_project: str | None
+    projects: dict[str, McpProjectConfig]
+    allow_project_overrides: bool = False
+
+
+def load_mcp_config(config_path: str | os.PathLike[str] | None = None) -> McpConfig:
+    path, path_is_explicit = resolve_mcp_config_path(config_path)
+    if not path.exists():
+        if path_is_explicit:
+            raise RepoMapMcpError(f"RepoMap MCP config does not exist: {path}")
+        return McpConfig(default_project=None, projects={})
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise RepoMapMcpError(f"invalid RepoMap MCP config JSON: {error}") from error
+    if not isinstance(payload, dict):
+        raise RepoMapMcpError("RepoMap MCP config must be a JSON object")
+
+    default_project = optional_text(payload.get("default_project"))
+    projects_payload = payload.get("projects", {})
+    if not isinstance(projects_payload, dict):
+        raise RepoMapMcpError("RepoMap MCP config projects must be a JSON object")
+    projects: dict[str, McpProjectConfig] = {}
+    for name, project_payload in projects_payload.items():
+        if not isinstance(name, str) or not name.strip():
+            raise RepoMapMcpError("RepoMap MCP project names must be non-blank strings")
+        if not isinstance(project_payload, dict):
+            raise RepoMapMcpError(f"RepoMap MCP project {name!r} must be a JSON object")
+        projects[name] = McpProjectConfig(
+            name=name,
+            root_path=require_non_blank(project_payload.get("root_path"), "root_path"),
+            pg_database=require_non_blank(
+                project_payload.get("pg_database"),
+                "pg_database",
+            ),
+            pg_host=optional_text(project_payload.get("pg_host")),
+            pg_port=optional_text(project_payload.get("pg_port")),
+            pg_user=optional_text(project_payload.get("pg_user")),
+            psql_command=optional_text(project_payload.get("psql_command")),
+        )
+    if default_project is not None and default_project not in projects:
+        raise RepoMapMcpError(
+            f"default_project {default_project!r} is not configured"
+        )
+    return McpConfig(
+        default_project=default_project,
+        projects=projects,
+        allow_project_overrides=bool(payload.get("allow_project_overrides", False)),
+    )
+
+
+def resolve_mcp_config_path(
+    config_path: str | os.PathLike[str] | None,
+) -> tuple[Path, bool]:
+    if config_path is not None:
+        return Path(config_path).expanduser(), True
+    environment_path = optional_text(os.environ.get(ENV_MCP_CONFIG))
+    if environment_path is not None:
+        return Path(environment_path).expanduser(), True
+    return default_mcp_config_path(), False
+
+
+def repomap_projects() -> dict[str, Any]:
+    config = load_mcp_config()
+    return {
+        "default_project": config.default_project,
+        "allow_project_overrides": config.allow_project_overrides,
+        "projects": [
+            {
+                "name": project.name,
+                "default": project.name == config.default_project,
+                "root_path": project.root_path,
+                "pg_database": project.pg_database,
+                **optional_project_connection_fields(project),
+            }
+            for project in sorted(config.projects.values(), key=lambda item: item.name)
+        ],
+    }
+
+
+def optional_project_connection_fields(project: McpProjectConfig) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    if project.pg_host is not None:
+        fields["pg_host"] = project.pg_host
+    if project.pg_port is not None:
+        fields["pg_port"] = project.pg_port
+    if project.pg_user is not None:
+        fields["pg_user"] = project.pg_user
+    return fields
+
+
 def repomap_status(
     *,
-    root_path: str,
+    root_path: str | None = None,
+    project: str | None = None,
     pg_database: str | None = None,
     pg_host: str | None = None,
     pg_port: str | int | None = None,
@@ -74,6 +186,7 @@ def repomap_status(
 ) -> dict[str, Any]:
     connection = storage_connection(
         root_path=root_path,
+        project=project,
         pg_database=pg_database,
         pg_host=pg_host,
         pg_port=pg_port,
@@ -85,7 +198,7 @@ def repomap_status(
         root_path=connection.root_path,
         psql_command=connection.psql_command,
     )
-    return {
+    payload = {
         "server": "repomap-kg",
         "version": __version__,
         "read_only": True,
@@ -100,11 +213,15 @@ def repomap_status(
             "evidence": summary.evidence,
         },
     }
+    if connection.project is not None:
+        payload["project"] = connection.project
+    return payload
 
 
 def repomap_canonical_nodes(
     *,
-    root_path: str,
+    root_path: str | None = None,
+    project: str | None = None,
     pg_database: str | None = None,
     pg_host: str | None = None,
     pg_port: str | int | None = None,
@@ -117,6 +234,7 @@ def repomap_canonical_nodes(
 ) -> list[dict[str, Any]]:
     connection = storage_connection(
         root_path=root_path,
+        project=project,
         pg_database=pg_database,
         pg_host=pg_host,
         pg_port=pg_port,
@@ -143,7 +261,8 @@ def repomap_canonical_nodes(
 
 def repomap_canonical_edges(
     *,
-    root_path: str,
+    root_path: str | None = None,
+    project: str | None = None,
     pg_database: str | None = None,
     pg_host: str | None = None,
     pg_port: str | int | None = None,
@@ -156,6 +275,7 @@ def repomap_canonical_edges(
 ) -> list[dict[str, Any]]:
     connection = storage_connection(
         root_path=root_path,
+        project=project,
         pg_database=pg_database,
         pg_host=pg_host,
         pg_port=pg_port,
@@ -182,7 +302,8 @@ def repomap_canonical_edges(
 
 def repomap_explain_canonical_edge(
     *,
-    root_path: str,
+    root_path: str | None = None,
+    project: str | None = None,
     pg_database: str | None = None,
     pg_host: str | None = None,
     pg_port: str | int | None = None,
@@ -196,6 +317,7 @@ def repomap_explain_canonical_edge(
 ) -> dict[str, Any]:
     connection = storage_connection(
         root_path=root_path,
+        project=project,
         pg_database=pg_database,
         pg_host=pg_host,
         pg_port=pg_port,
@@ -224,7 +346,8 @@ def repomap_explain_canonical_edge(
 
 def repomap_canonical_neighborhood(
     *,
-    root_path: str,
+    root_path: str | None = None,
+    project: str | None = None,
     pg_database: str | None = None,
     pg_host: str | None = None,
     pg_port: str | int | None = None,
@@ -237,6 +360,7 @@ def repomap_canonical_neighborhood(
 ) -> dict[str, Any]:
     connection = storage_connection(
         root_path=root_path,
+        project=project,
         pg_database=pg_database,
         pg_host=pg_host,
         pg_port=pg_port,
@@ -263,13 +387,73 @@ def repomap_canonical_neighborhood(
 
 def storage_connection(
     *,
-    root_path: str,
+    root_path: str | None = None,
+    project: str | None = None,
     pg_database: str | None = None,
     pg_host: str | None = None,
     pg_port: str | int | None = None,
     pg_user: str | None = None,
     psql_command: str | None = None,
 ) -> StorageConnection:
+    config = load_mcp_config()
+    explicit_values = {
+        "root_path": root_path,
+        "pg_database": pg_database,
+        "pg_host": pg_host,
+        "pg_port": pg_port,
+        "pg_user": pg_user,
+        "psql_command": psql_command,
+    }
+    has_explicit_connection = any(
+        value is not None for value in explicit_values.values()
+    )
+
+    project_name = optional_text(project)
+    if project_name is not None:
+        project_config = config.projects.get(project_name)
+        if project_config is None:
+            raise RepoMapMcpError(f"unknown project: {project_name}")
+        if has_explicit_connection and not config.allow_project_overrides:
+            raise RepoMapMcpError(
+                "project cannot be combined with explicit connection overrides"
+            )
+        root = require_non_blank(
+            root_path if root_path is not None else project_config.root_path,
+            "root_path",
+        )
+        database = require_non_blank(
+            pg_database if pg_database is not None else project_config.pg_database,
+            "pg_database",
+        )
+        host = optional_text(pg_host) if pg_host is not None else project_config.pg_host
+        port = optional_text(pg_port) if pg_port is not None else project_config.pg_port
+        user = optional_text(pg_user) if pg_user is not None else project_config.pg_user
+        command = require_non_blank(
+            (
+                optional_text(psql_command)
+                if psql_command is not None
+                else (
+                    project_config.psql_command
+                    or optional_text(os.environ.get(ENV_PSQL_COMMAND))
+                    or "psql"
+                )
+            ),
+            "psql_command",
+        )
+        validate_psql_command(command)
+        return StorageConnection(
+            root_path=root,
+            pg_database=database,
+            pg_host=host,
+            pg_port=port,
+            pg_user=user,
+            psql_command=command,
+            project=project_name,
+        )
+
+    if not has_explicit_connection and config.default_project is not None:
+        return storage_connection(project=config.default_project)
+
     root = require_non_blank(root_path, "root_path")
     database = require_non_blank(
         first_config_value(pg_database, ENV_PG_DATABASE),
@@ -396,6 +580,16 @@ def tool_definitions() -> list[dict[str, Any]]:
             "Return read-only RepoMap storage status and counts.",
             {},
         ),
+        {
+            "name": "repomap_projects",
+            "description": "List configured read-only RepoMap MCP projects.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
         tool_definition(
             "repomap_canonical_nodes",
             "Read canonical graph nodes from RepoMap storage.",
@@ -430,7 +624,7 @@ def tool_definitions() -> list[dict[str, Any]]:
                 },
                 "graph_key_version": {"type": "integer", "default": 1},
             },
-            required=("root_path", "source_key", "kind", "target_key"),
+            required=("source_key", "kind", "target_key"),
         ),
         tool_definition(
             "repomap_canonical_neighborhood",
@@ -445,7 +639,7 @@ def tool_definitions() -> list[dict[str, Any]]:
                 "depth": {"type": "integer", "default": 1},
                 "graph_key_version": {"type": "integer", "default": 1},
             },
-            required=("root_path", "node"),
+            required=("node",),
         ),
     ]
 
@@ -455,9 +649,10 @@ def tool_definition(
     description: str,
     properties: dict[str, Any],
     *,
-    required: tuple[str, ...] = ("root_path",),
+    required: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     base_properties: dict[str, Any] = {
+        "project": {"type": "string"},
         "root_path": {"type": "string"},
         "pg_database": {"type": "string"},
         "pg_host": {"type": "string"},
@@ -478,6 +673,7 @@ def tool_definition(
 
 
 TOOL_FUNCTIONS: dict[str, str] = {
+    "repomap_projects": "repomap_projects",
     "repomap_status": "repomap_status",
     "repomap_canonical_nodes": "repomap_canonical_nodes",
     "repomap_canonical_edges": "repomap_canonical_edges",
