@@ -796,6 +796,148 @@ class CliIntegrationTests(unittest.TestCase):
             {error["metadata"]["error_kind"] for error in parse_errors},
         )
 
+    def test_discover_command_emits_codex_mcp_config_dogfood_observations(self):
+        fixture = (
+            REPO_ROOT
+            / "src"
+            / "test"
+            / "fixtures"
+            / "discovery"
+            / "config_codex_mcp_dogfood"
+        )
+
+        exit_code, stdout, stderr = self.run_module_entrypoint(
+            "discover", str(fixture), "--jsonl"
+        )
+
+        self.assertEqual(exit_code, 0, stderr)
+        for secret in (
+            "cfg3-json-secret-token",
+            "cfg3-json-secret-api-key",
+            "cfg3-toml-secret-refresh-token",
+            "cfg3-toml-secret-api-key",
+            "cfg3-jsonl-secret-token",
+            "cfg3-jsonc-secret-password",
+        ):
+            self.assertNotIn(secret, stdout)
+
+        observations = [
+            json.loads(line)
+            for line in stdout.splitlines()
+            if line.strip()
+        ]
+        kinds = {observation["kind"] for observation in observations}
+        self.assertTrue(
+            {
+                "config.document",
+                "config.path",
+                "config.reference",
+                "config.jsonl_record",
+                "config.parse_error",
+            }.issubset(kinds)
+        )
+        file_languages = {
+            observation["path"]: observation["metadata"]["language"]
+            for observation in observations
+            if observation["kind"] == "file"
+        }
+        self.assertEqual(
+            file_languages,
+            {
+                "codex/config.toml": "toml",
+                "editor/settings.jsonc": "jsonc",
+                "logs/events.jsonl": "jsonl",
+                "mcp/repo-map/config.json": "json",
+            },
+        )
+
+        document_targets = {
+            observation["target"]
+            for observation in observations
+            if observation["kind"] == "config.document"
+        }
+        self.assertEqual(
+            document_targets,
+            {
+                "config.document:file%3Acodex%2Fconfig.toml",
+                "config.document:file%3Aeditor%2Fsettings.jsonc",
+                "config.document:file%3Alogs%2Fevents.jsonl",
+                "config.document:file%3Amcp%2Frepo-map%2Fconfig.json",
+            },
+        )
+
+        reference_targets = {
+            observation["target"]
+            for observation in observations
+            if observation["kind"] == "config.reference"
+        }
+        self.assertTrue(
+            {
+                "tool:repomap-kg",
+                "tool:python3",
+                "dynamic:tool:config-command-fragment",
+                "env:REPOMAP_MCP_CONFIG",
+                "env:CODEX_HOME",
+                "env:TOKEN",
+                "env:API_KEY",
+                "env:PASSWORD",
+                "file:codex/config.toml",
+                "file:mcp/repo-map/config.json",
+                "file:src/main/python",
+                "file:projects/repo-map",
+                "file:bin/repomap",
+                "external.url:https%3A%2F%2Fexample.com%2Frepo-map",
+                "external.url:https%3A%2F%2Fexample.com%2Feditor",
+                "external.url:https%3A%2F%2Fexample.com%2Flog",
+                "external.url:mailto%3Aops%40example.com",
+                "external:file:absolute-config-reference",
+                "unknown:file:repo-escaping-config-reference",
+            }.issubset(reference_targets)
+        )
+
+        path_metadata = {
+            (observation["path"], observation["metadata"]["pointer"]): observation[
+                "metadata"
+            ]
+            for observation in observations
+            if observation["kind"] == "config.path"
+        }
+        self.assertTrue(
+            path_metadata[
+                ("mcp/repo-map/config.json", "/api_key")
+            ]["redacted"]
+        )
+        self.assertTrue(
+            path_metadata[
+                ("codex/config.toml", "/profiles/default/refresh_token")
+            ]["redacted"]
+        )
+        self.assertTrue(
+            path_metadata[
+                ("editor/settings.jsonc", "/env/PASSWORD")
+            ]["redacted"]
+        )
+        self.assertEqual(
+            path_metadata[("codex/config.toml", "/tools")]["array_policy"],
+            "stable-member-key",
+        )
+
+        parse_errors = [
+            observation
+            for observation in observations
+            if observation["kind"] == "config.parse_error"
+        ]
+        self.assertEqual(
+            [(error["path"], error["metadata"]["error_kind"]) for error in parse_errors],
+            [("logs/events.jsonl", "malformed-jsonl-line")],
+        )
+        jsonl_records = [
+            observation
+            for observation in observations
+            if observation["kind"] == "config.jsonl_record"
+        ]
+        self.assertEqual(len(jsonl_records), 3)
+
     def test_discover_command_handles_markdown_ambiguity_without_execution(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture = Path(tmpdir) / "fixture-repo"

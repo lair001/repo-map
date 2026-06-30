@@ -62,10 +62,31 @@ RepoMap has static extraction and canonicalization for:
 - static Nix imports and flake output facts;
 - Markdown/documentation pages, headings, links, frontmatter, code fences, ADR
   metadata, and skill metadata.
+- structured configuration facts from JSON, JSONL, conservative JSONC, and
+  TOML, including `config.document`, `config.path`, and conservative
+  `references` edges for file, tool, env, URL, external, dynamic, and unknown
+  targets.
 
 Do not run `nix eval`, execute project code, fetch URLs, execute Markdown code
-blocks, or treat MCP as a write surface unless a later accepted phase explicitly
+blocks, execute commands found in config files, expand environment variables,
+or treat MCP as a write surface unless a later accepted phase explicitly
 changes that.
+
+## Query Config Graphs
+
+Structured configuration nodes are useful for Codex, MCP, editor, and tool
+metadata. After loading a graph:
+
+```sh
+repomap-kg storage nodes --root-path <repo-root> --kind config.document --json
+repomap-kg storage nodes --root-path <repo-root> --kind config.path --json
+repomap-kg storage edges --root-path <repo-root> --kind references --target-key tool:repomap-kg --json
+repomap-kg storage edges --root-path <repo-root> --kind references --target-key env:REPOMAP_MCP_CONFIG --json
+repomap-kg storage explain-canonical-edge --root-path <repo-root> --source-key <config.path-key> --kind references --target-key <target-key> --json
+```
+
+Secret-prone config values are redacted. Treat `external:*`, `dynamic:*`, and
+`unknown:*` config reference targets as explicit uncertainty, not as failures.
 
 ## Readback Guidance
 

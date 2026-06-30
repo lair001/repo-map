@@ -33,6 +33,7 @@ class CanonicalizationFixtureTests(unittest.TestCase):
             "markdown_docs_basic",
             "config_json_basic",
             "config_toml_basic",
+            "config_codex_mcp_dogfood",
         )
 
         for fixture_name in fixture_names:
