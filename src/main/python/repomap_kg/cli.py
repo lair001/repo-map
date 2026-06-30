@@ -41,6 +41,11 @@ from repomap_kg.normalization import normalize_observations
 from repomap_kg.observations import ObservationValidationError, read_observations_jsonl
 from repomap_kg.profiles import ProfileValidationError, load_profile
 from repomap_kg.project_identity import PROJECT_IDENTITY
+from repomap_kg.source_ingestion import (
+    SourceAcquisitionError,
+    SourcePolicyError,
+    ingest_feed_source,
+)
 from repomap_kg.storage import (
     StorageSchemaError,
     canonical_edge_explanation_to_jsonable,
@@ -222,6 +227,34 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit normalized records as JSON",
+    )
+
+    sources = subparsers.add_parser(
+        "sources",
+        help="work with explicitly configured source ingestion",
+    )
+    source_subcommands = sources.add_subparsers(dest="source_command")
+    ingest_feed = source_subcommands.add_parser(
+        "ingest-feed",
+        help="fetch one configured policy-approved feed source",
+    )
+    ingest_feed.add_argument(
+        "--config",
+        required=True,
+        help="path to a configured feed source TOML file",
+    )
+    ingest_feed.add_argument("--repository-name", required=True)
+    add_storage_root_argument(ingest_feed)
+    ingest_feed.add_argument("--git-commit")
+    ingest_feed.add_argument(
+        "--artifact-dir",
+        help="artifact retention directory inside --root-path",
+    )
+    add_storage_connection_arguments(ingest_feed)
+    ingest_feed.add_argument(
+        "--json",
+        action="store_true",
+        help="emit feed ingestion summary as JSON",
     )
 
     storage = subparsers.add_parser(
@@ -803,6 +836,32 @@ def main(argv: list[str] | None = None) -> int:
                 f"{summary['nodes']} nodes, "
                 f"{summary['edges']} edges, and "
                 f"{summary['evidence']} evidence records"
+            )
+        return 0
+
+    if args.command == "sources" and args.source_command == "ingest-feed":
+        try:
+            summary = ingest_feed_source(
+                config_path=args.config,
+                repository_name=args.repository_name,
+                root_path=args.root_path,
+                psql_args=psql_args_from_args(args),
+                git_commit=args.git_commit,
+                psql_command=args.psql_command,
+                artifact_dir=args.artifact_dir,
+            )
+        except (SourcePolicyError, SourceAcquisitionError, StorageSchemaError) as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(summary.to_jsonable(), sort_keys=True))
+        else:
+            print(
+                "ingested feed source "
+                f"{summary.source_id} into repository "
+                f"{summary.load_summary.repository_id} run "
+                f"{summary.load_summary.run_id} "
+                f"({summary.feed_observations} feed observations)"
             )
         return 0
 

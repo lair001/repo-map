@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +15,7 @@ from repomap_test_support.postgres_harness import (
 
 from repomap_kg.cli import main
 from repomap_kg.observations import RawObservation
+from repomap_kg.source_ingestion import FeedFetchResponse, ingest_feed_source
 from repomap_kg.storage import (
     StorageSchemaError,
     apply_migrations,
@@ -2522,6 +2524,80 @@ FROM canonical_edges;
             "feed.link",
         )
         self.assertNotIn("fixture-feed-secret", explain_stdout)
+
+    def test_sources_ingest_feed_loads_configured_feed_artifact(self):
+        require_postgres_binaries()
+        config_path = source_fixture("allowed-rss.toml")
+        feed_body = (discovery_fixture("feed_static_basic") / "rss.xml").read_bytes()
+        calls = []
+
+        def fetcher(config):
+            calls.append(config.url)
+            return FeedFetchResponse(
+                status=200,
+                headers={"content-type": "application/rss+xml"},
+                body=feed_body,
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root_path = Path(tmpdir) / "fixture-repo"
+            root_path.mkdir()
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                summary = ingest_feed_source(
+                    config_path,
+                    repository_name="fixture",
+                    root_path=root_path,
+                    psql_args=postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                    fetcher=fetcher,
+                    clock=fixed_source_clock,
+                )
+                documents = query_canonical_node_records(
+                    postgres.psql_args,
+                    root_path=str(root_path),
+                    kind="feed.document",
+                    psql_command=postgres.psql_command,
+                )
+                items = query_canonical_node_records(
+                    postgres.psql_args,
+                    root_path=str(root_path),
+                    kind="feed.item",
+                    psql_command=postgres.psql_command,
+                )
+                references = query_canonical_edge_records(
+                    postgres.psql_args,
+                    root_path=str(root_path),
+                    kind="references",
+                    psql_command=postgres.psql_command,
+                )
+                raw_count = postgres.psql_scalar("SELECT count(*) FROM raw_observations;")
+
+        self.assertEqual(calls, ["https://example.invalid/rss.xml"])
+        self.assertEqual(summary.source_id, "example-rss-feed")
+        self.assertEqual(summary.load_summary.repository_id, 1)
+        self.assertEqual(summary.load_summary.files, 1)
+        self.assertEqual(raw_count, str(summary.observations))
+        self.assertEqual(len(documents), 1)
+        self.assertTrue(documents[0].canonical_key.startswith("feed.document:"))
+        self.assertGreaterEqual(len(items), 1)
+        self.assertTrue(
+            any(
+                edge.source_key.startswith("feed.item:")
+                and edge.target_key.startswith("external.url:")
+                for edge in references
+            )
+        )
+        source_metadata = json.dumps(
+            [observation.to_dict() for observation in summary.raw_observations],
+            sort_keys=True,
+        )
+        self.assertIn('"source_id_configured": "example-rss-feed"', source_metadata)
+        self.assertNotIn("fixture-secret", source_metadata)
 
     def test_storage_loads_toml_config_discovery_into_canonical_readback(self):
         require_postgres_binaries()
@@ -6117,6 +6193,20 @@ def canonicalization_fixture(name: str, filename: str) -> Path:
 
 def discovery_fixture(name: str) -> Path:
     return Path(__file__).parents[3] / "fixtures" / "discovery" / name
+
+
+def source_fixture(filename: str) -> Path:
+    return (
+        Path(__file__).parents[3]
+        / "fixtures"
+        / "source_ingestion"
+        / "feed_sources"
+        / filename
+    )
+
+
+def fixed_source_clock() -> datetime:
+    return datetime(2026, 6, 30, 12, 0, 0, tzinfo=UTC)
 
 
 def run_repo_map_in_process(*args):

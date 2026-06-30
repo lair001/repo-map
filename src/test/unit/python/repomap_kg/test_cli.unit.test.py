@@ -603,6 +603,88 @@ class CliUnitTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("psql did not return", stderr.getvalue())
 
+    def test_sources_ingest_feed_prints_json_summary_from_config_only(self):
+        from repomap_kg.source_ingestion import FeedIngestionSummary
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "feed-source.toml"
+            config_path.write_text("[source]\nid = \"example-news-feed\"\n")
+            stdout = io.StringIO()
+            expected = FeedIngestionSummary(
+                source_id="example-news-feed",
+                source_type="feed.rss",
+                policy_status="allowed_with_limits",
+                source_run_id="20260630T120000Z",
+                artifact_path=".repomap/source-artifacts/example/rss.xml",
+                artifact_sha256="0" * 64,
+                artifact_bytes=512,
+                observations=6,
+                feed_observations=5,
+                raw_observations=(),
+                load_summary=LoadSummary(repository_id=7, run_id=11, files=1),
+            )
+
+            with patch(
+                "repomap_kg.cli.ingest_feed_source",
+                return_value=expected,
+            ) as ingest:
+                with redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            "sources",
+                            "ingest-feed",
+                            "--config",
+                            str(config_path),
+                            "--repository-name",
+                            "fixture",
+                            "--root-path",
+                            "/tmp/fixture",
+                            "--pg-host",
+                            "/tmp/socket",
+                            "--pg-port",
+                            "5432",
+                            "--pg-user",
+                            "repo_map_test",
+                            "--pg-database",
+                            "postgres",
+                            "--psql-command",
+                            "/bin/psql",
+                            "--json",
+                        ]
+                    )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["source_id"], "example-news-feed")
+        self.assertEqual(payload["repository_id"], 7)
+        self.assertEqual(payload["run_id"], 11)
+        self.assertEqual(payload["observations"], 6)
+        ingest.assert_called_once()
+        self.assertEqual(ingest.call_args.kwargs["config_path"], str(config_path))
+        self.assertEqual(ingest.call_args.kwargs["root_path"], "/tmp/fixture")
+
+    def test_sources_ingest_feed_rejects_arbitrary_url_argument(self):
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            with self.assertRaises(SystemExit):
+                main(
+                    [
+                        "sources",
+                        "ingest-feed",
+                        "--config",
+                        "/tmp/feed-source.toml",
+                        "--repository-name",
+                        "fixture",
+                        "--url",
+                        "https://example.invalid/rss.xml",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertIn("unrecognized arguments: --url", stderr.getvalue())
+
     def test_storage_files_prints_filtered_json_records(self):
         records = (
             FileRecord(
