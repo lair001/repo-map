@@ -19,6 +19,9 @@ from repomap_kg.graph_keys import (
     html_anchor_key,
     html_document_key,
     html_element_key,
+    xml_attribute_key,
+    xml_document_key,
+    xml_element_key,
     doc_adr_key,
     doc_page_key,
     doc_section_key,
@@ -175,6 +178,21 @@ class GraphKeysUnitTests(unittest.TestCase):
             html_anchor_key("site/index.html", "intro"),
             "html.anchor:file%3Asite%2Findex.html:intro",
         )
+        self.assertEqual(
+            xml_document_key("src/main/resources/applicationContext.xml"),
+            (
+                "xml.document:"
+                "file%3Asrc%2Fmain%2Fresources%2FapplicationContext.xml"
+            ),
+        )
+        self.assertEqual(
+            xml_element_key("pom.xml", "/project/dependencies/dependency[2]"),
+            "xml.element:file%3Apom.xml:%2Fproject%2Fdependencies%2Fdependency%5B2%5D",
+        )
+        self.assertEqual(
+            xml_attribute_key("beans.xml", "/beans/bean", "class"),
+            "xml.attribute:file%3Abeans.xml:%2Fbeans%2Fbean:class",
+        )
         self.assertEqual(ruby_module_key("RepoMap"), "ruby.module:RepoMap")
         self.assertEqual(
             ruby_class_key("RepoMap::Runner"),
@@ -214,6 +232,9 @@ class GraphKeysUnitTests(unittest.TestCase):
         parsed_css_selector = parse_key(
             "css.selector:file%3Atools%2Freport.css:%2Frule%3A1%2Fselector%3A2"
         )
+        parsed_xml_attribute = parse_key(
+            "xml.attribute:file%3Abeans.xml:%2Fbeans%2Fbean:class"
+        )
 
         self.assertEqual(parsed_file.graph_key_version, GRAPH_KEY_VERSION)
         self.assertEqual(parsed_file.namespace, "file")
@@ -242,6 +263,11 @@ class GraphKeysUnitTests(unittest.TestCase):
             parsed_css_selector.segments,
             ("file:tools/report.css", "/rule:1/selector:2"),
         )
+        self.assertEqual(parsed_xml_attribute.namespace, "xml.attribute")
+        self.assertEqual(
+            parsed_xml_attribute.segments,
+            ("file:beans.xml", "/beans/bean", "class"),
+        )
 
     def test_parse_key_rejects_bad_grammar_and_malformed_escapes(self):
         cases = (
@@ -255,6 +281,7 @@ class GraphKeysUnitTests(unittest.TestCase):
             ("unknown.namespace:value", "namespace"),
             ("config.path:file%3Asettings.json:", "segment"),
             ("css.rule:file%3Astyle.css:", "segment"),
+            ("xml.attribute:file%3Abeans.xml:%2Fbeans", "segments"),
         )
 
         for key, message in cases:

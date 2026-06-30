@@ -664,19 +664,204 @@ program = "echo hello"
             "unsafe-xml-construct",
         )
 
-    def test_xml_files_are_plist_only_in_xml1(self):
-        non_plist = extract_config_file_observations(
-            "spring.xml",
-            "<beans><bean id=\"thing\"/></beans>",
+    def test_generic_xml_extracts_spring_structure_references_and_redacts(self):
+        observations = extract_config_file_observations(
+            "src/main/resources/applicationContext.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://www.springframework.org/schema/beans https://www.springframework.org/schema/beans/spring-beans.xsd">
+  <bean id="service" class="com.example.Service">
+    <property name="configPath" value="./config/service.properties"/>
+    <property name="jdbcUrl" value="${db.url}"/>
+    <property name="DB_PASSWORD" value="${env.DB_PASSWORD}"/>
+    <property name="api_key" value="spring-secret-value"/>
+    <constructor-arg ref="repository"/>
+  </bean>
+  <bean id="repository" class="com.example.Repository"/>
+</beans>
+""",
         )
         plist_xml = extract_config_file_observations(
             "policies/chrome-policy.xml",
             "<plist><dict><key>HomepageLocation</key><string>https://example.com</string></dict></plist>",
         )
 
-        self.assertEqual(non_plist, ())
+        payload = json.dumps(
+            [observation.to_dict() for observation in observations],
+            sort_keys=True,
+        )
+        kinds = [item.kind for item in observations]
+        document = observations[0]
+        elements = [item for item in observations if item.kind == "xml.element"]
+        attributes = [item for item in observations if item.kind == "xml.attribute"]
+        references = [item for item in observations if item.kind == "xml.reference"]
+        element_by_pointer = {item.metadata["xml_pointer"]: item for item in elements}
+        attr_by_pointer_name = {
+            (item.metadata["element_pointer"], item.metadata["attribute_name"]): item
+            for item in attributes
+        }
+
+        self.assertNotIn("spring-secret-value", payload)
+        self.assertEqual(document.kind, "xml.document")
+        self.assertEqual(document.metadata["format"], "xml")
+        self.assertEqual(document.metadata["document_role"], "spring-config")
+        self.assertEqual(document.metadata["root_local_name"], "beans")
+        self.assertIn("xml.document", kinds)
+        self.assertIn("xml.element", kinds)
+        self.assertIn("xml.attribute", kinds)
+        self.assertIn("xml.reference", kinds)
+        self.assertIn("/beans/bean", element_by_pointer)
+        self.assertIn("/beans/bean[2]", element_by_pointer)
+        self.assertEqual(
+            element_by_pointer["/beans/bean"].metadata["role_hint"],
+            "spring-bean",
+        )
+        self.assertEqual(element_by_pointer["/beans/bean"].metadata["bean_id"], "service")
+        self.assertEqual(
+            element_by_pointer["/beans/bean"].metadata["class_name"],
+            "com.example.Service",
+        )
+        self.assertEqual(
+            attr_by_pointer_name[("/beans/bean/property[4]", "value")].metadata[
+                "redacted"
+            ],
+            True,
+        )
+        self.assertNotIn(
+            "value_summary",
+            attr_by_pointer_name[("/beans/bean/property[4]", "value")].metadata,
+        )
+        self.assertIn(
+            "external.url:https%3A%2F%2Fwww.springframework.org%2Fschema%2Fbeans%2Fspring-beans.xsd",
+            {item.target for item in references},
+        )
+        self.assertIn("file:src/main/resources/config/service.properties", {item.target for item in references})
+        self.assertIn("env:DB_PASSWORD", {item.target for item in references})
+        self.assertIn("dynamic:xml.property-placeholder:spring-maven-property", {item.target for item in references})
         self.assertEqual(plist_xml[0].kind, "config.document")
         self.assertEqual(plist_xml[0].metadata["format"], "plist-xml")
+
+    def test_generic_xml_extracts_maven_metadata_and_safety_errors(self):
+        pom_observations = extract_config_file_observations(
+            "pom.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>demo</artifactId>
+  <version>${revision}</version>
+  <properties>
+    <revision>1.0.0</revision>
+    <api.token>maven-secret-value</api.token>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-context</artifactId>
+      <version>${spring.version}</version>
+    </dependency>
+  </dependencies>
+</project>
+""",
+        )
+        unsafe = extract_config_file_observations(
+            "src/main/resources/bad-dangerous.xml",
+            """<?xml version="1.0"?>
+<!DOCTYPE beans [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<beans><bean id="bad">&xxe;</bean></beans>
+""",
+        )
+        malformed = extract_config_file_observations(
+            "src/main/resources/bad.xml",
+            "<beans><bean></beans>",
+        )
+
+        payload = json.dumps(
+            [observation.to_dict() for observation in pom_observations],
+            sort_keys=True,
+        )
+        document = pom_observations[0]
+        elements = [item for item in pom_observations if item.kind == "xml.element"]
+        references = [item for item in pom_observations if item.kind == "xml.reference"]
+        dependency = next(
+            item
+            for item in elements
+            if item.metadata["xml_pointer"] == "/project/dependencies/dependency"
+        )
+
+        self.assertNotIn("maven-secret-value", payload)
+        self.assertEqual(document.metadata["document_role"], "maven-pom")
+        self.assertEqual(dependency.metadata["role_hint"], "maven-dependency")
+        self.assertEqual(dependency.metadata["maven_group_id"], "org.springframework")
+        self.assertEqual(dependency.metadata["maven_artifact_id"], "spring-context")
+        self.assertEqual(dependency.metadata["maven_version"], "${spring.version}")
+        self.assertIn(
+            "external.url:https%3A%2F%2Fmaven.apache.org%2Fxsd%2Fmaven-4.0.0.xsd",
+            {item.target for item in references},
+        )
+        self.assertIn(
+            "dynamic:xml.property-placeholder:spring-maven-property",
+            {item.target for item in references},
+        )
+        self.assertEqual([item.kind for item in unsafe], ["xml.parse_error"])
+        self.assertEqual(unsafe[0].metadata["error_kind"], "unsafe-xml-construct")
+        self.assertNotIn("file:///etc/passwd", unsafe[0].metadata["message_summary"])
+        self.assertEqual([item.kind for item in malformed], ["xml.parse_error"])
+        self.assertEqual(malformed[0].metadata["error_kind"], "malformed-xml")
+
+    def test_generic_xml_classifies_conservative_reference_targets(self):
+        observations = extract_config_file_observations(
+            "src/main/resources/paths.xml",
+            """<?xml version="1.0"?>
+<settings>
+  <path value="../../../../outside.properties"/>
+  <path value="/Library/Application Support/config.xml"/>
+  <path value="${CONFIG_DIR}/app.xml"/>
+  <path value="~/Library/config.xml"/>
+  <path value="*.xml"/>
+  <url>mailto:dev@example.com</url>
+  <env>${env.SERVICE_TOKEN}</env>
+</settings>
+""",
+        )
+
+        references = [item for item in observations if item.kind == "xml.reference"]
+        targets = {item.target for item in references}
+        reference_by_target = {item.target: item for item in references}
+
+        self.assertIn("unknown:file:repo-escaping-xml-reference", targets)
+        self.assertIn("external:file:absolute-xml-reference", targets)
+        self.assertIn("dynamic:file:xml-reference-expanded-from-variable", targets)
+        self.assertIn(
+            "external.url:mailto%3Adev%40example.com",
+            targets,
+        )
+        self.assertIn("env:SERVICE_TOKEN", targets)
+        self.assertEqual(
+            reference_by_target[
+                "unknown:file:repo-escaping-xml-reference"
+            ].metadata["reference_kind"],
+            "unknown",
+        )
+
+    def test_generic_xml_processing_instruction_is_safety_error(self):
+        observations = extract_config_file_observations(
+            "src/main/resources/stylesheet.xml",
+            """<?xml version="1.0"?>
+<?xml-stylesheet href="https://example.com/style.xsl" type="text/xsl"?>
+<beans/>
+""",
+        )
+
+        self.assertEqual([item.kind for item in observations], ["xml.parse_error"])
+        self.assertEqual(
+            observations[0].metadata["error_kind"],
+            "unsafe-xml-construct",
+        )
+        self.assertNotIn("https://example.com/style.xsl", observations[0].metadata)
 
 
 if __name__ == "__main__":

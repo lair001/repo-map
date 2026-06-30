@@ -2707,6 +2707,236 @@ cwd = "src/main/python"
             {node["canonical_key"] for node in payload["nodes"]},
         )
 
+    def test_generic_xml_observations_create_structure_and_reference_edges(self):
+        observations = extract_config_file_observations(
+            "src/main/resources/applicationContext.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://www.springframework.org/schema/beans https://www.springframework.org/schema/beans/spring-beans.xsd">
+  <bean id="service" class="com.example.Service">
+    <property name="configPath" value="./config/service.properties"/>
+  </bean>
+</beans>
+""",
+        )
+        unsafe = extract_config_file_observations(
+            "src/main/resources/bad-dangerous.xml",
+            """<?xml version="1.0"?>
+<!DOCTYPE beans [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<beans><bean id="bad">&xxe;</bean></beans>
+""",
+        )
+
+        result = canonicalize_observations((*observations, *unsafe))
+        payload = result.to_dict()
+        node_keys = {node["canonical_key"] for node in payload["nodes"]}
+        edge_triples = {
+            (edge["source_key"], edge["kind"], edge["target_key"])
+            for edge in payload["edges"]
+        }
+
+        self.assertTrue(result.ok)
+        self.assertIn(
+            "xml.document:file%3Asrc%2Fmain%2Fresources%2FapplicationContext.xml",
+            node_keys,
+        )
+        self.assertIn(
+            (
+                "xml.element:"
+                "file%3Asrc%2Fmain%2Fresources%2FapplicationContext.xml:"
+                "%2Fbeans%2Fbean"
+            ),
+            node_keys,
+        )
+        self.assertIn(
+            (
+                "xml.attribute:"
+                "file%3Asrc%2Fmain%2Fresources%2FapplicationContext.xml:"
+                "%2Fbeans%2Fbean:class"
+            ),
+            node_keys,
+        )
+        self.assertIn(
+            (
+                "file:src/main/resources/applicationContext.xml",
+                "defines",
+                (
+                    "xml.document:"
+                    "file%3Asrc%2Fmain%2Fresources%2FapplicationContext.xml"
+                ),
+            ),
+            edge_triples,
+        )
+        self.assertIn(
+            (
+                (
+                    "xml.attribute:"
+                    "file%3Asrc%2Fmain%2Fresources%2FapplicationContext.xml:"
+                    "%2Fbeans%2Fbean%2Fproperty:value"
+                ),
+                "references",
+                "file:src/main/resources/config/service.properties",
+            ),
+            edge_triples,
+        )
+        self.assertNotIn(
+            "xml.document:file%3Asrc%2Fmain%2Fresources%2Fbad-dangerous.xml",
+            node_keys,
+        )
+
+    def test_generic_xml_parse_error_is_raw_only(self):
+        observations = extract_config_file_observations(
+            "src/main/resources/bad.xml",
+            "<beans><bean></beans>",
+        )
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["summary"]["nodes"], 0)
+        self.assertEqual(payload["summary"]["edges"], 0)
+        self.assertEqual(payload["summary"]["evidence"], 1)
+        self.assertEqual(payload["evidence"][0]["raw_kind"], "xml.parse_error")
+
+    def test_generic_xml_definition_diagnostics_reject_bad_identity_metadata(self):
+        observations = [
+            RawObservation(
+                kind="xml.document",
+                source_id="bad-abs.xml#xml-document",
+                path="/absolute/bad.xml",
+                target="xml.document:file%3Abad.xml",
+                confidence="extracted",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={"format": "xml"},
+            ),
+            RawObservation(
+                kind="xml.element",
+                source_id="bad.xml#xml-element",
+                path="bad.xml",
+                target="xml.element:file%3Abad.xml:%2Fbad",
+                confidence="extracted",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={"format": "xml"},
+            ),
+            RawObservation(
+                kind="xml.attribute",
+                source_id="bad.xml#xml-attribute",
+                path="bad.xml",
+                target="xml.attribute:file%3Abad.xml:%2Fbad:value",
+                confidence="extracted",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={"format": "xml", "element_pointer": "/bad"},
+            ),
+        ]
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertFalse(result.ok)
+        self.assertEqual(payload["summary"]["nodes"], 0)
+        self.assertEqual(payload["summary"]["edges"], 0)
+        self.assertEqual(payload["summary"]["errors"], 3)
+        self.assertEqual(
+            {diagnostic["category"] for diagnostic in payload["diagnostics"]},
+            {"invalid_canonical_key"},
+        )
+
+    def test_generic_xml_reference_diagnostics_reject_bad_sources(self):
+        observations = [
+            RawObservation(
+                kind="xml.reference",
+                source_id="bad.xml#xml-reference:missing",
+                path="bad.xml",
+                target="file:target.xml",
+                confidence="heuristic",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={"format": "xml"},
+            ),
+            RawObservation(
+                kind="xml.reference",
+                source_id="bad.xml#xml-reference:file-source",
+                path="bad.xml",
+                target="file:target.xml",
+                confidence="heuristic",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={"format": "xml", "source_key": "file:bad.xml"},
+            ),
+        ]
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertFalse(result.ok)
+        self.assertEqual(payload["summary"]["nodes"], 0)
+        self.assertEqual(payload["summary"]["edges"], 0)
+        self.assertEqual(payload["summary"]["errors"], 2)
+        self.assertEqual(
+            [diagnostic["field"] for diagnostic in payload["diagnostics"]],
+            ["target", "target"],
+        )
+
+    def test_generic_xml_reference_bad_targets_use_unknown_placeholders(self):
+        observations = [
+            RawObservation(
+                kind="xml.reference",
+                source_id="settings.xml#xml-reference:missing-target",
+                path="settings.xml",
+                confidence="heuristic",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={
+                    "format": "xml",
+                    "source_key": "xml.element:file%3Asettings.xml:%2Fsettings",
+                    "element_pointer": "/settings",
+                    "source_kind": "element",
+                },
+            ),
+            RawObservation(
+                kind="xml.reference",
+                source_id="settings.xml#xml-reference:malformed-target",
+                path="settings.xml",
+                target="not a canonical key",
+                confidence="heuristic",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={
+                    "format": "xml",
+                    "source_key": (
+                        "xml.attribute:file%3Asettings.xml:"
+                        "%2Fsettings%2Fpath:value"
+                    ),
+                    "element_pointer": "/settings/path",
+                    "attribute_name": "value",
+                    "source_kind": "attribute",
+                },
+            ),
+        ]
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["summary"]["warnings"], 2)
+        self.assertEqual(payload["summary"]["edges"], 2)
+        self.assertEqual(
+            {edge["target_key"] for edge in payload["edges"]},
+            {
+                "unknown:xml.reference:missing-target",
+                "unknown:xml.reference:malformed-target",
+            },
+        )
+        self.assertEqual(
+            [diagnostic["field"] for diagnostic in payload["diagnostics"]],
+            ["target", "target"],
+        )
+
     def test_html_observations_create_structure_and_reference_edges(self):
         observations = extract_html_file_observations(
             "index.html",

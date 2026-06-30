@@ -39,6 +39,9 @@ _SEGMENT_COUNTS = {
     "html.document": 1,
     "html.element": 2,
     "html.anchor": 2,
+    "xml.document": 1,
+    "xml.element": 2,
+    "xml.attribute": 3,
     "ruby.module": 1,
     "ruby.class": 1,
     "ruby.method": 2,
@@ -180,6 +183,27 @@ def html_element_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> 
 
 def html_anchor_key(path_or_file_key: str | os.PathLike[str], fragment: str) -> str:
     return _key("html.anchor", _coerce_file_key(path_or_file_key), fragment)
+
+
+def xml_document_key(path_or_file_key: str | os.PathLike[str]) -> str:
+    return _key("xml.document", _coerce_file_key(path_or_file_key))
+
+
+def xml_element_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
+    return _key("xml.element", _coerce_file_key(path_or_file_key), _coerce_pointer(pointer))
+
+
+def xml_attribute_key(
+    path_or_file_key: str | os.PathLike[str],
+    pointer: str,
+    attribute_name: str,
+) -> str:
+    return _key(
+        "xml.attribute",
+        _coerce_file_key(path_or_file_key),
+        _coerce_pointer(pointer),
+        attribute_name,
+    )
 
 
 def ruby_module_key(name: str) -> str:

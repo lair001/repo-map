@@ -864,6 +864,71 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertIn("unknown:file:repo-escaping-css-reference", reference_targets)
         self.assertIn("dynamic:file:css-url-dynamic", reference_targets)
 
+    def test_discover_command_emits_java_spring_maven_xml_observations(self):
+        fixture = (
+            REPO_ROOT
+            / "src"
+            / "test"
+            / "fixtures"
+            / "discovery"
+            / "xml_java_spring_maven_basic"
+        )
+
+        exit_code, stdout, stderr = self.run_module_entrypoint(
+            "discover", str(fixture), "--jsonl"
+        )
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertNotIn("xml2-fixture-maven-secret", stdout)
+        self.assertNotIn("xml2-fixture-spring-secret", stdout)
+        self.assertNotIn("file:///etc/passwd", stdout)
+        observations = [
+            json.loads(line)
+            for line in stdout.splitlines()
+            if line.strip()
+        ]
+        kinds = {observation["kind"] for observation in observations}
+        self.assertTrue(
+            {
+                "file",
+                "xml.document",
+                "xml.element",
+                "xml.attribute",
+                "xml.reference",
+                "xml.parse_error",
+            }.issubset(kinds)
+        )
+        roles = {
+            observation["metadata"].get("document_role")
+            for observation in observations
+            if observation["kind"] == "xml.document"
+        }
+        self.assertTrue({"maven-pom", "spring-config"}.issubset(roles))
+        targets = {
+            observation.get("target")
+            for observation in observations
+            if observation["kind"] == "xml.reference"
+        }
+        self.assertIn(
+            "external.url:https%3A%2F%2Fmaven.apache.org%2Fxsd%2Fmaven-4.0.0.xsd",
+            targets,
+        )
+        self.assertIn("file:src/main/resources/config/service.properties", targets)
+        self.assertIn("env:DB_PASSWORD", targets)
+        self.assertIn(
+            "dynamic:xml.property-placeholder:spring-maven-property",
+            targets,
+        )
+        parse_errors = [
+            observation
+            for observation in observations
+            if observation["kind"] == "xml.parse_error"
+        ]
+        self.assertEqual(
+            parse_errors[0]["metadata"]["error_kind"],
+            "unsafe-xml-construct",
+        )
+
     def test_discover_command_emits_codex_mcp_config_dogfood_observations(self):
         fixture = (
             REPO_ROOT

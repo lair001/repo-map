@@ -21,6 +21,9 @@ from repomap_kg.graph_keys import (
     file_key,
     tool_key,
     unknown_key,
+    xml_attribute_key,
+    xml_document_key,
+    xml_element_key,
 )
 from repomap_kg.observations import RawObservation
 
@@ -50,6 +53,8 @@ ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DYNAMIC_MARKERS = ("${", "$(", "{{", "}}", "*", "?", "~")
 PLIST_XML_FORMAT = "plist-xml"
 PLIST_XML_SAFETY_MODE = "pre-scan-no-doctype-entity-no-external-resources"
+GENERIC_XML_FORMAT = "xml"
+GENERIC_XML_SAFETY_MODE = "pre-scan-no-doctype-entity-no-external-resources"
 UNSAFE_XML_DECLARATION_PATTERN = re.compile(r"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
 UNSAFE_PROCESSING_INSTRUCTION_PATTERN = re.compile(
     r"<\?(?!xml(?:\s|\?>))", re.IGNORECASE
@@ -69,6 +74,10 @@ class PlistXmlParseError(ValueError):
     """Raised when XML content is not a supported plist structure."""
 
 
+class GenericXmlSafetyError(ValueError):
+    """Raised when generic XML content uses constructs XML2 refuses to parse."""
+
+
 def extract_config_file_observations(
     relative_path: str,
     content: str,
@@ -85,7 +94,7 @@ def extract_config_file_observations(
     if suffix == ".xml":
         if _looks_like_plist_xml(content):
             return _extract_plist_xml_observations(relative_path, content)
-        return ()
+        return _extract_generic_xml_observations(relative_path, content)
     return _extract_json_observations(relative_path, content)
 
 
@@ -340,6 +349,75 @@ def _extract_plist_xml_observations(
     return (document, *path_observations, *reference_observations)
 
 
+def _extract_generic_xml_observations(
+    relative_path: str,
+    content: str,
+) -> tuple[RawObservation, ...]:
+    try:
+        _check_safe_generic_xml(content)
+        root = ElementTree.fromstring(content)
+    except GenericXmlSafetyError as error:
+        return (
+            _xml_parse_error_observation(
+                relative_path,
+                error_kind="unsafe-xml-construct",
+                message=str(error),
+                recovered=False,
+            ),
+        )
+    except ElementTree.ParseError as error:
+        return (
+            _xml_parse_error_observation(
+                relative_path,
+                error_kind="malformed-xml",
+                message=str(error),
+                start_line=_xml_parse_error_line(error),
+                recovered=False,
+            ),
+        )
+
+    namespaces = _xml_namespace_summary(content)
+    root_parts = _xml_name_parts(root.tag)
+    document_role = _generic_xml_document_role(relative_path, root, namespaces)
+    elements: list[RawObservation] = []
+    attributes: list[RawObservation] = []
+    references: list[RawObservation] = []
+    _walk_xml_element(
+        relative_path,
+        root,
+        pointer=f"/{root_parts['local_name']}",
+        document_role=document_role,
+        content=content,
+        elements=elements,
+        attributes=attributes,
+        references=references,
+    )
+    document = RawObservation(
+        kind="xml.document",
+        source_id=f"{relative_path}#xml-document",
+        path=relative_path,
+        target=xml_document_key(relative_path),
+        confidence="extracted",
+        extractor=EXTRACTOR_NAME,
+        extractor_version=__version__,
+        metadata={
+            "format": GENERIC_XML_FORMAT,
+            "parser": _parser_name(GENERIC_XML_FORMAT),
+            "safety_mode": GENERIC_XML_SAFETY_MODE,
+            "root_tag": root_parts["display_name"],
+            "root_local_name": root_parts["local_name"],
+            "root_namespace_uri": root_parts.get("namespace_uri"),
+            "namespace_summary": namespaces,
+            "document_role": document_role,
+            "parse_error_count": 0,
+            "element_count": len(elements),
+            "attribute_count": len(attributes),
+            "reference_count": len(references),
+        },
+    )
+    return (document, *elements, *attributes, *references)
+
+
 def _looks_like_plist_xml(content: str) -> bool:
     return bool(PLIST_ROOT_PATTERN.search(content))
 
@@ -351,6 +429,17 @@ def _check_safe_plist_xml(content: str) -> None:
         )
     if UNSAFE_PROCESSING_INSTRUCTION_PATTERN.search(content):
         raise PlistXmlSafetyError(
+            "non-XML processing instructions are not supported"
+        )
+
+
+def _check_safe_generic_xml(content: str) -> None:
+    if UNSAFE_XML_DECLARATION_PATTERN.search(content):
+        raise GenericXmlSafetyError(
+            "doctype and entity declarations are not supported"
+        )
+    if UNSAFE_PROCESSING_INSTRUCTION_PATTERN.search(content):
+        raise GenericXmlSafetyError(
             "non-XML processing instructions are not supported"
         )
 
@@ -428,6 +517,533 @@ def _xml_local_name(tag: str) -> str:
     if tag.startswith("{"):
         return tag.rsplit("}", 1)[-1]
     return tag
+
+
+def _xml_name_parts(name: str) -> dict[str, str]:
+    if name.startswith("{"):
+        namespace_uri, local_name = name[1:].split("}", 1)
+        return {
+            "display_name": local_name,
+            "local_name": local_name,
+            "namespace_uri": namespace_uri,
+        }
+    return {"display_name": name, "local_name": name}
+
+
+def _xml_attribute_parts(name: str) -> dict[str, str]:
+    parts = _xml_name_parts(name)
+    namespace_uri = parts.get("namespace_uri")
+    if namespace_uri == "http://www.w3.org/2001/XMLSchema-instance":
+        parts["display_name"] = f"xsi:{parts['local_name']}"
+    return parts
+
+
+def _xml_namespace_summary(content: str) -> list[dict[str, str]]:
+    namespace_pattern = re.compile(
+        r"\sxmlns(?::(?P<prefix>[A-Za-z_][\w.-]*))?=\"(?P<uri>[^\"]+)\""
+    )
+    summary = []
+    seen: set[tuple[str, str]] = set()
+    for match in namespace_pattern.finditer(content):
+        prefix = match.group("prefix") or ""
+        uri = match.group("uri")
+        key = (prefix, uri)
+        if key in seen:
+            continue
+        seen.add(key)
+        summary.append({"prefix": prefix, "uri": uri})
+    return summary
+
+
+def _generic_xml_document_role(
+    relative_path: str,
+    root: ElementTree.Element,
+    namespaces: list[dict[str, str]],
+) -> str:
+    root_local = _xml_local_name(root.tag)
+    namespace_uris = {item["uri"] for item in namespaces}
+    path = PurePosixPath(relative_path)
+    if path.name == "pom.xml" or (
+        root_local == "project"
+        and "http://maven.apache.org/POM/4.0.0" in namespace_uris
+    ):
+        return "maven-pom"
+    if root_local == "beans" or any(
+        uri.startswith("http://www.springframework.org/schema/")
+        for uri in namespace_uris
+    ):
+        return "spring-config"
+    if path.suffix == ".xml":
+        return "xml-config"
+    return "config"
+
+
+def _walk_xml_element(
+    relative_path: str,
+    element: ElementTree.Element,
+    *,
+    pointer: str,
+    document_role: str,
+    content: str,
+    elements: list[RawObservation],
+    attributes: list[RawObservation],
+    references: list[RawObservation],
+) -> None:
+    parts = _xml_name_parts(element.tag)
+    local_name = parts["local_name"]
+    redacted = _is_secret_xml_element(element)
+    element_key = xml_element_key(relative_path, pointer)
+    metadata = _xml_element_metadata(
+        element,
+        pointer=pointer,
+        document_role=document_role,
+        redacted=redacted,
+    )
+    elements.append(
+        RawObservation(
+            kind="xml.element",
+            source_id=f"{relative_path}#xml-element:{pointer}",
+            path=relative_path,
+            name=pointer,
+            target=element_key,
+            confidence="extracted",
+            extractor=EXTRACTOR_NAME,
+            extractor_version=__version__,
+            metadata=metadata,
+        )
+    )
+    text = (element.text or "").strip()
+    if text:
+        references.extend(
+            _xml_reference_observations(
+                relative_path,
+                value=text,
+                key_context=local_name,
+                source_key=element_key,
+                source_kind="xml.element",
+                pointer=pointer,
+                attribute_name=None,
+                redacted=redacted,
+            )
+        )
+    for attr_name, attr_value in sorted(element.attrib.items()):
+        attr_parts = _xml_attribute_parts(attr_name)
+        attr_display_name = attr_parts["display_name"]
+        attr_redacted = redacted or _is_secret_key(attr_display_name)
+        semantic_key = _xml_attribute_semantic_key(
+            attr_display_name,
+            element,
+            element_local_name=local_name,
+        )
+        attr_key = xml_attribute_key(relative_path, pointer, attr_display_name)
+        attr_metadata = _xml_attribute_metadata(
+            attr_value,
+            attr_parts=attr_parts,
+            pointer=pointer,
+            semantic_key=semantic_key,
+            redacted=attr_redacted,
+        )
+        attributes.append(
+            RawObservation(
+                kind="xml.attribute",
+                source_id=(
+                    f"{relative_path}#xml-attribute:{pointer}:{attr_display_name}"
+                ),
+                path=relative_path,
+                name=attr_display_name,
+                target=attr_key,
+                confidence="extracted",
+                extractor=EXTRACTOR_NAME,
+                extractor_version=__version__,
+                metadata=attr_metadata,
+            )
+        )
+        references.extend(
+            _xml_reference_observations(
+                relative_path,
+                value=attr_value,
+                key_context=semantic_key,
+                source_key=attr_key,
+                source_kind="xml.attribute",
+                pointer=pointer,
+                attribute_name=attr_display_name,
+                redacted=attr_redacted,
+            )
+        )
+    for child, child_pointer in _xml_child_pointers(element, pointer):
+        _walk_xml_element(
+            relative_path,
+            child,
+            pointer=child_pointer,
+            document_role=document_role,
+            content=content,
+            elements=elements,
+            attributes=attributes,
+            references=references,
+        )
+
+
+def _xml_child_pointers(
+    element: ElementTree.Element,
+    parent_pointer: str,
+) -> tuple[tuple[ElementTree.Element, str], ...]:
+    children = list(element)
+    totals: dict[str, int] = {}
+    for child in children:
+        local = _xml_local_name(child.tag)
+        totals[local] = totals.get(local, 0) + 1
+    seen: dict[str, int] = {}
+    result = []
+    for child in children:
+        local = _xml_local_name(child.tag)
+        seen[local] = seen.get(local, 0) + 1
+        segment = local if seen[local] == 1 else f"{local}[{seen[local]}]"
+        result.append((child, f"{parent_pointer}/{segment}"))
+    return tuple(result)
+
+
+def _xml_element_metadata(
+    element: ElementTree.Element,
+    *,
+    pointer: str,
+    document_role: str,
+    redacted: bool,
+) -> dict[str, Any]:
+    parts = _xml_name_parts(element.tag)
+    children = list(element)
+    metadata: dict[str, Any] = {
+        "format": GENERIC_XML_FORMAT,
+        "parser": _parser_name(GENERIC_XML_FORMAT),
+        "safety_mode": GENERIC_XML_SAFETY_MODE,
+        "element_name": parts["display_name"],
+        "local_name": parts["local_name"],
+        "xml_pointer": pointer,
+        "attribute_count": len(element.attrib),
+        "child_count": len(children),
+        "identity_mode": "structural-document",
+        "role_hint": _xml_role_hint(element, document_role=document_role),
+        "redacted": redacted,
+    }
+    if "namespace_uri" in parts:
+        metadata["namespace_uri"] = parts["namespace_uri"]
+    if redacted:
+        metadata["redaction_reason"] = "secret-prone-key"
+    else:
+        text = (element.text or "").strip()
+        if text and not _is_placeholder_heavy(text):
+            summary = _safe_value_summary(text)
+            if summary is not None:
+                metadata["text_summary"] = summary
+    metadata.update(_xml_domain_metadata(element, document_role=document_role))
+    return metadata
+
+
+def _xml_attribute_metadata(
+    value: str,
+    *,
+    attr_parts: dict[str, str],
+    pointer: str,
+    semantic_key: str,
+    redacted: bool,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "format": GENERIC_XML_FORMAT,
+        "parser": _parser_name(GENERIC_XML_FORMAT),
+        "safety_mode": GENERIC_XML_SAFETY_MODE,
+        "element_pointer": pointer,
+        "attribute_name": attr_parts["display_name"],
+        "local_name": attr_parts["local_name"],
+        "semantic_key": semantic_key,
+        "value_type": "string",
+        "redacted": redacted,
+    }
+    if "namespace_uri" in attr_parts:
+        metadata["namespace_uri"] = attr_parts["namespace_uri"]
+    if redacted:
+        metadata["redaction_reason"] = "secret-prone-key"
+        return metadata
+    summary = _safe_value_summary(value)
+    if summary is not None:
+        metadata["value_summary"] = summary
+    return metadata
+
+
+def _xml_role_hint(
+    element: ElementTree.Element,
+    *,
+    document_role: str,
+) -> str:
+    local = _xml_local_name(element.tag)
+    if document_role == "spring-config":
+        if local == "bean":
+            return "spring-bean"
+        if local == "property":
+            return "spring-property"
+    if document_role == "maven-pom":
+        if local == "dependency":
+            return "maven-dependency"
+        if local == "plugin":
+            return "maven-plugin"
+        if _xml_parentish_property_name(local):
+            return "maven-property"
+    return "unknown"
+
+
+def _xml_domain_metadata(
+    element: ElementTree.Element,
+    *,
+    document_role: str,
+) -> dict[str, Any]:
+    local = _xml_local_name(element.tag)
+    metadata: dict[str, Any] = {}
+    if document_role == "spring-config" and local == "bean":
+        bean_id = element.attrib.get("id")
+        class_name = element.attrib.get("class")
+        if bean_id:
+            metadata["bean_id"] = bean_id
+        if class_name:
+            metadata["class_name"] = class_name
+    if document_role == "spring-config" and local == "property":
+        property_name = element.attrib.get("name")
+        ref = element.attrib.get("ref")
+        if property_name:
+            metadata["property_name"] = property_name
+        if ref:
+            metadata["bean_ref"] = ref
+    if document_role == "maven-pom" and local in ("project", "dependency", "plugin"):
+        child_values = _xml_direct_child_texts(element)
+        if "groupId" in child_values:
+            metadata["maven_group_id"] = child_values["groupId"]
+        if "artifactId" in child_values:
+            metadata["maven_artifact_id"] = child_values["artifactId"]
+        if "version" in child_values:
+            metadata["maven_version"] = child_values["version"]
+    return metadata
+
+
+def _xml_direct_child_texts(element: ElementTree.Element) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for child in element:
+        local = _xml_local_name(child.tag)
+        text = (child.text or "").strip()
+        if text and local not in values and not _is_secret_key(local):
+            values[local] = text
+    return values
+
+
+def _xml_parentish_property_name(local_name: str) -> bool:
+    return local_name not in (
+        "project",
+        "modelVersion",
+        "groupId",
+        "artifactId",
+        "version",
+        "dependencies",
+        "dependency",
+        "build",
+        "plugins",
+        "plugin",
+    )
+
+
+def _xml_attribute_semantic_key(
+    attr_name: str,
+    element: ElementTree.Element,
+    *,
+    element_local_name: str,
+) -> str:
+    semantic_parts = [attr_name, element_local_name]
+    xml_name_attr = element.attrib.get("name")
+    if isinstance(xml_name_attr, str) and xml_name_attr.strip():
+        semantic_parts.append(xml_name_attr)
+    return "_".join(_normalized_key(part) for part in semantic_parts)
+
+
+def _is_secret_xml_element(element: ElementTree.Element) -> bool:
+    local = _xml_local_name(element.tag)
+    if _is_secret_key(local):
+        return True
+    xml_name_attr = element.attrib.get("name")
+    return isinstance(xml_name_attr, str) and _is_secret_key(xml_name_attr)
+
+
+def _is_placeholder_heavy(value: str) -> bool:
+    return "${" in value or "$(" in value or "{{" in value
+
+
+def _xml_reference_observations(
+    relative_path: str,
+    *,
+    value: str,
+    key_context: str,
+    source_key: str,
+    source_kind: str,
+    pointer: str,
+    attribute_name: str | None,
+    redacted: bool,
+) -> tuple[RawObservation, ...]:
+    references = _detect_xml_references(
+        relative_path,
+        key_context,
+        value,
+        redacted=redacted,
+    )
+    observations = []
+    for ordinal, reference in enumerate(references):
+        metadata: dict[str, Any] = {
+            "format": GENERIC_XML_FORMAT,
+            "parser": _parser_name(GENERIC_XML_FORMAT),
+            "safety_mode": GENERIC_XML_SAFETY_MODE,
+            "source_key": source_key,
+            "source_kind": source_kind,
+            "element_pointer": pointer,
+            "reference_kind": reference["kind"],
+            "redacted": reference["redacted"],
+            "resolution_reason": reference["reason"],
+        }
+        if attribute_name is not None:
+            metadata["attribute_name"] = attribute_name
+        if "summary" in reference:
+            metadata["raw_value_summary"] = reference["summary"]
+        if reference["redacted"]:
+            metadata["redaction_reason"] = "secret-prone-key"
+        observations.append(
+            RawObservation(
+                kind="xml.reference",
+                source_id=(
+                    f"{relative_path}#xml-reference:{pointer}:"
+                    f"{attribute_name or 'text'}:{ordinal}"
+                ),
+                path=relative_path,
+                name=pointer,
+                target=reference["target"],
+                confidence="heuristic",
+                extractor=EXTRACTOR_NAME,
+                extractor_version=__version__,
+                metadata=metadata,
+            )
+        )
+    return tuple(observations)
+
+
+def _detect_xml_references(
+    relative_path: str,
+    key_context: str,
+    value: str,
+    *,
+    redacted: bool,
+) -> tuple[dict[str, Any], ...]:
+    stripped = value.strip()
+    if not stripped:
+        return ()
+    references = []
+    for token in stripped.split():
+        if _is_url(token):
+            references.append(
+                _reference(
+                    "external.url",
+                    external_url_key(token),
+                    "url-literal",
+                    token,
+                    redacted=redacted,
+                )
+            )
+    if references:
+        return tuple(references)
+    env_placeholder = re.fullmatch(r"\$\{env\.([A-Za-z_][A-Za-z0-9_]*)\}", stripped)
+    if env_placeholder is not None:
+        return (
+            _reference(
+                "env",
+                env_key(env_placeholder.group(1)),
+                "env-property-placeholder",
+                stripped,
+                redacted=redacted,
+            ),
+        )
+    if re.fullmatch(r"\$\{[^}]+\}", stripped):
+        return (
+            _reference(
+                "dynamic",
+                dynamic_key("xml.property-placeholder", "spring-maven-property"),
+                "dynamic-property-placeholder",
+                stripped,
+                redacted=redacted,
+            ),
+        )
+    normalized_context = _normalized_key(key_context)
+    if _looks_like_xml_file_key(normalized_context, stripped):
+        return (_xml_file_reference(relative_path, stripped, redacted=redacted),)
+    return ()
+
+
+def _looks_like_xml_file_key(key_context: str, value: str) -> bool:
+    if _is_url(value):
+        return False
+    if value.startswith(("./", "../", "/", "${", "~")):
+        return True
+    markers = ("path", "file", "resource", "location", "config", "directory")
+    return "/" in value and any(marker in key_context for marker in markers)
+
+
+def _xml_file_reference(
+    relative_path: str,
+    value: str,
+    *,
+    redacted: bool,
+) -> dict[str, Any]:
+    if _is_dynamic_value(value):
+        return _reference(
+            "dynamic",
+            dynamic_key("file", "xml-reference-expanded-from-variable"),
+            "dynamic-file-reference",
+            value,
+            redacted=redacted,
+        )
+    if value.startswith("/"):
+        return _reference(
+            "external",
+            external_key("file", "absolute-xml-reference"),
+            "absolute-file-reference",
+            value,
+            redacted=redacted,
+        )
+    if value.startswith("../"):
+        resolved = _resolve_repo_path(relative_path, value)
+        if resolved is None:
+            return _reference(
+                "unknown",
+                unknown_key("file", "repo-escaping-xml-reference"),
+                "repo-escaping-file-reference",
+                value,
+                redacted=redacted,
+            )
+        return _reference(
+            "file",
+            file_key(resolved),
+            "relative-file-reference",
+            value,
+            redacted=redacted,
+        )
+    if value.startswith("./"):
+        resolved = _resolve_repo_path(relative_path, value)
+    else:
+        resolved = _normalize_repo_path(value)
+    if resolved is None:
+        return _reference(
+            "unknown",
+            unknown_key("file", "repo-escaping-xml-reference"),
+            "repo-escaping-file-reference",
+            value,
+            redacted=redacted,
+        )
+    return _reference(
+        "file",
+        file_key(resolved),
+        "relative-file-reference",
+        value,
+        redacted=redacted,
+    )
 
 
 def normalize_jsonc(content: str) -> str:
@@ -1109,6 +1725,37 @@ def _parse_error_observation(
     )
 
 
+def _xml_parse_error_observation(
+    relative_path: str,
+    *,
+    error_kind: str,
+    message: str,
+    start_line: int | None = None,
+    recovered: bool,
+) -> RawObservation:
+    metadata: dict[str, Any] = {
+        "format": GENERIC_XML_FORMAT,
+        "parser": _parser_name(GENERIC_XML_FORMAT),
+        "safety_mode": GENERIC_XML_SAFETY_MODE,
+        "error_kind": error_kind,
+        "message_summary": _safe_error_message(None, message),
+        "recovered": recovered,
+    }
+    if start_line is not None:
+        metadata["line_number"] = start_line
+    return RawObservation(
+        kind="xml.parse_error",
+        source_id=f"{relative_path}#xml-parse-error:{start_line or 'document'}",
+        path=relative_path,
+        start_line=start_line,
+        end_line=start_line,
+        confidence="unknown",
+        extractor=EXTRACTOR_NAME,
+        extractor_version=__version__,
+        metadata=metadata,
+    )
+
+
 def _safe_error_message(
     error: Any | None,
     message: str | None,
@@ -1128,6 +1775,8 @@ def _parser_name(format_name: str) -> str:
     if format_name == "toml":
         return "stdlib-tomllib"
     if format_name == PLIST_XML_FORMAT:
+        return "stdlib-elementtree-safe"
+    if format_name == GENERIC_XML_FORMAT:
         return "stdlib-elementtree-safe"
     return "stdlib-json"
 

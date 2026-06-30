@@ -49,6 +49,9 @@ from repomap_kg.graph_keys import (
     tool_key,
     unknown_key,
     validate_key,
+    xml_attribute_key,
+    xml_document_key,
+    xml_element_key,
 )
 from repomap_kg.html import extract_html_file_observations
 from repomap_kg.markdown import (
@@ -87,6 +90,7 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             "config_toml_basic",
             "config_codex_mcp_dogfood",
             "xml_plist_chrome_policy_basic",
+            "xml_java_spring_maven_basic",
             "html_static_basic",
             "css_static_basic",
         )
@@ -135,6 +139,13 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
                 "mcp/config.json",
                 "/mcp_servers/repomap/command",
             ),
+            xml_document_key("pom.xml"),
+            xml_element_key("pom.xml", "/project/dependencies/dependency[2]"),
+            xml_attribute_key(
+                "src/main/resources/applicationContext.xml",
+                "/beans/bean",
+                "class",
+            ),
             html_document_key("site/index.html"),
             html_element_key("site/index.html", "/html/body/main/a[2]"),
             html_anchor_key("site/index.html", "intro"),
@@ -153,6 +164,15 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             "nix.output:repo-map:packages%2Faarch64-darwin%2Fdefault",
         )
         self.assertEqual(keys[16], "ruby.class:RepoMap%3A%3ARunner")
+        self.assertEqual(keys[-6], "xml.document:file%3Apom.xml")
+        self.assertEqual(
+            keys[-5],
+            "xml.element:file%3Apom.xml:%2Fproject%2Fdependencies%2Fdependency%5B2%5D",
+        )
+        self.assertEqual(
+            keys[-4],
+            "xml.attribute:file%3Asrc%2Fmain%2Fresources%2FapplicationContext.xml:%2Fbeans%2Fbean:class",
+        )
         self.assertEqual(keys[-3], "html.document:file%3Asite%2Findex.html")
         self.assertEqual(
             keys[-2],
@@ -693,6 +713,311 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
         self.assertNotIn(
             "config.document:file%3Adangerous.plist",
             {node["canonical_key"] for node in payload["nodes"]},
+        )
+
+    def test_generic_xml_extraction_and_canonicalization_contract(self):
+        observations = extract_config_file_observations(
+            "src/main/resources/applicationContext.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://www.springframework.org/schema/beans https://www.springframework.org/schema/beans/spring-beans.xsd">
+  <bean id="service" class="com.example.Service">
+    <property name="configPath" value="./config/service.properties"/>
+    <property name="jdbcUrl" value="${db.url}"/>
+    <property name="DB_PASSWORD" value="${env.DB_PASSWORD}"/>
+    <property name="api_key" value="xml2-contract-secret"/>
+  </bean>
+  <bean id="repository" class="com.example.Repository"/>
+</beans>
+""",
+        )
+        pom_observations = extract_config_file_observations(
+            "pom.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>xml-smoke</artifactId>
+  <version>1.0.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-context</artifactId>
+      <version>${spring.version}</version>
+    </dependency>
+  </dependencies>
+</project>
+""",
+        )
+        unsafe = extract_config_file_observations(
+            "dangerous.xml",
+            """<?xml version="1.0"?>
+<!DOCTYPE beans [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<beans><bean id="bad">&xxe;</bean></beans>
+""",
+        )
+
+        serialized = json.dumps(
+            [
+                observation.to_dict()
+                for observation in (*observations, *pom_observations, *unsafe)
+            ],
+            sort_keys=True,
+        )
+        kinds = {item.kind for item in (*observations, *pom_observations)}
+        result = canonicalize_observations(
+            (*observations, *pom_observations, *unsafe)
+        )
+        payload = result.to_dict()
+
+        self.assertNotIn("xml2-contract-secret", serialized)
+        self.assertNotIn("file:///etc/passwd", serialized)
+        self.assertTrue(
+            {
+                "xml.document",
+                "xml.element",
+                "xml.attribute",
+                "xml.reference",
+            }.issubset(kinds)
+        )
+        self.assertEqual(observations[0].metadata["document_role"], "spring-config")
+        self.assertEqual(pom_observations[0].metadata["document_role"], "maven-pom")
+        self.assertEqual(unsafe[0].kind, "xml.parse_error")
+        self.assertEqual(unsafe[0].metadata["error_kind"], "unsafe-xml-construct")
+
+        nodes = {node["canonical_key"]: node for node in payload["nodes"]}
+        edges = {
+            (edge["source_key"], edge["kind"], edge["target_key"])
+            for edge in payload["edges"]
+        }
+        self.assertIn(
+            "xml.document:file%3Asrc%2Fmain%2Fresources%2FapplicationContext.xml",
+            nodes,
+        )
+        self.assertIn(
+            "xml.element:file%3Apom.xml:%2Fproject%2Fdependencies%2Fdependency",
+            nodes,
+        )
+        self.assertEqual(
+            nodes[
+                "xml.element:file%3Apom.xml:%2Fproject%2Fdependencies%2Fdependency"
+            ]["metadata"]["maven_group_id"],
+            "org.springframework",
+        )
+        self.assertIn(
+            (
+                "file:src/main/resources/applicationContext.xml",
+                "defines",
+                "xml.document:file%3Asrc%2Fmain%2Fresources%2FapplicationContext.xml",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "xml.attribute:file%3Asrc%2Fmain%2Fresources%2FapplicationContext.xml:%2Fbeans%2Fbean%2Fproperty:value",
+                "references",
+                "file:src/main/resources/config/service.properties",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "xml.element:file%3Apom.xml:%2Fproject%2Fdependencies%2Fdependency%2Fversion",
+                "references",
+                "dynamic:xml.property-placeholder:spring-maven-property",
+            ),
+            edges,
+        )
+        self.assertNotIn("xml.document:file%3Adangerous.xml", nodes)
+
+    def test_generic_xml_reference_and_diagnostic_contracts(self):
+        observations = extract_config_file_observations(
+            "src/main/resources/paths.xml",
+            """<?xml version="1.0"?>
+<settings>
+  <path value="../../../../outside.properties"/>
+  <path value="/Library/Application Support/config.xml"/>
+  <path value="${CONFIG_DIR}/app.xml"/>
+  <url>mailto:dev@example.com</url>
+  <env>${env.SERVICE_TOKEN}</env>
+</settings>
+""",
+        )
+        malformed = extract_config_file_observations(
+            "src/main/resources/bad.xml",
+            "<settings><path></settings>",
+        )
+        diagnostic_observations = [
+            RawObservation(
+                kind="xml.document",
+                source_id="bad-abs.xml#xml-document",
+                path="/absolute/bad.xml",
+                target="xml.document:file%3Abad.xml",
+                confidence="extracted",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={"format": "xml"},
+            ),
+            RawObservation(
+                kind="xml.element",
+                source_id="bad.xml#xml-element",
+                path="bad.xml",
+                target="xml.element:file%3Abad.xml:%2Fbad",
+                confidence="extracted",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={"format": "xml"},
+            ),
+            RawObservation(
+                kind="xml.attribute",
+                source_id="bad.xml#xml-attribute",
+                path="bad.xml",
+                target="xml.attribute:file%3Abad.xml:%2Fbad:value",
+                confidence="extracted",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={"format": "xml", "element_pointer": "/bad"},
+            ),
+            RawObservation(
+                kind="xml.reference",
+                source_id="settings.xml#xml-reference:missing-source",
+                path="settings.xml",
+                target="file:target.xml",
+                confidence="heuristic",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={"format": "xml"},
+            ),
+            RawObservation(
+                kind="xml.reference",
+                source_id="settings.xml#xml-reference:file-source",
+                path="settings.xml",
+                target="file:target.xml",
+                confidence="heuristic",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={"format": "xml", "source_key": "file:settings.xml"},
+            ),
+            RawObservation(
+                kind="xml.reference",
+                source_id="settings.xml#xml-reference:missing-target",
+                path="settings.xml",
+                confidence="heuristic",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={
+                    "format": "xml",
+                    "source_key": "xml.element:file%3Asettings.xml:%2Fsettings",
+                    "element_pointer": "/settings",
+                    "source_kind": "element",
+                },
+            ),
+            RawObservation(
+                kind="xml.reference",
+                source_id="settings.xml#xml-reference:malformed-target",
+                path="settings.xml",
+                target="not a canonical key",
+                confidence="heuristic",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={
+                    "format": "xml",
+                    "source_key": (
+                        "xml.attribute:file%3Asettings.xml:"
+                        "%2Fsettings%2Fpath:value"
+                    ),
+                    "element_pointer": "/settings/path",
+                    "attribute_name": "value",
+                    "source_kind": "attribute",
+                },
+            ),
+        ]
+
+        targets = {
+            observation.target
+            for observation in observations
+            if observation.kind == "xml.reference"
+        }
+        result = canonicalize_observations(
+            (*observations, *malformed, *diagnostic_observations)
+        )
+        payload = result.to_dict()
+
+        self.assertIn("unknown:file:repo-escaping-xml-reference", targets)
+        self.assertIn("external:file:absolute-xml-reference", targets)
+        self.assertIn("dynamic:file:xml-reference-expanded-from-variable", targets)
+        self.assertIn("external.url:mailto%3Adev%40example.com", targets)
+        self.assertIn("env:SERVICE_TOKEN", targets)
+        self.assertFalse(result.ok)
+        self.assertGreaterEqual(payload["summary"]["warnings"], 2)
+        self.assertGreaterEqual(payload["summary"]["errors"], 5)
+        self.assertIn(
+            "unknown:xml.reference:missing-target",
+            {edge["target_key"] for edge in payload["edges"]},
+        )
+        self.assertIn(
+            "unknown:xml.reference:malformed-target",
+            {edge["target_key"] for edge in payload["edges"]},
+        )
+        self.assertNotIn(
+            "xml.document:file%3Asrc%2Fmain%2Fresources%2Fbad.xml",
+            {node["canonical_key"] for node in payload["nodes"]},
+        )
+
+    def test_generic_xml_element_text_references_are_canonicalized(self):
+        observations = extract_config_file_observations(
+            "src/main/resources/settings.xml",
+            """<?xml version="1.0"?>
+<settings>
+  <configPath>config/local.xml</configPath>
+  <dotRelativePath>./config/local-dot.xml</dotRelativePath>
+  <absolutePath>/Library/Application Support/app.xml</absolutePath>
+  <templatePath>${CONFIG_DIR}/app.xml</templatePath>
+  <supportUrl>mailto:support@example.com</supportUrl>
+</settings>
+""",
+        )
+        processing_instruction = extract_config_file_observations(
+            "src/main/resources/stylesheet.xml",
+            """<?xml version="1.0"?>
+<?xml-stylesheet href="https://example.com/style.xsl" type="text/xsl"?>
+<settings/>
+""",
+        )
+
+        result = canonicalize_observations((*observations, *processing_instruction))
+        payload = result.to_dict()
+        reference_edges = [
+            edge for edge in payload["edges"] if edge["kind"] == "references"
+        ]
+
+        self.assertTrue(result.ok)
+        self.assertEqual([item.kind for item in processing_instruction], ["xml.parse_error"])
+        self.assertTrue(
+            all(edge["source_key"].startswith("xml.element:") for edge in reference_edges)
+        )
+        self.assertIn(
+            "file:config/local.xml",
+            {edge["target_key"] for edge in reference_edges},
+        )
+        self.assertIn(
+            "file:src/main/resources/config/local-dot.xml",
+            {edge["target_key"] for edge in reference_edges},
+        )
+        self.assertIn(
+            "external:file:absolute-xml-reference",
+            {edge["target_key"] for edge in reference_edges},
+        )
+        self.assertIn(
+            "dynamic:file:xml-reference-expanded-from-variable",
+            {edge["target_key"] for edge in reference_edges},
+        )
+        self.assertIn(
+            "external.url:mailto%3Asupport%40example.com",
+            {edge["target_key"] for edge in reference_edges},
         )
 
     def test_static_html_extraction_and_canonicalization_contract(self):

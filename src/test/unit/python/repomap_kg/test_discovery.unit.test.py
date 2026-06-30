@@ -183,7 +183,7 @@ class DiscoveryUnitTests(unittest.TestCase):
         self.assertIn(".jsonl", {item.path[-6:] for item in observations})
         self.assertIn(".jsonc", {item.path[-6:] for item in observations})
 
-    def test_discover_observations_includes_plist_config_facts_only_for_plist_xml(self):
+    def test_discover_observations_keeps_plist_config_and_extracts_generic_xml(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             self.write(
@@ -204,7 +204,14 @@ class DiscoveryUnitTests(unittest.TestCase):
 <plist><dict><key>Bad</key><string>&xxe;</string></dict></plist>
 """,
             )
-            self.write(root / "generic.xml", "<beans><bean id=\"deferred\"/></beans>\n")
+            self.write(
+                root / "generic.xml",
+                """<?xml version="1.0"?>
+<beans xmlns="http://www.springframework.org/schema/beans">
+  <bean id="service" class="com.example.Service"/>
+</beans>
+""",
+            )
             self.write(root / "managed" / "policy.json", "{}\n")
 
             observations = discover_observations(root)
@@ -229,8 +236,9 @@ class DiscoveryUnitTests(unittest.TestCase):
         self.assertIn("config.path", kinds)
         self.assertIn("config.reference", kinds)
         self.assertIn("config.parse_error", kinds)
-        self.assertNotIn("xml.document", kinds)
-        self.assertNotIn("xml.element", kinds)
+        self.assertIn("xml.document", kinds)
+        self.assertIn("xml.element", kinds)
+        self.assertIn("xml.attribute", kinds)
         self.assertNotIn("file:///etc/passwd", payload)
 
     def test_discover_observations_includes_static_html_facts(self):
