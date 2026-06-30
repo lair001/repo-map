@@ -25,6 +25,7 @@ from repomap_kg.graph_keys import (
     GRAPH_KEY_VERSION,
     GraphKeyError,
     file_key,
+    host_category_key,
     validate_key,
 )
 from repomap_kg.host_mutators import (
@@ -575,12 +576,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_storage_root_argument(storage_host_mutators)
     storage_host_mutators.add_argument(
+        "--canonical",
+        action="store_true",
+        help=(
+            "read canonical mutates_host edges instead of legacy "
+            "observation-derived host mutation rows"
+        ),
+    )
+    storage_host_mutators.add_argument(
         "--category",
         help="include only this host mutation category",
     )
     storage_host_mutators.add_argument(
         "--tool",
         help="include only this host mutation tool",
+    )
+    storage_host_mutators.add_argument(
+        "--source-key",
+        help="include only canonical host mutation edges from this source key",
+    )
+    storage_host_mutators.add_argument(
+        "--target-key",
+        help="include only canonical host mutation edges to this target key",
+    )
+    storage_host_mutators.add_argument(
+        "--graph-key-version",
+        type=int,
+        default=GRAPH_KEY_VERSION,
+        help="canonical graph key version; only 1 is currently supported",
     )
     add_storage_connection_arguments(storage_host_mutators)
     storage_host_mutators.add_argument(
@@ -1201,7 +1224,37 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "storage" and args.storage_command == "host-mutators":
+        if args.canonical:
+            try:
+                target_key = canonical_host_mutator_filters_from_args(args)
+                records = query_canonical_edge_records(
+                    psql_args_from_args(args),
+                    root_path=args.root_path,
+                    kind="mutates_host",
+                    source_key=args.source_key,
+                    target_key=target_key,
+                    graph_key_version=args.graph_key_version,
+                    psql_command=args.psql_command,
+                )
+            except StorageSchemaError as error:
+                print(f"ERROR: {error}", file=sys.stderr)
+                return 1
+            records = filter_canonical_host_mutator_records(
+                records,
+                tool=args.tool,
+            )
+            if args.json:
+                print(
+                    json.dumps(
+                        canonical_edge_records_to_jsonable(records),
+                        sort_keys=True,
+                    )
+                )
+            else:
+                print(format_canonical_edge_table(records))
+            return 0
         try:
+            legacy_host_mutator_filters_from_args(args)
             records = query_host_mutator_records(
                 psql_args_from_args(args),
                 root_path=args.root_path,
@@ -1381,6 +1434,61 @@ def legacy_edge_filters_from_args(args) -> None:
         raise StorageSchemaError("target-key requires --canonical")
     if args.graph_key_version != GRAPH_KEY_VERSION:
         raise StorageSchemaError("graph-key-version requires --canonical")
+
+
+def canonical_host_mutator_filters_from_args(args) -> str | None:
+    if args.graph_key_version != GRAPH_KEY_VERSION:
+        raise StorageSchemaError("unsupported graph key version")
+    for option, value in (
+        ("--source-key", args.source_key),
+        ("--target-key", args.target_key),
+    ):
+        if value is None:
+            continue
+        validation = validate_key(value)
+        if not validation.valid:
+            detail = f": {validation.error}" if validation.error else ""
+            raise StorageSchemaError(f"invalid {option} canonical key{detail}")
+    target_key = args.target_key
+    if args.category is not None:
+        try:
+            category_target_key = host_category_key(args.category)
+        except GraphKeyError as error:
+            raise StorageSchemaError(
+                f"invalid host mutation category: {error}"
+            ) from error
+        if target_key is not None and target_key != category_target_key:
+            raise StorageSchemaError(
+                "category and target-key refer to different host categories"
+            )
+        target_key = category_target_key
+    return target_key
+
+
+def legacy_host_mutator_filters_from_args(args) -> None:
+    if args.source_key is not None:
+        raise StorageSchemaError("--source-key requires --canonical")
+    if args.target_key is not None:
+        raise StorageSchemaError("--target-key requires --canonical")
+    if args.graph_key_version != GRAPH_KEY_VERSION:
+        raise StorageSchemaError("--graph-key-version requires --canonical")
+
+
+def filter_canonical_host_mutator_records(records, *, tool: str | None):
+    if tool is None:
+        return records
+    return tuple(
+        record
+        for record in records
+        if canonical_host_mutator_record_has_tool(record, tool)
+    )
+
+
+def canonical_host_mutator_record_has_tool(record, tool: str) -> bool:
+    tools = record.metadata.get("tools")
+    if isinstance(tools, list) and tool in tools:
+        return True
+    return record.metadata.get("tool") == tool
 
 
 def legacy_neighborhood_filters_from_args(args) -> None:

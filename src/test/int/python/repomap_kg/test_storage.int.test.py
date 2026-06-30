@@ -3592,6 +3592,144 @@ SELECT (SELECT count(*) FROM raw_observations)::text
             "/Library/Caches/example",
         ])
 
+    def test_storage_host_mutators_canonical_cli_reads_mutates_host_edges(self):
+        require_postgres_binaries()
+        observations = [
+            RawObservation(
+                kind="file",
+                source_id="scripts/maintain.sh",
+                path="scripts/maintain.sh",
+                confidence="extracted",
+                extractor="fixture-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "shell",
+                    "role": "script",
+                    "content_hash": "0" * 64,
+                    "generated": False,
+                    "executable": True,
+                },
+            ),
+            RawObservation(
+                kind="shell.host_mutation",
+                source_id=(
+                    "scripts/maintain.sh"
+                    "#host-mutation:2:filesystem-mutation-rm"
+                ),
+                path="scripts/maintain.sh",
+                start_line=2,
+                end_line=2,
+                name="rm",
+                target="host:filesystem-mutation",
+                confidence="heuristic",
+                extractor="fixture-shell",
+                extractor_version="0.1.0",
+                metadata={
+                    "argv": ["sudo", "rm", "-rf", "/Library/Caches/example"],
+                    "category": "filesystem-mutation",
+                    "effective_argv": ["rm", "-rf", "/Library/Caches/example"],
+                    "privileged": True,
+                    "reason": "rm host filesystem path",
+                    "tool": "rm",
+                },
+            ),
+        ]
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            load_file_observations(
+                postgres.psql_args,
+                observations,
+                repository_name="fixture",
+                root_path="/tmp/fixture",
+                psql_command=postgres.psql_command,
+            )
+            exit_code, stdout, stderr = run_repo_map_in_process(
+                "storage",
+                "host-mutators",
+                "--canonical",
+                "--root-path",
+                "/tmp/fixture",
+                "--category",
+                "filesystem-mutation",
+                "--tool",
+                "rm",
+                "--source-key",
+                "file:scripts/maintain.sh",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+                "--json",
+            )
+            explain_exit_code, explain_stdout, explain_stderr = (
+                run_repo_map_in_process(
+                    "storage",
+                    "explain-canonical-edge",
+                    "--root-path",
+                    "/tmp/fixture",
+                    "--source-key",
+                    "file:scripts/maintain.sh",
+                    "--kind",
+                    "mutates_host",
+                    "--target-key",
+                    "host.category:filesystem-mutation",
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                    "--json",
+                )
+            )
+
+        payload = json.loads(stdout)
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["source_key"], "file:scripts/maintain.sh")
+        self.assertEqual(payload[0]["edge_kind"], "mutates_host")
+        self.assertEqual(
+            payload[0]["target_key"],
+            "host.category:filesystem-mutation",
+        )
+        self.assertEqual(payload[0]["graph_key_version"], 1)
+        self.assertEqual(payload[0]["confidence"], "heuristic")
+        self.assertFalse(payload[0]["conflict"])
+        self.assertEqual(payload[0]["metadata"]["tools"], ["rm"])
+        self.assertTrue(payload[0]["metadata"]["privileged_observed"])
+        self.assertNotIn("stable_key", payload[0])
+        self.assertNotIn("id", payload[0])
+
+        explain_payload = json.loads(explain_stdout)
+        self.assertEqual(explain_exit_code, 0, explain_stderr)
+        self.assertEqual(
+            explain_payload["edge"]["target_key"],
+            "host.category:filesystem-mutation",
+        )
+        self.assertEqual(
+            explain_payload["evidence"][0]["path"],
+            "scripts/maintain.sh",
+        )
+        self.assertEqual(
+            explain_payload["evidence"][0]["metadata"]["tool"],
+            "rm",
+        )
+
     def test_storage_host_mutators_summary_cli_reads_loaded_counts(self):
         require_postgres_binaries()
         observations = [

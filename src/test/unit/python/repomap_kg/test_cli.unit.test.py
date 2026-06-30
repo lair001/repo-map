@@ -2633,6 +2633,160 @@ class CliUnitTests(unittest.TestCase):
         )
         self.assertEqual(query.call_args.kwargs["tool"], "rm")
 
+    def test_storage_host_mutators_canonical_prints_json_records(self):
+        records = (
+            CanonicalEdgeRecord(
+                source_key="file:scripts/maintain.sh",
+                edge_kind="mutates_host",
+                target_key="host.category:package-management",
+                graph_key_version=1,
+                identity_metadata={},
+                identity_metadata_hash="a" * 64,
+                metadata={
+                    "tools": ["brew"],
+                    "privileged_observed": False,
+                    "reasons": ["brew install"],
+                },
+                confidence="heuristic",
+                conflict=False,
+                first_seen_run_id=11,
+                last_seen_run_id=12,
+            ),
+        )
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_canonical_edge_records",
+            return_value=records,
+        ) as query:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "host-mutators",
+                        "--canonical",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--category",
+                        "package-management",
+                        "--tool",
+                        "brew",
+                        "--source-key",
+                        "file:scripts/maintain.sh",
+                        "--pg-database",
+                        "postgres",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload, [records[0].to_dict()])
+        self.assertNotIn("stable_key", payload[0])
+        self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
+        self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+        self.assertEqual(query.call_args.kwargs["kind"], "mutates_host")
+        self.assertEqual(
+            query.call_args.kwargs["source_key"],
+            "file:scripts/maintain.sh",
+        )
+        self.assertEqual(
+            query.call_args.kwargs["target_key"],
+            "host.category:package-management",
+        )
+        self.assertEqual(query.call_args.kwargs["graph_key_version"], 1)
+
+    def test_storage_host_mutators_canonical_filters_tool_metadata(self):
+        records = (
+            CanonicalEdgeRecord(
+                source_key="file:scripts/maintain.sh",
+                edge_kind="mutates_host",
+                target_key="host.category:package-management",
+                graph_key_version=1,
+                identity_metadata={},
+                identity_metadata_hash="a" * 64,
+                metadata={"tools": ["brew"]},
+                confidence="heuristic",
+                conflict=False,
+                first_seen_run_id=11,
+                last_seen_run_id=11,
+            ),
+            CanonicalEdgeRecord(
+                source_key="file:scripts/maintain.sh",
+                edge_kind="mutates_host",
+                target_key="host.category:system-activation",
+                graph_key_version=1,
+                identity_metadata={},
+                identity_metadata_hash="b" * 64,
+                metadata={"tools": ["darwin-rebuild"]},
+                confidence="heuristic",
+                conflict=False,
+                first_seen_run_id=11,
+                last_seen_run_id=11,
+            ),
+        )
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_canonical_edge_records",
+            return_value=records,
+        ):
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "host-mutators",
+                        "--canonical",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--tool",
+                        "brew",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["metadata"], {"tools": ["brew"]})
+
+    def test_storage_host_mutators_canonical_rejects_invalid_source_key(self):
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            exit_code = main(
+                [
+                    "storage",
+                    "host-mutators",
+                    "--canonical",
+                    "--root-path",
+                    "/tmp/fixture",
+                    "--source-key",
+                    "file:scripts/maintain.sh#line:2",
+                ]
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("--source-key", stderr.getvalue())
+
+    def test_storage_host_mutators_legacy_rejects_canonical_source_key(self):
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            exit_code = main(
+                [
+                    "storage",
+                    "host-mutators",
+                    "--root-path",
+                    "/tmp/fixture",
+                    "--source-key",
+                    "file:scripts/maintain.sh",
+                ]
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("--source-key requires --canonical", stderr.getvalue())
+
     def test_storage_host_mutators_reports_query_errors(self):
         stderr = io.StringIO()
 
