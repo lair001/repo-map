@@ -33,14 +33,17 @@ repomap-kg storage load-files /private/tmp/<name>-observations.jsonl \
 
 ```sh
 repomap-kg storage summary --root-path <repo-root> --json
+repomap-kg storage nodes --root-path <repo-root> --kind python.module --json
+repomap-kg storage edges --root-path <repo-root> --kind imports --json
 repomap-kg storage canonical-nodes --root-path <repo-root> --kind python.module --json
 repomap-kg storage canonical-edges --root-path <repo-root> --kind imports --json
 repomap-kg storage explain-canonical-edge --root-path <repo-root> --source-key <key> --kind <kind> --target-key <key> --json
 repomap-kg storage canonical-neighborhood --root-path <repo-root> --node <canonical-key> --direction both --json
 ```
 
-`storage summary` is canonical-aware by default. Use `storage summary --legacy`
-only when a workflow still needs the older observation-derived summary shape.
+`storage summary`, `storage nodes`, and `storage edges` are canonical-aware by
+default. Use `--legacy` only when a workflow still needs the older
+observation-derived stable-key shape.
 
 5. Configure MCP project registry only after storage exists and readback works.
 

@@ -814,7 +814,7 @@ class CliUnitTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("psql did not return file node records", stderr.getvalue())
 
-    def test_storage_nodes_prints_json_records(self):
+    def test_storage_nodes_legacy_prints_json_records(self):
         records = (
             NodeRecord(
                 path="bin/tool",
@@ -833,6 +833,7 @@ class CliUnitTests(unittest.TestCase):
                     [
                         "storage",
                         "nodes",
+                        "--legacy",
                         "--root-path",
                         "/tmp/fixture",
                         "--kind",
@@ -861,7 +862,62 @@ class CliUnitTests(unittest.TestCase):
             "node:bin/tool:shell.command:x",
         )
 
-    def test_storage_nodes_canonical_prints_json_records(self):
+    def test_storage_nodes_prints_canonical_json_by_default(self):
+        records = (
+            CanonicalNodeRecord(
+                canonical_key="file:bin/tool",
+                graph_key_version=1,
+                kind="file",
+                display_name="bin/tool",
+                confidence="extracted",
+                conflict=False,
+                metadata={"role": "entrypoint"},
+                first_seen_run_id=10,
+                last_seen_run_id=12,
+            ),
+        )
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_canonical_node_records",
+            return_value=records,
+        ) as canonical_query:
+            with patch("repomap_kg.cli.query_node_records") as legacy_query:
+                with redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            "storage",
+                            "nodes",
+                            "--root-path",
+                            "/tmp/fixture",
+                            "--kind",
+                            "file",
+                            "--canonical-key",
+                            "file:bin/tool",
+                            "--path-prefix",
+                            "bin/",
+                            "--pg-database",
+                            "postgres",
+                            "--json",
+                        ]
+                    )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload[0]["canonical_key"], "file:bin/tool")
+        self.assertNotIn("node_stable_key", payload[0])
+        self.assertEqual(canonical_query.call_args.args[0], ["-d", "postgres"])
+        self.assertEqual(canonical_query.call_args.kwargs["root_path"], "/tmp/fixture")
+        self.assertEqual(canonical_query.call_args.kwargs["kind"], "file")
+        self.assertEqual(
+            canonical_query.call_args.kwargs["canonical_key"],
+            "file:bin/tool",
+        )
+        self.assertEqual(canonical_query.call_args.kwargs["path_prefix"], "bin/")
+        self.assertEqual(canonical_query.call_args.kwargs["graph_key_version"], 1)
+        legacy_query.assert_not_called()
+
+    def test_storage_nodes_canonical_alias_prints_json_records(self):
         records = (
             CanonicalNodeRecord(
                 canonical_key="file:bin/tool",
@@ -894,8 +950,6 @@ class CliUnitTests(unittest.TestCase):
                             "file",
                             "--canonical-key",
                             "file:bin/tool",
-                            "--path-prefix",
-                            "bin/",
                             "--pg-database",
                             "postgres",
                             "--json",
@@ -905,19 +959,37 @@ class CliUnitTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload[0]["canonical_key"], "file:bin/tool")
-        self.assertNotIn("node_stable_key", payload[0])
         self.assertEqual(canonical_query.call_args.args[0], ["-d", "postgres"])
-        self.assertEqual(canonical_query.call_args.kwargs["root_path"], "/tmp/fixture")
-        self.assertEqual(canonical_query.call_args.kwargs["kind"], "file")
         self.assertEqual(
             canonical_query.call_args.kwargs["canonical_key"],
             "file:bin/tool",
         )
-        self.assertEqual(canonical_query.call_args.kwargs["path_prefix"], "bin/")
-        self.assertEqual(canonical_query.call_args.kwargs["graph_key_version"], 1)
         legacy_query.assert_not_called()
 
-    def test_storage_nodes_canonical_rejects_legacy_stable_key_filter(self):
+    def test_storage_nodes_rejects_canonical_and_legacy_together(self):
+        stderr = io.StringIO()
+
+        with patch("repomap_kg.cli.query_canonical_node_records") as canonical_query:
+            with patch("repomap_kg.cli.query_node_records") as legacy_query:
+                with redirect_stderr(stderr):
+                    exit_code = main(
+                        [
+                            "storage",
+                            "nodes",
+                            "--canonical",
+                            "--legacy",
+                            "--root-path",
+                            "/tmp/fixture",
+                            "--json",
+                        ]
+                    )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("cannot combine --canonical and --legacy", stderr.getvalue())
+        canonical_query.assert_not_called()
+        legacy_query.assert_not_called()
+
+    def test_storage_nodes_rejects_legacy_stable_key_filter_by_default(self):
         stderr = io.StringIO()
 
         with patch("repomap_kg.cli.query_canonical_node_records") as query:
@@ -926,7 +998,6 @@ class CliUnitTests(unittest.TestCase):
                     [
                         "storage",
                         "nodes",
-                        "--canonical",
                         "--root-path",
                         "/tmp/fixture",
                         "--stable-key",
@@ -939,7 +1010,7 @@ class CliUnitTests(unittest.TestCase):
         self.assertIn("stable-key is a legacy node filter", stderr.getvalue())
         query.assert_not_called()
 
-    def test_storage_nodes_canonical_rejects_invalid_canonical_key(self):
+    def test_storage_nodes_rejects_legacy_path_filter_by_default(self):
         stderr = io.StringIO()
 
         with patch("repomap_kg.cli.query_canonical_node_records") as query:
@@ -948,7 +1019,61 @@ class CliUnitTests(unittest.TestCase):
                     [
                         "storage",
                         "nodes",
-                        "--canonical",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--path",
+                        "bin/tool",
+                        "--json",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("path is a legacy node filter", stderr.getvalue())
+        query.assert_not_called()
+
+    def test_storage_nodes_rejects_canonical_filters_in_legacy_mode(self):
+        cases = (
+            (
+                ("--canonical-key", "file:bin/tool"),
+                "canonical-key is a canonical node filter",
+            ),
+            (("--path-prefix", "bin"), "path-prefix is a canonical node filter"),
+            (
+                ("--graph-key-version", "2"),
+                "graph-key-version is a canonical node filter",
+            ),
+        )
+
+        for extra_args, expected_message in cases:
+            with self.subTest(extra_args=extra_args):
+                stderr = io.StringIO()
+                with patch("repomap_kg.cli.query_node_records") as query:
+                    with redirect_stderr(stderr):
+                        exit_code = main(
+                            [
+                                "storage",
+                                "nodes",
+                                "--legacy",
+                                "--root-path",
+                                "/tmp/fixture",
+                                *extra_args,
+                                "--json",
+                            ]
+                        )
+
+                self.assertEqual(exit_code, 1)
+                self.assertIn(expected_message, stderr.getvalue())
+                query.assert_not_called()
+
+    def test_storage_nodes_rejects_invalid_canonical_key_by_default(self):
+        stderr = io.StringIO()
+
+        with patch("repomap_kg.cli.query_canonical_node_records") as query:
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "storage",
+                        "nodes",
                         "--root-path",
                         "/tmp/fixture",
                         "--canonical-key",
@@ -961,7 +1086,7 @@ class CliUnitTests(unittest.TestCase):
         self.assertIn("invalid canonical key", stderr.getvalue())
         query.assert_not_called()
 
-    def test_storage_nodes_canonical_rejects_unsupported_graph_key_version(self):
+    def test_storage_nodes_rejects_unsupported_graph_key_version_by_default(self):
         stderr = io.StringIO()
 
         with patch("repomap_kg.cli.query_canonical_node_records") as query:
@@ -970,7 +1095,6 @@ class CliUnitTests(unittest.TestCase):
                     [
                         "storage",
                         "nodes",
-                        "--canonical",
                         "--root-path",
                         "/tmp/fixture",
                         "--graph-key-version",
@@ -987,8 +1111,8 @@ class CliUnitTests(unittest.TestCase):
         stderr = io.StringIO()
 
         with patch(
-            "repomap_kg.cli.query_node_records",
-            side_effect=StorageSchemaError("psql did not return node records"),
+            "repomap_kg.cli.query_canonical_node_records",
+            side_effect=StorageSchemaError("psql did not return canonical node records"),
         ):
             with redirect_stderr(stderr):
                 exit_code = main(
@@ -1001,7 +1125,7 @@ class CliUnitTests(unittest.TestCase):
                 )
 
         self.assertEqual(exit_code, 1)
-        self.assertIn("psql did not return node records", stderr.getvalue())
+        self.assertIn("psql did not return canonical node records", stderr.getvalue())
 
     def test_storage_canonical_nodes_prints_json_records(self):
         records = (
@@ -2403,7 +2527,7 @@ class CliUnitTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("psql did not return file neighborhood", stderr.getvalue())
 
-    def test_storage_edges_prints_json_records(self):
+    def test_storage_edges_legacy_prints_json_records(self):
         records = (
             EdgeRecord(
                 path="bin/tool",
@@ -2428,6 +2552,7 @@ class CliUnitTests(unittest.TestCase):
                     [
                         "storage",
                         "edges",
+                        "--legacy",
                         "--root-path",
                         "/tmp/fixture",
                         "--kind",
@@ -2455,7 +2580,65 @@ class CliUnitTests(unittest.TestCase):
         )
         self.assertEqual(query.call_args.kwargs["target_node"], "tool:nix")
 
-    def test_storage_edges_canonical_prints_json_records(self):
+    def test_storage_edges_prints_canonical_json_by_default(self):
+        hash_text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        records = (
+            CanonicalEdgeRecord(
+                source_key="file:bin/tool",
+                edge_kind="executes",
+                target_key="tool:nix",
+                graph_key_version=1,
+                identity_metadata={},
+                identity_metadata_hash=hash_text,
+                metadata={"commands": ["nix"]},
+                confidence="extracted",
+                conflict=False,
+                first_seen_run_id=10,
+                last_seen_run_id=12,
+            ),
+        )
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_canonical_edge_records",
+            return_value=records,
+        ) as canonical_query:
+            with patch("repomap_kg.cli.query_edge_records") as legacy_query:
+                with redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            "storage",
+                            "edges",
+                            "--root-path",
+                            "/tmp/fixture",
+                            "--kind",
+                            "executes",
+                            "--source-key",
+                            "file:bin/tool",
+                            "--target-key",
+                            "tool:nix",
+                            "--pg-database",
+                            "postgres",
+                            "--json",
+                        ]
+                    )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload[0]["source_key"], "file:bin/tool")
+        self.assertEqual(payload[0]["edge_kind"], "executes")
+        self.assertEqual(payload[0]["target_key"], "tool:nix")
+        self.assertEqual(payload[0]["identity_metadata_hash"], hash_text)
+        self.assertNotIn("edge_stable_key", payload[0])
+        self.assertEqual(canonical_query.call_args.args[0], ["-d", "postgres"])
+        self.assertEqual(canonical_query.call_args.kwargs["root_path"], "/tmp/fixture")
+        self.assertEqual(canonical_query.call_args.kwargs["kind"], "executes")
+        self.assertEqual(canonical_query.call_args.kwargs["source_key"], "file:bin/tool")
+        self.assertEqual(canonical_query.call_args.kwargs["target_key"], "tool:nix")
+        self.assertEqual(canonical_query.call_args.kwargs["graph_key_version"], 1)
+        legacy_query.assert_not_called()
+
+    def test_storage_edges_canonical_alias_prints_json_records(self):
         hash_text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         records = (
             CanonicalEdgeRecord(
@@ -2502,19 +2685,34 @@ class CliUnitTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload[0]["source_key"], "file:bin/tool")
-        self.assertEqual(payload[0]["edge_kind"], "executes")
-        self.assertEqual(payload[0]["target_key"], "tool:nix")
         self.assertEqual(payload[0]["identity_metadata_hash"], hash_text)
-        self.assertNotIn("edge_stable_key", payload[0])
         self.assertEqual(canonical_query.call_args.args[0], ["-d", "postgres"])
-        self.assertEqual(canonical_query.call_args.kwargs["root_path"], "/tmp/fixture")
-        self.assertEqual(canonical_query.call_args.kwargs["kind"], "executes")
-        self.assertEqual(canonical_query.call_args.kwargs["source_key"], "file:bin/tool")
-        self.assertEqual(canonical_query.call_args.kwargs["target_key"], "tool:nix")
-        self.assertEqual(canonical_query.call_args.kwargs["graph_key_version"], 1)
         legacy_query.assert_not_called()
 
-    def test_storage_edges_canonical_rejects_legacy_node_filters(self):
+    def test_storage_edges_rejects_canonical_and_legacy_together(self):
+        stderr = io.StringIO()
+
+        with patch("repomap_kg.cli.query_canonical_edge_records") as canonical_query:
+            with patch("repomap_kg.cli.query_edge_records") as legacy_query:
+                with redirect_stderr(stderr):
+                    exit_code = main(
+                        [
+                            "storage",
+                            "edges",
+                            "--canonical",
+                            "--legacy",
+                            "--root-path",
+                            "/tmp/fixture",
+                            "--json",
+                        ]
+                    )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("cannot combine --canonical and --legacy", stderr.getvalue())
+        canonical_query.assert_not_called()
+        legacy_query.assert_not_called()
+
+    def test_storage_edges_rejects_legacy_node_filters_by_default(self):
         stderr = io.StringIO()
 
         with patch("repomap_kg.cli.query_canonical_edge_records") as query:
@@ -2523,7 +2721,6 @@ class CliUnitTests(unittest.TestCase):
                     [
                         "storage",
                         "edges",
-                        "--canonical",
                         "--root-path",
                         "/tmp/fixture",
                         "--source-node",
@@ -2536,7 +2733,38 @@ class CliUnitTests(unittest.TestCase):
         self.assertIn("source-node is a legacy edge filter", stderr.getvalue())
         query.assert_not_called()
 
-    def test_storage_edges_canonical_rejects_invalid_source_key(self):
+    def test_storage_edges_rejects_canonical_filters_in_legacy_mode(self):
+        cases = (
+            (("--source-key", "file:bin/tool"), "source-key is a canonical edge filter"),
+            (("--target-key", "tool:nix"), "target-key is a canonical edge filter"),
+            (
+                ("--graph-key-version", "2"),
+                "graph-key-version is a canonical edge filter",
+            ),
+        )
+
+        for extra_args, expected_message in cases:
+            with self.subTest(extra_args=extra_args):
+                stderr = io.StringIO()
+                with patch("repomap_kg.cli.query_edge_records") as query:
+                    with redirect_stderr(stderr):
+                        exit_code = main(
+                            [
+                                "storage",
+                                "edges",
+                                "--legacy",
+                                "--root-path",
+                                "/tmp/fixture",
+                                *extra_args,
+                                "--json",
+                            ]
+                        )
+
+                self.assertEqual(exit_code, 1)
+                self.assertIn(expected_message, stderr.getvalue())
+                query.assert_not_called()
+
+    def test_storage_edges_rejects_invalid_source_key_by_default(self):
         stderr = io.StringIO()
 
         with patch("repomap_kg.cli.query_canonical_edge_records") as query:
@@ -2545,7 +2773,6 @@ class CliUnitTests(unittest.TestCase):
                     [
                         "storage",
                         "edges",
-                        "--canonical",
                         "--root-path",
                         "/tmp/fixture",
                         "--source-key",
@@ -2562,8 +2789,8 @@ class CliUnitTests(unittest.TestCase):
         stderr = io.StringIO()
 
         with patch(
-            "repomap_kg.cli.query_edge_records",
-            side_effect=StorageSchemaError("psql did not return edge records"),
+            "repomap_kg.cli.query_canonical_edge_records",
+            side_effect=StorageSchemaError("psql did not return canonical edge records"),
         ):
             with redirect_stderr(stderr):
                 exit_code = main(
@@ -2576,7 +2803,7 @@ class CliUnitTests(unittest.TestCase):
                 )
 
         self.assertEqual(exit_code, 1)
-        self.assertIn("psql did not return edge records", stderr.getvalue())
+        self.assertIn("psql did not return canonical edge records", stderr.getvalue())
 
     def test_storage_host_mutators_prints_json_records(self):
         records = (

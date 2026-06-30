@@ -1099,9 +1099,22 @@ FROM canonical_edges;
                     run_repo_map_in_process(
                         "storage",
                         "nodes",
+                        "--legacy",
                         *storage_args,
                         "--kind",
                         "shell.command",
+                        "--json",
+                    )
+                )
+                default_nodes_exit, default_nodes_stdout, default_nodes_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "nodes",
+                        *storage_args,
+                        "--kind",
+                        "file",
+                        "--path-prefix",
+                        "bin/",
                         "--json",
                     )
                 )
@@ -1122,9 +1135,24 @@ FROM canonical_edges;
                     run_repo_map_in_process(
                         "storage",
                         "edges",
+                        "--legacy",
                         *storage_args,
                         "--kind",
                         "shell.command",
+                        "--json",
+                    )
+                )
+                default_edges_exit, default_edges_stdout, default_edges_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "edges",
+                        *storage_args,
+                        "--kind",
+                        "executes",
+                        "--source-key",
+                        "file:bin/tool",
+                        "--target-key",
+                        "tool:nix",
                         "--json",
                     )
                 )
@@ -1203,8 +1231,12 @@ FROM canonical_edges;
         self.assertIn("node_stable_key", legacy_nodes[0])
         self.assertNotIn("canonical_key", legacy_nodes[0])
 
+        self.assertEqual(default_nodes_exit, 0, default_nodes_stderr)
+        default_nodes = json.loads(default_nodes_stdout)
+
         self.assertEqual(canonical_nodes_exit, 0, canonical_nodes_stderr)
         canonical_nodes = json.loads(canonical_nodes_stdout)
+        self.assertEqual(default_nodes, canonical_nodes)
         self.assertEqual(
             [record["canonical_key"] for record in canonical_nodes],
             ["file:bin/tool"],
@@ -1217,8 +1249,12 @@ FROM canonical_edges;
         self.assertIn("edge_stable_key", legacy_edges[0])
         self.assertNotIn("source_key", legacy_edges[0])
 
+        self.assertEqual(default_edges_exit, 0, default_edges_stderr)
+        default_edges = json.loads(default_edges_stdout)
+
         self.assertEqual(canonical_edges_exit, 0, canonical_edges_stderr)
         canonical_edges = json.loads(canonical_edges_stdout)
+        self.assertEqual(default_edges, canonical_edges)
         self.assertEqual(len(canonical_edges), 1)
         self.assertEqual(canonical_edges[0]["source_key"], "file:bin/tool")
         self.assertEqual(canonical_edges[0]["edge_kind"], "executes")
@@ -1284,7 +1320,6 @@ FROM canonical_edges;
         bad_node_exit, _bad_node_stdout, bad_node_stderr = run_repo_map_in_process(
             "storage",
             "nodes",
-            "--canonical",
             "--root-path",
             "/tmp/fixture",
             "--canonical-key",
@@ -1294,11 +1329,78 @@ FROM canonical_edges;
         bad_edge_exit, _bad_edge_stdout, bad_edge_stderr = run_repo_map_in_process(
             "storage",
             "edges",
-            "--canonical",
             "--root-path",
             "/tmp/fixture",
             "--source-key",
             "file:bin/tool#line:12",
+            "--json",
+        )
+        conflict_node_exit, _conflict_node_stdout, conflict_node_stderr = (
+            run_repo_map_in_process(
+                "storage",
+                "nodes",
+                "--canonical",
+                "--legacy",
+                "--root-path",
+                "/tmp/fixture",
+                "--json",
+            )
+        )
+        legacy_node_filter_exit, _legacy_node_filter_stdout, (
+            legacy_node_filter_stderr
+        ) = run_repo_map_in_process(
+            "storage",
+            "nodes",
+            "--root-path",
+            "/tmp/fixture",
+            "--stable-key",
+            "tool:nix",
+            "--json",
+        )
+        canonical_node_filter_exit, _canonical_node_filter_stdout, (
+            canonical_node_filter_stderr
+        ) = run_repo_map_in_process(
+            "storage",
+            "nodes",
+            "--legacy",
+            "--root-path",
+            "/tmp/fixture",
+            "--canonical-key",
+            "file:bin/tool",
+            "--json",
+        )
+        conflict_edge_exit, _conflict_edge_stdout, conflict_edge_stderr = (
+            run_repo_map_in_process(
+                "storage",
+                "edges",
+                "--canonical",
+                "--legacy",
+                "--root-path",
+                "/tmp/fixture",
+                "--json",
+            )
+        )
+        legacy_edge_filter_exit, _legacy_edge_filter_stdout, (
+            legacy_edge_filter_stderr
+        ) = run_repo_map_in_process(
+            "storage",
+            "edges",
+            "--root-path",
+            "/tmp/fixture",
+            "--source-node",
+            "tool:nix",
+            "--json",
+        )
+        canonical_edge_filter_exit, _canonical_edge_filter_stdout, (
+            canonical_edge_filter_stderr
+        ) = run_repo_map_in_process(
+            "storage",
+            "edges",
+            "--legacy",
+            "--root-path",
+            "/tmp/fixture",
+            "--source-key",
+            "file:bin/tool",
             "--json",
         )
         bad_version_exit, _bad_version_stdout, bad_version_stderr = (
@@ -1320,6 +1422,24 @@ FROM canonical_edges;
         self.assertIn("invalid canonical key", bad_node_stderr)
         self.assertEqual(bad_edge_exit, 1)
         self.assertIn("invalid source canonical key", bad_edge_stderr)
+        self.assertEqual(conflict_node_exit, 1)
+        self.assertIn("cannot combine --canonical and --legacy", conflict_node_stderr)
+        self.assertEqual(legacy_node_filter_exit, 1)
+        self.assertIn("stable-key is a legacy node filter", legacy_node_filter_stderr)
+        self.assertEqual(canonical_node_filter_exit, 1)
+        self.assertIn(
+            "canonical-key is a canonical node filter",
+            canonical_node_filter_stderr,
+        )
+        self.assertEqual(conflict_edge_exit, 1)
+        self.assertIn("cannot combine --canonical and --legacy", conflict_edge_stderr)
+        self.assertEqual(legacy_edge_filter_exit, 1)
+        self.assertIn("source-node is a legacy edge filter", legacy_edge_filter_stderr)
+        self.assertEqual(canonical_edge_filter_exit, 1)
+        self.assertIn(
+            "source-key is a canonical edge filter",
+            canonical_edge_filter_stderr,
+        )
         self.assertEqual(bad_version_exit, 1)
         self.assertIn("unsupported graph key version", bad_version_stderr)
 
@@ -3089,6 +3209,7 @@ SELECT (SELECT count(*) FROM raw_observations)::text
             exit_code, stdout, stderr = run_repo_map_in_process(
                 "storage",
                 "nodes",
+                "--legacy",
                 "--root-path",
                 "/tmp/fixture",
                 "--kind",
@@ -3107,9 +3228,56 @@ SELECT (SELECT count(*) FROM raw_observations)::text
                 postgres.psql_command,
                 "--json",
             )
+            canonical_exit_code, canonical_stdout, canonical_stderr = (
+                run_repo_map_in_process(
+                    "storage",
+                    "nodes",
+                    "--root-path",
+                    "/tmp/fixture",
+                    "--kind",
+                    "file",
+                    "--canonical-key",
+                    "file:bin/tool",
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                    "--json",
+                )
+            )
+            direct_canonical_exit_code, direct_canonical_stdout, (
+                direct_canonical_stderr
+            ) = run_repo_map_in_process(
+                "storage",
+                "canonical-nodes",
+                "--root-path",
+                "/tmp/fixture",
+                "--kind",
+                "file",
+                "--canonical-key",
+                "file:bin/tool",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+                "--json",
+            )
             text_exit_code, text_stdout, text_stderr = run_repo_map_in_process(
                 "storage",
                 "nodes",
+                "--legacy",
                 "--root-path",
                 "/tmp/fixture",
                 "--stable-key",
@@ -3137,6 +3305,17 @@ SELECT (SELECT count(*) FROM raw_observations)::text
         )
         self.assertEqual(payload[0]["start_line"], 2)
         self.assertEqual(payload[0]["end_line"], 2)
+        self.assertEqual(canonical_exit_code, 0, canonical_stderr)
+        self.assertEqual(direct_canonical_exit_code, 0, direct_canonical_stderr)
+        self.assertEqual(
+            json.loads(canonical_stdout),
+            json.loads(direct_canonical_stdout),
+            direct_canonical_stderr,
+        )
+        canonical_payload = json.loads(canonical_stdout)
+        self.assertEqual(canonical_payload[0]["canonical_key"], "file:bin/tool")
+        self.assertNotIn("node_stable_key", canonical_payload[0])
+        self.assertNotIn("id", canonical_payload[0])
         self.assertEqual(text_exit_code, 0, text_stderr)
         self.assertIn("node_stable_key", text_stdout)
         self.assertIn("tool:nix", text_stdout)
@@ -3469,6 +3648,7 @@ SELECT (SELECT count(*) FROM raw_observations)::text
             exit_code, stdout, stderr = run_repo_map_in_process(
                 "storage",
                 "edges",
+                "--legacy",
                 "--root-path",
                 "/tmp/fixture",
                 "--kind",
@@ -3487,9 +3667,60 @@ SELECT (SELECT count(*) FROM raw_observations)::text
                 postgres.psql_command,
                 "--json",
             )
+            canonical_exit_code, canonical_stdout, canonical_stderr = (
+                run_repo_map_in_process(
+                    "storage",
+                    "edges",
+                    "--root-path",
+                    "/tmp/fixture",
+                    "--kind",
+                    "executes",
+                    "--source-key",
+                    "file:bin/tool",
+                    "--target-key",
+                    "tool:nix",
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                    "--json",
+                )
+            )
+            direct_canonical_exit_code, direct_canonical_stdout, (
+                direct_canonical_stderr
+            ) = run_repo_map_in_process(
+                "storage",
+                "canonical-edges",
+                "--root-path",
+                "/tmp/fixture",
+                "--kind",
+                "executes",
+                "--source-key",
+                "file:bin/tool",
+                "--target-key",
+                "tool:nix",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+                "--json",
+            )
             text_exit_code, text_stdout, text_stderr = run_repo_map_in_process(
                 "storage",
                 "edges",
+                "--legacy",
                 "--root-path",
                 "/tmp/fixture",
                 "--kind",
@@ -3514,6 +3745,18 @@ SELECT (SELECT count(*) FROM raw_observations)::text
         self.assertEqual(payload[0]["path"], "bin/tool")
         self.assertEqual(payload[0]["edge_kind"], "shell.command")
         self.assertEqual(payload[0]["dst_node_stable_key"], "tool:nix")
+        self.assertEqual(canonical_exit_code, 0, canonical_stderr)
+        self.assertEqual(direct_canonical_exit_code, 0, direct_canonical_stderr)
+        self.assertEqual(
+            json.loads(canonical_stdout),
+            json.loads(direct_canonical_stdout),
+        )
+        canonical_payload = json.loads(canonical_stdout)
+        self.assertEqual(canonical_payload[0]["source_key"], "file:bin/tool")
+        self.assertEqual(canonical_payload[0]["edge_kind"], "executes")
+        self.assertEqual(canonical_payload[0]["target_key"], "tool:nix")
+        self.assertNotIn("edge_stable_key", canonical_payload[0])
+        self.assertNotIn("id", canonical_payload[0])
         self.assertEqual(text_exit_code, 0, text_stderr)
         self.assertIn("edge_stable_key", text_stdout)
         self.assertIn("python.import", text_stdout)

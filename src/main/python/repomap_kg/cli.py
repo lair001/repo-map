@@ -425,7 +425,12 @@ def build_parser() -> argparse.ArgumentParser:
     storage_nodes.add_argument(
         "--canonical",
         action="store_true",
-        help="read canonical graph nodes instead of legacy observation-derived nodes",
+        help="read canonical graph nodes; this is the default",
+    )
+    storage_nodes.add_argument(
+        "--legacy",
+        action="store_true",
+        help="read legacy observation-derived nodes",
     )
     storage_nodes.add_argument("--kind", help="include only nodes with this kind")
     storage_nodes.add_argument("--path", help="include only nodes from this file path")
@@ -539,7 +544,12 @@ def build_parser() -> argparse.ArgumentParser:
     storage_edges.add_argument(
         "--canonical",
         action="store_true",
-        help="read canonical graph edges instead of legacy observation-derived edges",
+        help="read canonical graph edges; this is the default",
+    )
+    storage_edges.add_argument(
+        "--legacy",
+        action="store_true",
+        help="read legacy observation-derived edges",
     )
     storage_edges.add_argument("--kind", help="include only edges with this kind")
     storage_edges.add_argument(
@@ -1033,7 +1043,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "storage" and args.storage_command == "nodes":
-        if args.canonical:
+        if args.canonical and args.legacy:
+            print("ERROR: cannot combine --canonical and --legacy", file=sys.stderr)
+            return 1
+        if not args.legacy:
             try:
                 kind = canonical_node_kind_from_args(args)
                 records = query_canonical_node_records(
@@ -1180,7 +1193,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "storage" and args.storage_command == "edges":
-        if args.canonical:
+        if args.canonical and args.legacy:
+            print("ERROR: cannot combine --canonical and --legacy", file=sys.stderr)
+            return 1
+        if not args.legacy:
             try:
                 canonical_edge_filters_from_args(args)
                 records = query_canonical_edge_records(
@@ -1428,20 +1444,32 @@ def canonical_file_neighborhood_node_from_args(args) -> str:
 
 def legacy_node_filters_from_args(args) -> None:
     if args.canonical_key is not None:
-        raise StorageSchemaError("canonical-key requires --canonical")
+        raise StorageSchemaError(
+            "canonical-key is a canonical node filter; omit --legacy"
+        )
     if args.path_prefix is not None:
-        raise StorageSchemaError("path-prefix requires --canonical")
+        raise StorageSchemaError(
+            "path-prefix is a canonical node filter; omit --legacy"
+        )
     if args.graph_key_version != GRAPH_KEY_VERSION:
-        raise StorageSchemaError("graph-key-version requires --canonical")
+        raise StorageSchemaError(
+            "graph-key-version is a canonical node filter; omit --legacy"
+        )
 
 
 def legacy_edge_filters_from_args(args) -> None:
     if args.source_key is not None:
-        raise StorageSchemaError("source-key requires --canonical")
+        raise StorageSchemaError(
+            "source-key is a canonical edge filter; omit --legacy"
+        )
     if args.target_key is not None:
-        raise StorageSchemaError("target-key requires --canonical")
+        raise StorageSchemaError(
+            "target-key is a canonical edge filter; omit --legacy"
+        )
     if args.graph_key_version != GRAPH_KEY_VERSION:
-        raise StorageSchemaError("graph-key-version requires --canonical")
+        raise StorageSchemaError(
+            "graph-key-version is a canonical edge filter; omit --legacy"
+        )
 
 
 def canonical_host_mutator_filters_from_args(args) -> str | None:
