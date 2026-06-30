@@ -45,6 +45,12 @@ repomap-kg storage canonical-neighborhood --root-path <repo-root> --node <canoni
 default. Use `--legacy` only when a workflow still needs the older
 observation-derived stable-key shape.
 
+After F3, do not assume every legacy readback command has migrated. `storage
+neighborhood`, `storage file-neighborhood`, `storage host-mutators`,
+`storage host-mutators-summary`, `storage files`, `storage entrypoints`, and
+`storage file-nodes` still keep their legacy defaults. Use direct canonical
+commands or explicit `--canonical` modes where those exist.
+
 5. Configure MCP project registry only after storage exists and readback works.
 
 ## Current Extraction Families
