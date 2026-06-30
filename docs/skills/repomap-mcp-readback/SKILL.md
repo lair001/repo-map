@@ -17,6 +17,7 @@ identity.
 The minimal read-only MCP surface exposes:
 
 - `repomap_status`
+- `repomap_projects`
 - `repomap_canonical_nodes`
 - `repomap_canonical_edges`
 - `repomap_explain_canonical_edge`
@@ -31,9 +32,37 @@ If the tools are not visible to the agent, first distinguish the cause:
 
 Do not infer graph contents when the tools are unavailable.
 
+## Project Registry Mode
+
+After MP1, normal MCP use may rely on a multi-project registry. Call
+`repomap_projects` first when configuration may provide named projects or a
+default project.
+
+The default registry path is:
+
+```text
+~/.codex/codex-vc/mcp/repo-map/config.json
+```
+
+`REPOMAP_MCP_CONFIG` may point to another registry file. A project entry supplies
+`root_path`, `pg_database`, and optional `pg_host`, `pg_port`, and `pg_user`.
+`psql_command` is intentionally not exposed as a model-controlled MCP argument;
+server operators may set `REPOMAP_PSQL_COMMAND` in the MCP server environment.
+
+Typical registry-mode sequence:
+
+1. Call `repomap_projects`.
+2. Call `repomap_status` with no arguments when a default project exists, or
+   with `project="<name>"`.
+3. Call graph tools with `project="<name>"` and canonical filters.
+
+By default, do not combine `project` with explicit root/database connection
+overrides. Use explicit settings for development and disposable test clusters.
+
 ## Query Workflow
 
-Pass explicit arguments. At minimum, provide:
+Prefer project registry mode when configured. If no registry/default project is
+available, pass explicit arguments. At minimum, provide:
 
 - `root_path`: the repository root whose graph was loaded;
 - Postgres connection settings through tool arguments or MCP environment
@@ -58,7 +87,7 @@ List Python modules:
 
 ```json
 {
-  "root_path": "/path/to/repository",
+  "project": "example",
   "kind": "python.module"
 }
 ```
@@ -67,7 +96,7 @@ List imports from one module:
 
 ```json
 {
-  "root_path": "/path/to/repository",
+  "project": "example",
   "kind": "imports",
   "source_key": "python.module:example.cli"
 }
@@ -77,7 +106,7 @@ Explain one canonical import edge:
 
 ```json
 {
-  "root_path": "/path/to/repository",
+  "project": "example",
   "source_key": "python.module:example.cli",
   "kind": "imports",
   "target_key": "python.module:example.storage",
@@ -89,7 +118,7 @@ Show an outgoing neighborhood:
 
 ```json
 {
-  "root_path": "/path/to/repository",
+  "project": "example",
   "node": "python.module:example.cli",
   "direction": "out"
 }

@@ -23,8 +23,8 @@ Prepare storage outside MCP:
 2. Apply RepoMap migrations.
 3. Run `repomap-kg discover <repo> --jsonl`.
 4. Run `repomap-kg storage load-files <observations.jsonl>`.
-5. Configure the MCP server with the storage connection details, or pass those
-   details as tool arguments when the MCP client supports it.
+5. Configure the MCP server with a project registry entry, or pass explicit
+   storage connection details as tool arguments when the MCP client supports it.
 
 The MCP server itself must remain read-only.
 
@@ -39,19 +39,25 @@ Use only the RepoMap MCP tools.
 Use root_path="<repo-root>".
 
 Call these tools and summarize whether each call succeeded:
-1. repomap_status
-2. repomap_canonical_nodes with kind="python.module"
-3. repomap_canonical_edges with kind="imports" and a known source_key
-4. repomap_explain_canonical_edge for a known canonical edge
-5. repomap_canonical_neighborhood for a known node
+1. repomap_projects
+2. repomap_status
+3. repomap_canonical_nodes with kind="python.module"
+4. repomap_canonical_edges with kind="imports" and a known source_key
+5. repomap_explain_canonical_edge for a known canonical edge
+6. repomap_canonical_neighborhood for a known node
 
 Return a concise report with concrete counts and exact error text for failures.
 ```
+
+When a project registry is configured, prefer `project="<name>"` or the default
+project over repeating `root_path` and Postgres connection settings.
 
 ## Required Checks
 
 The smoke test passes only when all of these succeed:
 
+- `repomap_projects` returns the expected project registry or an intentional
+  empty registry when explicit mode is being tested.
 - `repomap_status` returns `read_only=true` and the expected graph key version.
 - `repomap_canonical_nodes` returns at least one expected canonical node kind.
 - `repomap_canonical_edges` returns expected edges for a known source node.
