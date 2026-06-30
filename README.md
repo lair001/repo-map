@@ -103,6 +103,9 @@ python3 tools/run_tests.py --suite int
 python3 tools/run_tests.py --suite all
 ```
 
+Add `--report` to write a static offline HTML report under
+`.test-reports/<suite>/latest`.
+
 The project runner uses stdlib `unittest` and `trace`, so the initial test
 suite does not require network access or third-party test packages. Unit,
 integration, and combined runs enforce an 85 percent aggregate line coverage

@@ -15,6 +15,7 @@ dist/
 htmlcov/
 node_modules/
 reports/
+.test-reports/
 *.egg-info/
 *.py[cod]
 
