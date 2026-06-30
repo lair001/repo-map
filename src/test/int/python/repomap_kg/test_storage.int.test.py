@@ -1013,6 +1013,299 @@ FROM canonical_edges;
         self.assertEqual(depth_exit, 1)
         self.assertIn("canonical-neighborhood only supports depth 1", depth_stderr)
 
+    def test_storage_legacy_readback_commands_accept_canonical_mode(self):
+        require_postgres_binaries()
+        observations = [
+            RawObservation(
+                kind="file",
+                source_id="bin/tool",
+                path="bin/tool",
+                confidence="manual",
+                extractor="fixture-discovery",
+                extractor_version="0.1.0",
+                metadata={
+                    "language": "shell",
+                    "role": "entrypoint",
+                    "content_hash": "c" * 64,
+                    "generated": False,
+                    "executable": True,
+                },
+            ),
+            RawObservation(
+                kind="shell.command",
+                source_id="bin/tool#call:1:nix-build",
+                path="bin/tool",
+                start_line=1,
+                end_line=1,
+                name="nix build",
+                target="tool:nix",
+                confidence="heuristic",
+                extractor="fixture-shell",
+                extractor_version="0.1.0",
+                metadata={"argv": ["nix", "build"], "command": "nix"},
+            ),
+            RawObservation(
+                kind="shell.command",
+                source_id="bin/tool#call:2:nix-flake-check",
+                path="bin/tool",
+                start_line=2,
+                end_line=2,
+                name="nix flake check",
+                target="tool:nix",
+                confidence="manual",
+                extractor="fixture-shell",
+                extractor_version="0.1.0",
+                metadata={"argv": ["nix", "flake", "check"], "command": "nix"},
+            ),
+        ]
+
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as raw_jsonl:
+            for observation in observations:
+                raw_jsonl.write(observation.to_json_line())
+            raw_jsonl.flush()
+
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                storage_args = (
+                    "--root-path",
+                    "/tmp/fixture",
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                )
+                load_exit_code, _load_stdout, load_stderr = run_repo_map_in_process(
+                    "storage",
+                    "load-files",
+                    raw_jsonl.name,
+                    "--repository-name",
+                    "fixture",
+                    *storage_args,
+                    "--json",
+                )
+                legacy_nodes_exit, legacy_nodes_stdout, legacy_nodes_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "nodes",
+                        *storage_args,
+                        "--kind",
+                        "shell.command",
+                        "--json",
+                    )
+                )
+                canonical_nodes_exit, canonical_nodes_stdout, canonical_nodes_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "nodes",
+                        "--canonical",
+                        *storage_args,
+                        "--kind",
+                        "file",
+                        "--path-prefix",
+                        "bin/",
+                        "--json",
+                    )
+                )
+                legacy_edges_exit, legacy_edges_stdout, legacy_edges_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "edges",
+                        *storage_args,
+                        "--kind",
+                        "shell.command",
+                        "--json",
+                    )
+                )
+                canonical_edges_exit, canonical_edges_stdout, canonical_edges_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "edges",
+                        "--canonical",
+                        *storage_args,
+                        "--kind",
+                        "executes",
+                        "--source-key",
+                        "file:bin/tool",
+                        "--target-key",
+                        "tool:nix",
+                        "--json",
+                    )
+                )
+                canonical_neighborhood_exit, canonical_neighborhood_stdout, (
+                    canonical_neighborhood_stderr
+                ) = run_repo_map_in_process(
+                    "storage",
+                    "neighborhood",
+                    "--canonical",
+                    *storage_args,
+                    "--node",
+                    "tool:nix",
+                    "--direction",
+                    "in",
+                    "--json",
+                )
+                canonical_file_neighborhood_exit, canonical_file_neighborhood_stdout, (
+                    canonical_file_neighborhood_stderr
+                ) = run_repo_map_in_process(
+                    "storage",
+                    "file-neighborhood",
+                    "--canonical",
+                    *storage_args,
+                    "--path",
+                    "bin/tool",
+                    "--direction",
+                    "out",
+                    "--json",
+                )
+                legacy_summary_exit, legacy_summary_stdout, legacy_summary_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "summary",
+                        *storage_args,
+                        "--json",
+                    )
+                )
+                canonical_summary_exit, canonical_summary_stdout, (
+                    canonical_summary_stderr
+                ) = run_repo_map_in_process(
+                    "storage",
+                    "summary",
+                    "--canonical",
+                    *storage_args,
+                    "--json",
+                )
+
+        self.assertEqual(load_exit_code, 0, load_stderr)
+
+        self.assertEqual(legacy_nodes_exit, 0, legacy_nodes_stderr)
+        legacy_nodes = json.loads(legacy_nodes_stdout)
+        self.assertIn("node_stable_key", legacy_nodes[0])
+        self.assertNotIn("canonical_key", legacy_nodes[0])
+
+        self.assertEqual(canonical_nodes_exit, 0, canonical_nodes_stderr)
+        canonical_nodes = json.loads(canonical_nodes_stdout)
+        self.assertEqual(
+            [record["canonical_key"] for record in canonical_nodes],
+            ["file:bin/tool"],
+        )
+        self.assertNotIn("id", canonical_nodes[0])
+        self.assertNotIn("node_stable_key", canonical_nodes[0])
+
+        self.assertEqual(legacy_edges_exit, 0, legacy_edges_stderr)
+        legacy_edges = json.loads(legacy_edges_stdout)
+        self.assertIn("edge_stable_key", legacy_edges[0])
+        self.assertNotIn("source_key", legacy_edges[0])
+
+        self.assertEqual(canonical_edges_exit, 0, canonical_edges_stderr)
+        canonical_edges = json.loads(canonical_edges_stdout)
+        self.assertEqual(len(canonical_edges), 1)
+        self.assertEqual(canonical_edges[0]["source_key"], "file:bin/tool")
+        self.assertEqual(canonical_edges[0]["edge_kind"], "executes")
+        self.assertEqual(canonical_edges[0]["target_key"], "tool:nix")
+        self.assertEqual(len(canonical_edges[0]["identity_metadata_hash"]), 64)
+        self.assertNotIn("id", canonical_edges[0])
+        self.assertNotIn("edge_stable_key", canonical_edges[0])
+
+        self.assertEqual(
+            canonical_neighborhood_exit,
+            0,
+            canonical_neighborhood_stderr,
+        )
+        canonical_neighborhood = json.loads(canonical_neighborhood_stdout)
+        self.assertEqual(
+            canonical_neighborhood["center"]["canonical_key"],
+            "tool:nix",
+        )
+        self.assertEqual(len(canonical_neighborhood["edges"]), 1)
+
+        self.assertEqual(
+            canonical_file_neighborhood_exit,
+            0,
+            canonical_file_neighborhood_stderr,
+        )
+        canonical_file_neighborhood = json.loads(canonical_file_neighborhood_stdout)
+        self.assertEqual(
+            canonical_file_neighborhood["center"]["canonical_key"],
+            "file:bin/tool",
+        )
+        self.assertEqual(
+            [edge["target_key"] for edge in canonical_file_neighborhood["edges"]],
+            ["tool:nix"],
+        )
+
+        self.assertEqual(legacy_summary_exit, 0, legacy_summary_stderr)
+        legacy_summary = json.loads(legacy_summary_stdout)
+        self.assertIn("nodes", legacy_summary)
+        self.assertIn("edges", legacy_summary)
+        self.assertNotIn("canonical_nodes", legacy_summary)
+
+        self.assertEqual(canonical_summary_exit, 0, canonical_summary_stderr)
+        canonical_summary = json.loads(canonical_summary_stdout)
+        self.assertEqual(canonical_summary["root_path"], "/tmp/fixture")
+        self.assertEqual(canonical_summary["repository_name"], "fixture")
+        self.assertEqual(canonical_summary["runs"], 1)
+        self.assertEqual(canonical_summary["raw_observations"], 3)
+        self.assertEqual(canonical_summary["canonical_nodes"], 2)
+        self.assertEqual(canonical_summary["canonical_edges"], 1)
+        self.assertEqual(canonical_summary["canonical_evidence"], 3)
+        self.assertIn("legacy_nodes", canonical_summary)
+        self.assertIn("legacy_edges", canonical_summary)
+        self.assertIn("legacy_evidence", canonical_summary)
+        self.assertNotIn("repository_id", canonical_summary)
+
+    def test_storage_legacy_readback_canonical_mode_validates_arguments(self):
+        bad_node_exit, _bad_node_stdout, bad_node_stderr = run_repo_map_in_process(
+            "storage",
+            "nodes",
+            "--canonical",
+            "--root-path",
+            "/tmp/fixture",
+            "--canonical-key",
+            "file:bin/tool#line:12",
+            "--json",
+        )
+        bad_edge_exit, _bad_edge_stdout, bad_edge_stderr = run_repo_map_in_process(
+            "storage",
+            "edges",
+            "--canonical",
+            "--root-path",
+            "/tmp/fixture",
+            "--source-key",
+            "file:bin/tool#line:12",
+            "--json",
+        )
+        bad_version_exit, _bad_version_stdout, bad_version_stderr = (
+            run_repo_map_in_process(
+                "storage",
+                "neighborhood",
+                "--canonical",
+                "--root-path",
+                "/tmp/fixture",
+                "--node",
+                "tool:nix",
+                "--graph-key-version",
+                "2",
+                "--json",
+            )
+        )
+
+        self.assertEqual(bad_node_exit, 1)
+        self.assertIn("invalid canonical key", bad_node_stderr)
+        self.assertEqual(bad_edge_exit, 1)
+        self.assertIn("invalid source canonical key", bad_edge_stderr)
+        self.assertEqual(bad_version_exit, 1)
+        self.assertIn("unsupported graph key version", bad_version_stderr)
+
     def test_storage_explain_canonical_edge_cli_reads_c2_loaded_evidence(self):
         require_postgres_binaries()
         raw_jsonl = canonicalization_fixture(
@@ -1214,6 +1507,19 @@ FROM canonical_edges;
                         "--json",
                     )
                 )
+                public_imports_exit, public_imports_stdout, (
+                    public_imports_stderr
+                ) = run_repo_map_in_process(
+                    "storage",
+                    "edges",
+                    "--canonical",
+                    *storage_args,
+                    "--kind",
+                    "imports",
+                    "--source-key",
+                    "python.module:pkg.app",
+                    "--json",
+                )
                 explain_exit_code, explain_stdout, explain_stderr = (
                     run_repo_map_in_process(
                         "storage",
@@ -1283,6 +1589,8 @@ FROM canonical_edges;
                 for record in import_edges
             )
         )
+        self.assertEqual(public_imports_exit, 0, public_imports_stderr)
+        self.assertEqual(json.loads(public_imports_stdout), import_edges)
 
         self.assertEqual(explain_exit_code, 0, explain_stderr)
         explanation = json.loads(explain_stdout)
@@ -1568,6 +1876,17 @@ FROM canonical_edges;
                     "defines"
                 )
                 links_exit, links_stdout, links_stderr = canonical_edges("links_to")
+                public_links_exit, public_links_stdout, public_links_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "edges",
+                        "--canonical",
+                        *storage_args,
+                        "--kind",
+                        "links_to",
+                        "--json",
+                    )
+                )
                 explain_exit, explain_stdout, explain_stderr = (
                     run_repo_map_in_process(
                         "storage",
@@ -1636,6 +1955,8 @@ FROM canonical_edges;
 
         self.assertEqual(links_exit, 0, links_stderr)
         link_edges = json.loads(links_stdout)
+        self.assertEqual(public_links_exit, 0, public_links_stderr)
+        self.assertEqual(json.loads(public_links_stdout), link_edges)
         self.assertIn(
             (
                 "doc.section:file%3AREADME.md:docs-fixture",

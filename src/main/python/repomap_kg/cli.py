@@ -21,7 +21,12 @@ from repomap_kg.files import (
     format_file_table,
     records_to_jsonable,
 )
-from repomap_kg.graph_keys import GRAPH_KEY_VERSION, validate_key
+from repomap_kg.graph_keys import (
+    GRAPH_KEY_VERSION,
+    GraphKeyError,
+    file_key,
+    validate_key,
+)
 from repomap_kg.host_mutators import (
     filter_host_mutator_records,
     format_host_mutator_summary_table,
@@ -41,6 +46,7 @@ from repomap_kg.storage import (
     canonical_edge_records_to_jsonable,
     canonical_neighborhood_to_jsonable,
     canonical_node_records_to_jsonable,
+    canonical_storage_summary_to_jsonable,
     edge_records_to_jsonable,
     file_neighborhood_to_jsonable,
     file_node_records_to_jsonable,
@@ -48,6 +54,7 @@ from repomap_kg.storage import (
     format_canonical_edge_table,
     format_canonical_neighborhood_table,
     format_canonical_node_table,
+    format_canonical_storage_summary_table,
     format_edge_table,
     format_file_neighborhood_table,
     format_file_node_table,
@@ -63,6 +70,7 @@ from repomap_kg.storage import (
     query_canonical_neighborhood,
     query_canonical_node_records,
     query_canonical_edge_records,
+    query_canonical_storage_summary,
     query_edge_records,
     query_file_neighborhood,
     query_file_node_records,
@@ -413,11 +421,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="list stored graph nodes from Postgres storage",
     )
     add_storage_root_argument(storage_nodes)
+    storage_nodes.add_argument(
+        "--canonical",
+        action="store_true",
+        help="read canonical graph nodes instead of legacy observation-derived nodes",
+    )
     storage_nodes.add_argument("--kind", help="include only nodes with this kind")
     storage_nodes.add_argument("--path", help="include only nodes from this file path")
     storage_nodes.add_argument(
         "--stable-key",
         help="include only the node with this stable key",
+    )
+    storage_nodes.add_argument(
+        "--canonical-key",
+        help="include only the canonical node with this key in canonical mode",
+    )
+    storage_nodes.add_argument(
+        "--path-prefix",
+        help="include only file canonical nodes under this path prefix",
+    )
+    storage_nodes.add_argument(
+        "--graph-key-version",
+        type=int,
+        default=GRAPH_KEY_VERSION,
+        help="canonical graph key version; only 1 is currently supported",
     )
     add_storage_connection_arguments(storage_nodes)
     storage_nodes.add_argument(
@@ -431,9 +458,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_storage_root_argument(storage_neighborhood)
     storage_neighborhood.add_argument(
+        "--canonical",
+        action="store_true",
+        help="read a canonical graph neighborhood instead of a legacy neighborhood",
+    )
+    storage_neighborhood.add_argument(
         "--node",
         required=True,
-        help="center node stable key",
+        help="center node stable key, or canonical key with --canonical",
     )
     storage_neighborhood.add_argument(
         "--direction",
@@ -447,6 +479,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="graph traversal depth; only 1 is currently supported",
     )
+    storage_neighborhood.add_argument(
+        "--graph-key-version",
+        type=int,
+        default=GRAPH_KEY_VERSION,
+        help="canonical graph key version; only 1 is currently supported",
+    )
     add_storage_connection_arguments(storage_neighborhood)
     storage_neighborhood.add_argument(
         "--json",
@@ -458,6 +496,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="list a depth-1 graph neighborhood for a stored file path",
     )
     add_storage_root_argument(storage_file_neighborhood)
+    storage_file_neighborhood.add_argument(
+        "--canonical",
+        action="store_true",
+        help="read a canonical file neighborhood instead of a legacy neighborhood",
+    )
     storage_file_neighborhood.add_argument(
         "--path",
         required=True,
@@ -475,6 +518,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="graph traversal depth; only 1 is currently supported",
     )
+    storage_file_neighborhood.add_argument(
+        "--graph-key-version",
+        type=int,
+        default=GRAPH_KEY_VERSION,
+        help="canonical graph key version; only 1 is currently supported",
+    )
     add_storage_connection_arguments(storage_file_neighborhood)
     storage_file_neighborhood.add_argument(
         "--json",
@@ -486,6 +535,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="list stored relationship edges from Postgres storage",
     )
     add_storage_root_argument(storage_edges)
+    storage_edges.add_argument(
+        "--canonical",
+        action="store_true",
+        help="read canonical graph edges instead of legacy observation-derived edges",
+    )
     storage_edges.add_argument("--kind", help="include only edges with this kind")
     storage_edges.add_argument(
         "--source-node",
@@ -494,6 +548,20 @@ def build_parser() -> argparse.ArgumentParser:
     storage_edges.add_argument(
         "--target-node",
         help="include only edges with this target node stable key",
+    )
+    storage_edges.add_argument(
+        "--source-key",
+        help="include only canonical edges from this source key in canonical mode",
+    )
+    storage_edges.add_argument(
+        "--target-key",
+        help="include only canonical edges to this target key in canonical mode",
+    )
+    storage_edges.add_argument(
+        "--graph-key-version",
+        type=int,
+        default=GRAPH_KEY_VERSION,
+        help="canonical graph key version; only 1 is currently supported",
     )
     add_storage_connection_arguments(storage_edges)
     storage_edges.add_argument(
@@ -545,6 +613,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_storage_root_argument(storage_summary)
     add_storage_connection_arguments(storage_summary)
+    storage_summary.add_argument(
+        "--canonical",
+        action="store_true",
+        help="include canonical graph storage counts instead of legacy summary fields",
+    )
     storage_summary.add_argument(
         "--json",
         action="store_true",
@@ -932,6 +1005,36 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "storage" and args.storage_command == "nodes":
+        if args.canonical:
+            try:
+                kind = canonical_node_kind_from_args(args)
+                records = query_canonical_node_records(
+                    psql_args_from_args(args),
+                    root_path=args.root_path,
+                    kind=kind,
+                    canonical_key=args.canonical_key,
+                    path_prefix=args.path_prefix,
+                    graph_key_version=args.graph_key_version,
+                    psql_command=args.psql_command,
+                )
+            except StorageSchemaError as error:
+                print(f"ERROR: {error}", file=sys.stderr)
+                return 1
+            if args.json:
+                print(
+                    json.dumps(
+                        canonical_node_records_to_jsonable(records),
+                        sort_keys=True,
+                    )
+                )
+            else:
+                print(format_canonical_node_table(records))
+            return 0
+        try:
+            legacy_node_filters_from_args(args)
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
         try:
             records = query_node_records(
                 psql_args_from_args(args),
@@ -951,6 +1054,36 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "storage" and args.storage_command == "neighborhood":
+        if args.canonical:
+            try:
+                canonical_neighborhood_filters_from_args(args)
+                record = query_canonical_neighborhood(
+                    psql_args_from_args(args),
+                    root_path=args.root_path,
+                    node=args.node,
+                    direction=args.direction,
+                    depth=args.depth,
+                    graph_key_version=args.graph_key_version,
+                    psql_command=args.psql_command,
+                )
+            except StorageSchemaError as error:
+                print(f"ERROR: {error}", file=sys.stderr)
+                return 1
+            if args.json:
+                print(
+                    json.dumps(
+                        canonical_neighborhood_to_jsonable(record),
+                        sort_keys=True,
+                    )
+                )
+            else:
+                print(format_canonical_neighborhood_table(record))
+            return 0
+        try:
+            legacy_neighborhood_filters_from_args(args)
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
         try:
             record = query_neighborhood(
                 psql_args_from_args(args),
@@ -970,6 +1103,36 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "storage" and args.storage_command == "file-neighborhood":
+        if args.canonical:
+            try:
+                node = canonical_file_neighborhood_node_from_args(args)
+                record = query_canonical_neighborhood(
+                    psql_args_from_args(args),
+                    root_path=args.root_path,
+                    node=node,
+                    direction=args.direction,
+                    depth=args.depth,
+                    graph_key_version=args.graph_key_version,
+                    psql_command=args.psql_command,
+                )
+            except StorageSchemaError as error:
+                print(f"ERROR: {error}", file=sys.stderr)
+                return 1
+            if args.json:
+                print(
+                    json.dumps(
+                        canonical_neighborhood_to_jsonable(record),
+                        sort_keys=True,
+                    )
+                )
+            else:
+                print(format_canonical_neighborhood_table(record))
+            return 0
+        try:
+            legacy_file_neighborhood_filters_from_args(args)
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
         try:
             record = query_file_neighborhood(
                 psql_args_from_args(args),
@@ -989,6 +1152,36 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "storage" and args.storage_command == "edges":
+        if args.canonical:
+            try:
+                canonical_edge_filters_from_args(args)
+                records = query_canonical_edge_records(
+                    psql_args_from_args(args),
+                    root_path=args.root_path,
+                    kind=args.kind,
+                    source_key=args.source_key,
+                    target_key=args.target_key,
+                    graph_key_version=args.graph_key_version,
+                    psql_command=args.psql_command,
+                )
+            except StorageSchemaError as error:
+                print(f"ERROR: {error}", file=sys.stderr)
+                return 1
+            if args.json:
+                print(
+                    json.dumps(
+                        canonical_edge_records_to_jsonable(records),
+                        sort_keys=True,
+                    )
+                )
+            else:
+                print(format_canonical_edge_table(records))
+            return 0
+        try:
+            legacy_edge_filters_from_args(args)
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
         try:
             records = query_edge_records(
                 psql_args_from_args(args),
@@ -1050,6 +1243,26 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "storage" and args.storage_command == "summary":
+        if args.canonical:
+            try:
+                summary = query_canonical_storage_summary(
+                    psql_args_from_args(args),
+                    root_path=args.root_path,
+                    psql_command=args.psql_command,
+                )
+            except StorageSchemaError as error:
+                print(f"ERROR: {error}", file=sys.stderr)
+                return 1
+            if args.json:
+                print(
+                    json.dumps(
+                        canonical_storage_summary_to_jsonable(summary),
+                        sort_keys=True,
+                    )
+                )
+            else:
+                print(format_canonical_storage_summary_table(summary))
+            return 0
         try:
             summary = query_storage_summary(
                 psql_args_from_args(args),
@@ -1078,6 +1291,15 @@ def read_observations_argument(jsonl_path: str):
 def canonical_node_kind_from_args(args) -> str | None:
     if args.graph_key_version != GRAPH_KEY_VERSION:
         raise StorageSchemaError("unsupported graph key version")
+    if getattr(args, "stable_key", None) is not None:
+        raise StorageSchemaError(
+            "stable-key is a legacy node filter; use --canonical-key in canonical mode"
+        )
+    if getattr(args, "path", None) is not None:
+        raise StorageSchemaError(
+            "path is a legacy node filter; use --canonical-key or --path-prefix "
+            "in canonical mode"
+        )
     if args.canonical_key is not None:
         validation = validate_key(args.canonical_key)
         if not validation.valid:
@@ -1094,6 +1316,14 @@ def canonical_node_kind_from_args(args) -> str | None:
 def canonical_edge_filters_from_args(args) -> None:
     if args.graph_key_version != GRAPH_KEY_VERSION:
         raise StorageSchemaError("unsupported graph key version")
+    if getattr(args, "source_node", None) is not None:
+        raise StorageSchemaError(
+            "source-node is a legacy edge filter; use --source-key in canonical mode"
+        )
+    if getattr(args, "target_node", None) is not None:
+        raise StorageSchemaError(
+            "target-node is a legacy edge filter; use --target-key in canonical mode"
+        )
     if args.kind is not None and args.kind not in CANONICAL_EDGE_KINDS:
         values = ", ".join(sorted(CANONICAL_EDGE_KINDS))
         raise StorageSchemaError(
@@ -1120,6 +1350,47 @@ def canonical_neighborhood_filters_from_args(args) -> None:
     if not validation.valid:
         detail = f": {validation.error}" if validation.error else ""
         raise StorageSchemaError(f"invalid node canonical key{detail}")
+
+
+def canonical_file_neighborhood_node_from_args(args) -> str:
+    if args.graph_key_version != GRAPH_KEY_VERSION:
+        raise StorageSchemaError("unsupported graph key version")
+    if args.depth != 1:
+        raise StorageSchemaError(
+            "storage file-neighborhood --canonical only supports depth 1"
+        )
+    try:
+        return file_key(args.path)
+    except GraphKeyError as error:
+        raise StorageSchemaError(f"invalid file path: {error}") from error
+
+
+def legacy_node_filters_from_args(args) -> None:
+    if args.canonical_key is not None:
+        raise StorageSchemaError("canonical-key requires --canonical")
+    if args.path_prefix is not None:
+        raise StorageSchemaError("path-prefix requires --canonical")
+    if args.graph_key_version != GRAPH_KEY_VERSION:
+        raise StorageSchemaError("graph-key-version requires --canonical")
+
+
+def legacy_edge_filters_from_args(args) -> None:
+    if args.source_key is not None:
+        raise StorageSchemaError("source-key requires --canonical")
+    if args.target_key is not None:
+        raise StorageSchemaError("target-key requires --canonical")
+    if args.graph_key_version != GRAPH_KEY_VERSION:
+        raise StorageSchemaError("graph-key-version requires --canonical")
+
+
+def legacy_neighborhood_filters_from_args(args) -> None:
+    if args.graph_key_version != GRAPH_KEY_VERSION:
+        raise StorageSchemaError("graph-key-version requires --canonical")
+
+
+def legacy_file_neighborhood_filters_from_args(args) -> None:
+    if args.graph_key_version != GRAPH_KEY_VERSION:
+        raise StorageSchemaError("graph-key-version requires --canonical")
 
 
 def canonical_edge_identity_metadata_from_args(args) -> dict[str, object]:

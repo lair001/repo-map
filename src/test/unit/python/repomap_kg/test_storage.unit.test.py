@@ -15,6 +15,7 @@ from repomap_kg.storage import (
     CanonicalEdgeExplanationRecord,
     CanonicalNeighborhoodRecord,
     CanonicalNodeRecord,
+    CanonicalStorageSummaryRecord,
     EdgeRecord,
     FileNodeRecord,
     FileNeighborhoodRecord,
@@ -22,6 +23,7 @@ from repomap_kg.storage import (
     NodeRecord,
     StorageSummaryRecord,
     StorageSchemaError,
+    build_canonical_storage_summary_query_sql,
     build_file_neighborhood_query_sql,
     build_explain_canonical_edge_query_sql,
     build_canonical_edge_query_sql,
@@ -73,10 +75,12 @@ from repomap_kg.storage import (
     format_canonical_edge_explanation_table,
     format_canonical_neighborhood_table,
     format_canonical_node_table,
+    format_canonical_storage_summary_table,
     query_canonical_neighborhood,
     query_canonical_edge_explanation,
     query_canonical_edge_records,
     query_canonical_node_records,
+    query_canonical_storage_summary,
 )
 
 
@@ -2081,6 +2085,52 @@ SELECT 1;
             with self.assertRaisesRegex(StorageSchemaError, "storage summary"):
                 query_storage_summary(["-d", "postgres"], root_path="/tmp/fixture")
 
+    def test_query_canonical_storage_summary_returns_counts(self):
+        completed = SimpleNamespace(
+            stdout=(
+                '{"root_path":"/tmp/fixture",'
+                '"repository_name":"fixture",'
+                '"runs":1,"files":2,'
+                '"legacy_nodes":5,"legacy_edges":2,"legacy_evidence":3,'
+                '"raw_observations":4,'
+                '"canonical_nodes":6,'
+                '"canonical_edges":7,'
+                '"canonical_evidence":8}\n'
+            )
+        )
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+            summary = query_canonical_storage_summary(
+                ["-d", "postgres"],
+                root_path="/tmp/fixture",
+                psql_command="/bin/psql",
+            )
+
+        self.assertEqual(summary.repository_name, "fixture")
+        self.assertEqual(summary.legacy_nodes, 5)
+        self.assertEqual(summary.raw_observations, 4)
+        self.assertEqual(summary.canonical_nodes, 6)
+        self.assertEqual(summary.canonical_edges, 7)
+        self.assertEqual(summary.canonical_evidence, 8)
+        self.assertIn("-qAt", run.call_args.args[0])
+        self.assertIn(
+            "COUNT(*) FROM canonical_nodes",
+            run.call_args.kwargs["input"],
+        )
+
+    def test_query_canonical_storage_summary_rejects_malformed_json(self):
+        completed = SimpleNamespace(stdout='{"root_path": "/tmp/fixture"}\n')
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(
+                StorageSchemaError,
+                "canonical storage summary",
+            ):
+                query_canonical_storage_summary(
+                    ["-d", "postgres"],
+                    root_path="/tmp/fixture",
+                )
+
     def test_build_node_query_sql_quotes_root_path_and_orders_nodes(self):
         sql = build_node_query_sql("/tmp/fixture's repo")
 
@@ -2209,6 +2259,20 @@ SELECT 1;
         self.assertIn("COUNT(*) FROM edges", sql)
         self.assertIn("COUNT(*) FROM evidence", sql)
 
+    def test_build_canonical_storage_summary_query_sql_counts_canonical_tables(self):
+        sql = build_canonical_storage_summary_query_sql("/tmp/fixture's repo")
+
+        self.assertIn("fixture''s repo", sql)
+        self.assertIn("COUNT(*) FROM runs", sql)
+        self.assertIn("COUNT(*) FROM files", sql)
+        self.assertIn("COUNT(*) FROM nodes", sql)
+        self.assertIn("COUNT(*) FROM edges", sql)
+        self.assertIn("COUNT(*) FROM evidence", sql)
+        self.assertIn("COUNT(*) FROM raw_observations", sql)
+        self.assertIn("COUNT(*) FROM canonical_nodes", sql)
+        self.assertIn("COUNT(*) FROM canonical_edges", sql)
+        self.assertIn("COUNT(*) FROM canonical_evidence", sql)
+
     def test_format_edge_table_uses_edge_columns(self):
         table = format_edge_table(
             [
@@ -2254,6 +2318,29 @@ SELECT 1;
         self.assertIn("latest_run_id", table)
         self.assertIn("files", table)
         self.assertIn("edges", table)
+        self.assertIn("/tmp/fixture", table)
+
+    def test_format_canonical_storage_summary_table_uses_count_columns(self):
+        table = format_canonical_storage_summary_table(
+            CanonicalStorageSummaryRecord(
+                root_path="/tmp/fixture",
+                repository_name="fixture",
+                runs=1,
+                files=2,
+                legacy_nodes=5,
+                legacy_edges=2,
+                legacy_evidence=3,
+                raw_observations=4,
+                canonical_nodes=6,
+                canonical_edges=7,
+                canonical_evidence=8,
+            )
+        )
+
+        self.assertIn("root_path", table)
+        self.assertIn("legacy_nodes", table)
+        self.assertIn("canonical_nodes", table)
+        self.assertIn("canonical_edges", table)
         self.assertIn("/tmp/fixture", table)
 
     def test_format_node_table_uses_node_columns(self):

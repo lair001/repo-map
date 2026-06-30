@@ -342,6 +342,24 @@ class StorageSummaryRecord:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class CanonicalStorageSummaryRecord:
+    root_path: str
+    repository_name: str | None
+    runs: int
+    files: int
+    legacy_nodes: int
+    legacy_edges: int
+    legacy_evidence: int
+    raw_observations: int
+    canonical_nodes: int
+    canonical_edges: int
+    canonical_evidence: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 CHANGESET_PATTERN = re.compile(r"^--changeset\s+(\S+)")
 
 
@@ -965,6 +983,21 @@ def query_storage_summary(
     )
     return storage_summary_from_payload(
         parse_psql_json(result.stdout, "storage summary")
+    )
+
+
+def query_canonical_storage_summary(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    psql_command: str = "psql",
+) -> CanonicalStorageSummaryRecord:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_canonical_storage_summary_query_sql(root_path),
+    )
+    return canonical_storage_summary_from_payload(
+        parse_psql_json(result.stdout, "canonical storage summary")
     )
 
 
@@ -1870,6 +1903,56 @@ def build_storage_summary_query_sql(root_path: str) -> str:
     )
 
 
+def build_canonical_storage_summary_query_sql(root_path: str) -> str:
+    quoted_root = sql_literal(root_path)
+    return (
+        "WITH repo AS ("
+        "SELECT id, name, root_path FROM repositories "
+        f"WHERE repositories.root_path = {quoted_root}"
+        ") "
+        "SELECT json_build_object("
+        f"'root_path', {quoted_root}, "
+        "'repository_name', (SELECT name FROM repo), "
+        "'runs', ("
+        "SELECT COUNT(*) FROM runs JOIN repo "
+        "ON repo.id = runs.repository_id"
+        "), "
+        "'files', ("
+        "SELECT COUNT(*) FROM files JOIN repo "
+        "ON repo.id = files.repository_id"
+        "), "
+        "'legacy_nodes', ("
+        "SELECT COUNT(*) FROM nodes JOIN repo "
+        "ON repo.id = nodes.repository_id"
+        "), "
+        "'legacy_edges', ("
+        "SELECT COUNT(*) FROM edges JOIN repo "
+        "ON repo.id = edges.repository_id"
+        "), "
+        "'legacy_evidence', ("
+        "SELECT COUNT(*) FROM evidence JOIN repo "
+        "ON repo.id = evidence.repository_id"
+        "), "
+        "'raw_observations', ("
+        "SELECT COUNT(*) FROM raw_observations JOIN repo "
+        "ON repo.id = raw_observations.repository_id"
+        "), "
+        "'canonical_nodes', ("
+        "SELECT COUNT(*) FROM canonical_nodes JOIN repo "
+        "ON repo.id = canonical_nodes.repository_id"
+        "), "
+        "'canonical_edges', ("
+        "SELECT COUNT(*) FROM canonical_edges JOIN repo "
+        "ON repo.id = canonical_edges.repository_id"
+        "), "
+        "'canonical_evidence', ("
+        "SELECT COUNT(*) FROM canonical_evidence JOIN repo "
+        "ON repo.id = canonical_evidence.repository_id"
+        ")"
+        ")::text;"
+    )
+
+
 def file_upsert_sql(row: FileRow) -> str:
     return (
         "INSERT INTO files("
@@ -2656,6 +2739,64 @@ def storage_summary_from_payload(payload: Any) -> StorageSummaryRecord:
     )
 
 
+def canonical_storage_summary_from_payload(
+    payload: Any,
+) -> CanonicalStorageSummaryRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError(
+            "psql returned a malformed canonical storage summary"
+        )
+    return CanonicalStorageSummaryRecord(
+        root_path=payload_text(
+            payload,
+            "root_path",
+            label="canonical storage summary",
+        ),
+        repository_name=payload_optional_text(
+            payload,
+            "repository_name",
+            label="canonical storage summary",
+        ),
+        runs=payload_int(payload, "runs", label="canonical storage summary"),
+        files=payload_int(payload, "files", label="canonical storage summary"),
+        legacy_nodes=payload_int(
+            payload,
+            "legacy_nodes",
+            label="canonical storage summary",
+        ),
+        legacy_edges=payload_int(
+            payload,
+            "legacy_edges",
+            label="canonical storage summary",
+        ),
+        legacy_evidence=payload_int(
+            payload,
+            "legacy_evidence",
+            label="canonical storage summary",
+        ),
+        raw_observations=payload_int(
+            payload,
+            "raw_observations",
+            label="canonical storage summary",
+        ),
+        canonical_nodes=payload_int(
+            payload,
+            "canonical_nodes",
+            label="canonical storage summary",
+        ),
+        canonical_edges=payload_int(
+            payload,
+            "canonical_edges",
+            label="canonical storage summary",
+        ),
+        canonical_evidence=payload_int(
+            payload,
+            "canonical_evidence",
+            label="canonical storage summary",
+        ),
+    )
+
+
 def file_node_records_to_jsonable(
     records: Sequence[FileNodeRecord],
 ) -> list[dict[str, Any]]:
@@ -2703,6 +2844,12 @@ def file_neighborhood_to_jsonable(record: FileNeighborhoodRecord) -> dict[str, A
 
 
 def storage_summary_to_jsonable(record: StorageSummaryRecord) -> dict[str, Any]:
+    return record.to_dict()
+
+
+def canonical_storage_summary_to_jsonable(
+    record: CanonicalStorageSummaryRecord,
+) -> dict[str, Any]:
     return record.to_dict()
 
 
@@ -3000,6 +3147,36 @@ def format_storage_summary_table(record: StorageSummaryRecord) -> str:
         "nodes",
         "edges",
         "evidence",
+    )
+    rendered_row = {key: render_table_value(row[key]) for key in columns}
+    widths = {
+        key: max(len(key), len(rendered_row[key]))
+        for key in columns
+    }
+    return "\n".join(
+        [
+            format_table_row(dict(zip(columns, columns, strict=True)), columns, widths),
+            format_table_row(rendered_row, columns, widths),
+        ]
+    )
+
+
+def format_canonical_storage_summary_table(
+    record: CanonicalStorageSummaryRecord,
+) -> str:
+    row = record.to_dict()
+    columns = (
+        "root_path",
+        "repository_name",
+        "runs",
+        "files",
+        "legacy_nodes",
+        "legacy_edges",
+        "legacy_evidence",
+        "raw_observations",
+        "canonical_nodes",
+        "canonical_edges",
+        "canonical_evidence",
     )
     rendered_row = {key: render_table_value(row[key]) for key in columns}
     widths = {
