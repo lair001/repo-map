@@ -179,6 +179,56 @@ class DiscoveryUnitTests(unittest.TestCase):
         self.assertIn(".jsonl", {item.path[-6:] for item in observations})
         self.assertIn(".jsonc", {item.path[-6:] for item in observations})
 
+    def test_discover_observations_includes_plist_config_facts_only_for_plist_xml(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.write(
+                root / "chrome-policy.plist",
+                """<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+  <dict>
+    <key>PolicyPath</key>
+    <string>managed/policy.json</string>
+  </dict>
+</plist>
+""",
+            )
+            self.write(
+                root / "dangerous.plist",
+                """<?xml version="1.0"?>
+<!DOCTYPE plist [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<plist><dict><key>Bad</key><string>&xxe;</string></dict></plist>
+""",
+            )
+            self.write(root / "generic.xml", "<beans><bean id=\"deferred\"/></beans>\n")
+            self.write(root / "managed" / "policy.json", "{}\n")
+
+            observations = discover_observations(root)
+
+        payload = "\n".join(item.to_json_line() for item in observations)
+        kinds = [observation.kind for observation in observations]
+        plist_file = next(
+            item
+            for item in observations
+            if item.kind == "file" and item.path == "chrome-policy.plist"
+        )
+        generic_file = next(
+            item
+            for item in observations
+            if item.kind == "file" and item.path == "generic.xml"
+        )
+
+        self.assertEqual(plist_file.metadata["language"], "plist")
+        self.assertEqual(plist_file.metadata["role"], "config")
+        self.assertEqual(generic_file.metadata["language"], "xml")
+        self.assertIn("config.document", kinds)
+        self.assertIn("config.path", kinds)
+        self.assertIn("config.reference", kinds)
+        self.assertIn("config.parse_error", kinds)
+        self.assertNotIn("xml.document", kinds)
+        self.assertNotIn("xml.element", kinds)
+        self.assertNotIn("file:///etc/passwd", payload)
+
     def test_unknown_language_and_role_fall_back_honestly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

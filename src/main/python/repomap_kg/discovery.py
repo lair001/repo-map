@@ -49,11 +49,13 @@ LANGUAGE_BY_EXTENSION = {
     ".jsonl": "jsonl",
     ".md": "markdown",
     ".nix": "nix",
+    ".plist": "plist",
     ".py": "python",
     ".rb": "ruby",
     ".sh": "shell",
     ".sql": "sql",
     ".toml": "toml",
+    ".xml": "xml",
     ".yaml": "yaml",
     ".yml": "yaml",
     ".zsh": "shell",
@@ -156,7 +158,7 @@ def discover_observations(
             observations.extend(
                 extract_nix_file_observations_from_file(repository_root, file_info.path)
             )
-        if file_info.language in ("json", "jsonc", "jsonl", "toml"):
+        if file_info.language in ("json", "jsonc", "jsonl", "toml", "plist", "xml"):
             observations.extend(
                 extract_config_file_observations_from_file(
                     repository_root,
@@ -306,7 +308,11 @@ def detect_role(relative_path: str, *, executable: bool, generated: bool) -> str
         return "test"
     if relative_path.startswith("docs/") or filename.endswith(".md"):
         return "documentation"
-    if filename in CONFIG_FILENAMES or relative_path.startswith(".github/"):
+    if (
+        filename in CONFIG_FILENAMES
+        or filename.endswith(".plist")
+        or relative_path.startswith(".github/")
+    ):
         return "config"
     if executable or relative_path.startswith("bin/"):
         return "entrypoint"

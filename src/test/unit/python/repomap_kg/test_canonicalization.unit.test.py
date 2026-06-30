@@ -2646,6 +2646,65 @@ cwd = "src/main/python"
             },
         )
 
+    def test_plist_config_observations_reuse_config_canonicalization_contract(self):
+        observations = extract_config_file_observations(
+            "chrome-policy.plist",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+  <dict>
+    <key>PolicyPath</key>
+    <string>managed/policy.json</string>
+  </dict>
+</plist>
+""",
+        )
+        unsafe = extract_config_file_observations(
+            "dangerous.plist",
+            """<?xml version="1.0"?>
+<!DOCTYPE plist [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<plist><dict><key>Unsafe</key><string>&xxe;</string></dict></plist>
+""",
+        )
+
+        result = canonicalize_observations((*observations, *unsafe))
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        self.assertIn(
+            "config.document:file%3Achrome-policy.plist",
+            {node["canonical_key"] for node in payload["nodes"]},
+        )
+        self.assertIn(
+            "config.path:file%3Achrome-policy.plist:%2FPolicyPath",
+            {node["canonical_key"] for node in payload["nodes"]},
+        )
+        self.assertIn(
+            (
+                "file:chrome-policy.plist",
+                "defines",
+                "config.document:file%3Achrome-policy.plist",
+            ),
+            {
+                (edge["source_key"], edge["kind"], edge["target_key"])
+                for edge in payload["edges"]
+            },
+        )
+        self.assertIn(
+            (
+                "config.path:file%3Achrome-policy.plist:%2FPolicyPath",
+                "references",
+                "file:managed/policy.json",
+            ),
+            {
+                (edge["source_key"], edge["kind"], edge["target_key"])
+                for edge in payload["edges"]
+            },
+        )
+        self.assertNotIn(
+            "config.document:file%3Adangerous.plist",
+            {node["canonical_key"] for node in payload["nodes"]},
+        )
+
     def test_config_definition_and_reference_diagnostics_use_placeholders(self):
         observations = [
             RawObservation(

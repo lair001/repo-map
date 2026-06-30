@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import tomllib
+import xml.etree.ElementTree as ElementTree
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
@@ -47,10 +48,25 @@ SIMPLE_COMMAND_PATTERN = re.compile(r"^[0-9A-Za-z_.+-]+$")
 ENV_REFERENCE_PATTERN = re.compile(r"^\$(?P<brace>\{?)(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}?$")
 ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DYNAMIC_MARKERS = ("${", "$(", "{{", "}}", "*", "?", "~")
+PLIST_XML_FORMAT = "plist-xml"
+PLIST_XML_SAFETY_MODE = "pre-scan-no-doctype-entity-no-external-resources"
+UNSAFE_XML_DECLARATION_PATTERN = re.compile(r"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
+UNSAFE_PROCESSING_INSTRUCTION_PATTERN = re.compile(
+    r"<\?(?!xml(?:\s|\?>))", re.IGNORECASE
+)
+PLIST_ROOT_PATTERN = re.compile(r"<\s*plist(?:\s|>)", re.IGNORECASE)
 
 
 class JsoncNormalizationError(ValueError):
     """Raised when conservative JSONC normalization cannot safely continue."""
+
+
+class PlistXmlSafetyError(ValueError):
+    """Raised when XML content uses constructs XML1 refuses to parse."""
+
+
+class PlistXmlParseError(ValueError):
+    """Raised when XML content is not a supported plist structure."""
 
 
 def extract_config_file_observations(
@@ -64,6 +80,12 @@ def extract_config_file_observations(
         return _extract_jsonc_observations(relative_path, content)
     if suffix == ".toml":
         return _extract_toml_observations(relative_path, content)
+    if suffix == ".plist":
+        return _extract_plist_xml_observations(relative_path, content)
+    if suffix == ".xml":
+        if _looks_like_plist_xml(content):
+            return _extract_plist_xml_observations(relative_path, content)
+        return ()
     return _extract_json_observations(relative_path, content)
 
 
@@ -259,6 +281,155 @@ def _extract_toml_observations(
     return (document, *path_observations, *reference_observations)
 
 
+def _extract_plist_xml_observations(
+    relative_path: str,
+    content: str,
+) -> tuple[RawObservation, ...]:
+    try:
+        _check_safe_plist_xml(content)
+        root = ElementTree.fromstring(content)
+        parsed = _plist_root_value(root)
+    except PlistXmlSafetyError as error:
+        return (
+            _parse_error_observation(
+                relative_path,
+                format_name=PLIST_XML_FORMAT,
+                error_kind="unsafe-xml-construct",
+                message=str(error),
+                recovered=False,
+            ),
+        )
+    except ElementTree.ParseError as error:
+        return (
+            _parse_error_observation(
+                relative_path,
+                format_name=PLIST_XML_FORMAT,
+                error_kind="malformed-plist-xml",
+                message=str(error),
+                start_line=_xml_parse_error_line(error),
+                recovered=False,
+            ),
+        )
+    except PlistXmlParseError as error:
+        return (
+            _parse_error_observation(
+                relative_path,
+                format_name=PLIST_XML_FORMAT,
+                error_kind="unsupported-plist-shape",
+                message=str(error),
+                recovered=False,
+            ),
+        )
+    path_observations, reference_observations = _structure_observations(
+        relative_path,
+        parsed,
+        format_name=PLIST_XML_FORMAT,
+        confidence="extracted",
+        content=content,
+    )
+    document = _document_observation(
+        relative_path,
+        format_name=PLIST_XML_FORMAT,
+        parser=_parser_name(PLIST_XML_FORMAT),
+        confidence="extracted",
+        top_level_type=_value_type(parsed),
+        path_count=len(path_observations),
+        record_count=None,
+        parse_error_count=0,
+    )
+    return (document, *path_observations, *reference_observations)
+
+
+def _looks_like_plist_xml(content: str) -> bool:
+    return bool(PLIST_ROOT_PATTERN.search(content))
+
+
+def _check_safe_plist_xml(content: str) -> None:
+    if UNSAFE_XML_DECLARATION_PATTERN.search(content):
+        raise PlistXmlSafetyError(
+            "doctype and entity declarations are not supported"
+        )
+    if UNSAFE_PROCESSING_INSTRUCTION_PATTERN.search(content):
+        raise PlistXmlSafetyError(
+            "non-XML processing instructions are not supported"
+        )
+
+
+def _xml_parse_error_line(error: ElementTree.ParseError) -> int | None:
+    position = getattr(error, "position", None)
+    if isinstance(position, tuple) and position:
+        line = position[0]
+        if isinstance(line, int) and line > 0:
+            return line
+    return None
+
+
+def _plist_root_value(root: ElementTree.Element) -> Any:
+    if _xml_local_name(root.tag) != "plist":
+        raise PlistXmlParseError("root element is not plist")
+    children = list(root)
+    if len(children) != 1:
+        raise PlistXmlParseError("plist root must contain exactly one value element")
+    return _plist_value(children[0])
+
+
+def _plist_value(element: ElementTree.Element) -> Any:
+    tag = _xml_local_name(element.tag)
+    if tag == "dict":
+        return _plist_dict(element)
+    if tag == "array":
+        return [_plist_value(child) for child in element]
+    if tag in ("string", "date", "data"):
+        return (element.text or "").strip()
+    if tag == "integer":
+        text = (element.text or "").strip()
+        try:
+            return int(text)
+        except ValueError as error:
+            raise PlistXmlParseError("integer value is malformed") from error
+    if tag == "real":
+        text = (element.text or "").strip()
+        try:
+            return float(text)
+        except ValueError as error:
+            raise PlistXmlParseError("real value is malformed") from error
+    if tag == "true":
+        return True
+    if tag == "false":
+        return False
+    raise PlistXmlParseError(f"unsupported plist value element: {tag}")
+
+
+def _plist_dict(element: ElementTree.Element) -> dict[str, Any]:
+    children = list(element)
+    result: dict[str, Any] = {}
+    index = 0
+    while index < len(children):
+        key_element = children[index]
+        if _xml_local_name(key_element.tag) != "key":
+            raise PlistXmlParseError("dict entries must begin with key elements")
+        key = (key_element.text or "").strip()
+        if not key:
+            raise PlistXmlParseError("dict key must not be empty")
+        index += 1
+        if index >= len(children):
+            raise PlistXmlParseError("dict key is missing a value element")
+        if key in result:
+            raise PlistXmlParseError("duplicate dict keys are not supported")
+        value_element = children[index]
+        if _xml_local_name(value_element.tag) == "key":
+            raise PlistXmlParseError("dict key is missing a value element")
+        result[key] = _plist_value(value_element)
+        index += 1
+    return result
+
+
+def _xml_local_name(tag: str) -> str:
+    if tag.startswith("{"):
+        return tag.rsplit("}", 1)[-1]
+    return tag
+
+
 def normalize_jsonc(content: str) -> str:
     without_comments = _strip_jsonc_comments(content)
     return _strip_jsonc_trailing_commas(without_comments)
@@ -437,7 +608,7 @@ def _walk_value(
                 paths=paths,
                 references=references,
             )
-    if isinstance(value, list) and format_name == "toml":
+    if isinstance(value, list) and _uses_stable_array_member_paths(format_name):
         for member in _stable_array_members(value):
             _walk_value(
                 relative_path,
@@ -507,6 +678,9 @@ def _path_metadata(
         "value_type": _value_type(value),
         "redacted": redacted,
     }
+    if format_name == PLIST_XML_FORMAT:
+        metadata["parser"] = _parser_name(format_name)
+        metadata["safety_mode"] = PLIST_XML_SAFETY_MODE
     if parent_type is not None:
         metadata["container_type"] = parent_type
     if redacted:
@@ -517,7 +691,11 @@ def _path_metadata(
         metadata["value_summary"] = value_summary
     if isinstance(value, list):
         metadata["item_count"] = len(value)
-        stable_members = _stable_array_members(value) if format_name == "toml" else ()
+        stable_members = (
+            _stable_array_members(value)
+            if _uses_stable_array_member_paths(format_name)
+            else ()
+        )
         if stable_members:
             metadata["array_policy"] = "stable-member-key"
             metadata["stable_member_keys"] = sorted(
@@ -533,6 +711,10 @@ def _path_metadata(
         if scalar_summaries:
             metadata["value_summaries"] = scalar_summaries
     return metadata
+
+
+def _uses_stable_array_member_paths(format_name: str) -> bool:
+    return format_name in ("toml", PLIST_XML_FORMAT)
 
 
 class _StableArrayMember:
@@ -603,6 +785,9 @@ def _reference_observations_for_value(
             "source_document_key": config_document_key(relative_path),
             "source_path_key": source_path_key,
         }
+        if format_name == PLIST_XML_FORMAT:
+            metadata["parser"] = _parser_name(format_name)
+            metadata["safety_mode"] = PLIST_XML_SAFETY_MODE
         if "summary" in reference:
             metadata["raw_value_summary"] = reference["summary"]
         if reference["redacted"]:
@@ -832,6 +1017,8 @@ def _document_observation(
         "path_count": path_count,
         "parse_error_count": parse_error_count,
     }
+    if format_name == PLIST_XML_FORMAT:
+        metadata["safety_mode"] = PLIST_XML_SAFETY_MODE
     if record_count is not None:
         metadata["record_count"] = record_count
     return RawObservation(
@@ -940,6 +1127,8 @@ def _parser_name(format_name: str) -> str:
         return "jsonc-conservative"
     if format_name == "toml":
         return "stdlib-tomllib"
+    if format_name == PLIST_XML_FORMAT:
+        return "stdlib-elementtree-safe"
     return "stdlib-json"
 
 
@@ -954,8 +1143,9 @@ def _line_for_pointer(content: str, pointer: str) -> int | None:
     toml_pattern = re.compile(
         rf"^\s*(?:{re.escape(key)}|\"{re.escape(key)}\"|'{re.escape(key)}')\s*="
     )
+    plist_pattern = re.compile(rf"<key>\s*{re.escape(key)}\s*</key>")
     for line_number, line in enumerate(content.splitlines(), start=1):
-        if json_pattern.search(line) or toml_pattern.search(line):
+        if json_pattern.search(line) or toml_pattern.search(line) or plist_pattern.search(line):
             return line_number
     return None
 
@@ -1180,6 +1370,11 @@ def _normalize_repo_path(value: str) -> str | None:
 
 def _document_role(relative_path: str) -> str:
     path = PurePosixPath(relative_path)
+    normalized_name = _normalized_key(path.name)
+    if path.suffix in (".plist", ".xml") and "chrome" in normalized_name and "policy" in normalized_name:
+        return "chrome-policy"
+    if path.suffix == ".plist":
+        return "plist-config"
     if path.name == "config.json" and "mcp" in path.parts:
         return "mcp-config"
     if path.suffix == ".jsonl":

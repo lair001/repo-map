@@ -484,6 +484,200 @@ program = "echo hello"
         self.assertIn("dynamic:tool:config-command-fragment", {item.target for item in references})
         self.assertIn("dynamic:env:dynamic-config-env-name", {item.target for item in references})
 
+    def test_plist_document_paths_references_and_redaction(self):
+        observations = extract_config_file_observations(
+            "chrome-policy.plist",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+  <dict>
+    <key>HomepageLocation</key>
+    <string>https://example.com/home</string>
+    <key>PolicyPath</key>
+    <string>./managed/policy.json</string>
+    <key>Environment</key>
+    <dict>
+      <key>CHROME_POLICY_HOME</key>
+      <string>$CHROME_POLICY_HOME</string>
+    </dict>
+    <key>api_key</key>
+    <string>plist-secret-value</string>
+  </dict>
+</plist>
+""",
+        )
+
+        payload = json.dumps(
+            [observation.to_dict() for observation in observations],
+            sort_keys=True,
+        )
+        paths = [item for item in observations if item.kind == "config.path"]
+        references = [item for item in observations if item.kind == "config.reference"]
+        pointer_by_path = {item.metadata["pointer"]: item for item in paths}
+
+        self.assertNotIn("plist-secret-value", payload)
+        self.assertEqual(observations[0].kind, "config.document")
+        self.assertEqual(observations[0].metadata["format"], "plist-xml")
+        self.assertEqual(observations[0].metadata["parser"], "stdlib-elementtree-safe")
+        self.assertEqual(observations[0].metadata["document_role"], "chrome-policy")
+        self.assertEqual(
+            observations[0].metadata["safety_mode"],
+            "pre-scan-no-doctype-entity-no-external-resources",
+        )
+        self.assertIn("/HomepageLocation", pointer_by_path)
+        self.assertIn("/Environment/CHROME_POLICY_HOME", pointer_by_path)
+        self.assertTrue(pointer_by_path["/api_key"].metadata["redacted"])
+        self.assertNotIn("value_summary", pointer_by_path["/api_key"].metadata)
+        self.assertIn(
+            "external.url:https%3A%2F%2Fexample.com%2Fhome",
+            {item.target for item in references},
+        )
+        self.assertIn("file:managed/policy.json", {item.target for item in references})
+        self.assertIn("env:CHROME_POLICY_HOME", {item.target for item in references})
+
+    def test_plist_arrays_use_summary_or_stable_member_identity_without_indexes(self):
+        observations = extract_config_file_observations(
+            "policies/chrome-policy.plist",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+  <dict>
+    <key>ExtensionInstallForcelist</key>
+    <array>
+      <string>abcdefghijklmnopabcdefghijklmnop;https://example.com/update.xml</string>
+    </array>
+    <key>ManagedBookmarks</key>
+    <array>
+      <dict>
+        <key>name</key>
+        <string>Docs</string>
+        <key>url</key>
+        <string>https://example.com/docs</string>
+      </dict>
+      <dict>
+        <key>id</key>
+        <string>LocalHelp</string>
+        <key>path</key>
+        <string>../docs/help.html</string>
+      </dict>
+    </array>
+    <key>AnonymousRules</key>
+    <array>
+      <dict>
+        <key>url</key>
+        <string>https://example.com/anonymous</string>
+      </dict>
+    </array>
+  </dict>
+</plist>
+""",
+        )
+
+        paths = [item for item in observations if item.kind == "config.path"]
+        pointers = {item.metadata["pointer"] for item in paths}
+        references = [item for item in observations if item.kind == "config.reference"]
+        install_list = next(
+            item for item in paths if item.metadata["pointer"] == "/ExtensionInstallForcelist"
+        )
+        bookmarks = next(
+            item for item in paths if item.metadata["pointer"] == "/ManagedBookmarks"
+        )
+        anonymous = next(
+            item for item in paths if item.metadata["pointer"] == "/AnonymousRules"
+        )
+
+        self.assertEqual(install_list.metadata["array_policy"], "summary-only")
+        self.assertEqual(bookmarks.metadata["array_policy"], "stable-member-key")
+        self.assertEqual(anonymous.metadata["array_policy"], "summary-only")
+        self.assertIn("/ManagedBookmarks/Docs/url", pointers)
+        self.assertIn("/ManagedBookmarks/LocalHelp/path", pointers)
+        self.assertNotIn("/ManagedBookmarks/0/url", pointers)
+        self.assertNotIn("/AnonymousRules/0/url", pointers)
+        self.assertIn(
+            "external.url:https%3A%2F%2Fexample.com%2Fdocs",
+            {item.target for item in references},
+        )
+        self.assertIn("file:docs/help.html", {item.target for item in references})
+
+    def test_plist_reference_placeholders_are_conservative(self):
+        observations = extract_config_file_observations(
+            "policies/chrome-policy.plist",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+  <dict>
+    <key>OutsidePath</key>
+    <string>../../outside.json</string>
+    <key>AbsolutePath</key>
+    <string>/Library/Managed Preferences/com.google.Chrome.plist</string>
+    <key>DynamicPath</key>
+    <string>${POLICY_DIR}/chrome.json</string>
+  </dict>
+</plist>
+""",
+        )
+
+        references = [item for item in observations if item.kind == "config.reference"]
+
+        self.assertIn(
+            "unknown:file:repo-escaping-config-reference",
+            {item.target for item in references},
+        )
+        self.assertIn(
+            "external:file:absolute-config-reference",
+            {item.target for item in references},
+        )
+        self.assertIn(
+            "dynamic:file:config-reference-expanded-from-variable",
+            {item.target for item in references},
+        )
+
+    def test_plist_malformed_and_unsafe_xml_emit_parse_errors(self):
+        malformed = extract_config_file_observations(
+            "bad.plist",
+            "<plist><dict><key>MissingValue</key></dict></plist>",
+        )
+        unsafe = extract_config_file_observations(
+            "dangerous.plist",
+            """<?xml version="1.0"?>
+<!DOCTYPE plist [
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<plist><dict><key>Bad</key><string>&xxe;</string></dict></plist>
+""",
+        )
+        processing_instruction = extract_config_file_observations(
+            "stylesheet.plist",
+            """<?xml version="1.0"?>
+<?xml-stylesheet href="https://example.com/style.xsl" type="text/xsl"?>
+<plist><dict/></plist>
+""",
+        )
+
+        self.assertEqual([item.kind for item in malformed], ["config.parse_error"])
+        self.assertEqual(
+            malformed[0].metadata["error_kind"],
+            "unsupported-plist-shape",
+        )
+        self.assertEqual([item.kind for item in unsafe], ["config.parse_error"])
+        self.assertEqual(unsafe[0].metadata["error_kind"], "unsafe-xml-construct")
+        self.assertNotIn("file:///etc/passwd", unsafe[0].metadata["message_summary"])
+        self.assertEqual(
+            processing_instruction[0].metadata["error_kind"],
+            "unsafe-xml-construct",
+        )
+
+    def test_xml_files_are_plist_only_in_xml1(self):
+        non_plist = extract_config_file_observations(
+            "spring.xml",
+            "<beans><bean id=\"thing\"/></beans>",
+        )
+        plist_xml = extract_config_file_observations(
+            "policies/chrome-policy.xml",
+            "<plist><dict><key>HomepageLocation</key><string>https://example.com</string></dict></plist>",
+        )
+
+        self.assertEqual(non_plist, ())
+        self.assertEqual(plist_xml[0].kind, "config.document")
+        self.assertEqual(plist_xml[0].metadata["format"], "plist-xml")
+
 
 if __name__ == "__main__":
     unittest.main()

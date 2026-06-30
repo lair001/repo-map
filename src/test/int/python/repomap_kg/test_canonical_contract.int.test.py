@@ -15,6 +15,7 @@ from repomap_kg.canonical import (
 )
 from repomap_kg.canonical_diagnostics import CanonicalizationDiagnostic
 from repomap_kg.canonicalization import canonicalize_observations
+from repomap_kg.config_extractor import extract_config_file_observations
 from repomap_kg.graph_keys import (
     GRAPH_KEY_VERSION,
     GraphKeyError,
@@ -77,6 +78,7 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             "config_json_basic",
             "config_toml_basic",
             "config_codex_mcp_dogfood",
+            "xml_plist_chrome_policy_basic",
         )
 
         for fixture_name in fixture_names:
@@ -565,6 +567,183 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
         self.assertEqual(
             payload["diagnostics"][0]["category"],
             "invalid_canonical_key",
+        )
+
+    def test_plist_xml_config_extraction_and_canonicalization_contract(self):
+        observations = extract_config_file_observations(
+            "chrome-policy.plist",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+  <dict>
+    <key>HomepageLocation</key>
+    <string>https://example.com/home</string>
+    <key>PolicyPath</key>
+    <string>managed/policy.json</string>
+    <key>ManagedBookmarks</key>
+    <array>
+      <dict>
+        <key>name</key>
+        <string>Docs</string>
+        <key>url</key>
+        <string>https://example.com/docs</string>
+      </dict>
+      <dict>
+        <key>id</key>
+        <string>LocalHelp</string>
+        <key>path</key>
+        <string>managed/policy.json</string>
+      </dict>
+    </array>
+    <key>AnonymousRules</key>
+    <array>
+      <dict>
+        <key>url</key>
+        <string>https://example.com/anonymous</string>
+      </dict>
+    </array>
+    <key>api_key</key>
+    <string>xml1-contract-secret</string>
+  </dict>
+</plist>
+""",
+        )
+        unsafe = extract_config_file_observations(
+            "dangerous.plist",
+            """<?xml version="1.0"?>
+<!DOCTYPE plist [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<plist><dict><key>Bad</key><string>&xxe;</string></dict></plist>
+""",
+        )
+
+        serialized = json.dumps(
+            [observation.to_dict() for observation in (*observations, *unsafe)],
+            sort_keys=True,
+        )
+        paths = [item for item in observations if item.kind == "config.path"]
+        references = [item for item in observations if item.kind == "config.reference"]
+        pointers = {item.metadata["pointer"] for item in paths}
+        pointer_by_path = {item.metadata["pointer"]: item for item in paths}
+        result = canonicalize_observations((*observations, *unsafe))
+        payload = result.to_dict()
+
+        self.assertNotIn("xml1-contract-secret", serialized)
+        self.assertNotIn("file:///etc/passwd", serialized)
+        self.assertEqual(observations[0].metadata["format"], "plist-xml")
+        self.assertEqual(observations[0].metadata["document_role"], "chrome-policy")
+        self.assertEqual(unsafe[0].metadata["error_kind"], "unsafe-xml-construct")
+        self.assertEqual(
+            pointer_by_path["/ManagedBookmarks"].metadata["array_policy"],
+            "stable-member-key",
+        )
+        self.assertEqual(
+            pointer_by_path["/AnonymousRules"].metadata["array_policy"],
+            "summary-only",
+        )
+        self.assertIn("/ManagedBookmarks/Docs/url", pointers)
+        self.assertIn("/ManagedBookmarks/LocalHelp/path", pointers)
+        self.assertNotIn("/ManagedBookmarks/0/url", pointers)
+        self.assertNotIn("/AnonymousRules/0/url", pointers)
+        self.assertIn("file:managed/policy.json", {item.target for item in references})
+        self.assertIn(
+            "external.url:https%3A%2F%2Fexample.com%2Fhome",
+            {item.target for item in references},
+        )
+        self.assertTrue(result.ok)
+        self.assertIn(
+            (
+                "file:chrome-policy.plist",
+                "defines",
+                "config.document:file%3Achrome-policy.plist",
+            ),
+            {
+                (edge["source_key"], edge["kind"], edge["target_key"])
+                for edge in payload["edges"]
+            },
+        )
+        self.assertIn(
+            (
+                "config.path:file%3Achrome-policy.plist:%2FPolicyPath",
+                "references",
+                "file:managed/policy.json",
+            ),
+            {
+                (edge["source_key"], edge["kind"], edge["target_key"])
+                for edge in payload["edges"]
+            },
+        )
+        self.assertNotIn(
+            "config.document:file%3Adangerous.plist",
+            {node["canonical_key"] for node in payload["nodes"]},
+        )
+
+    def test_plist_xml_error_and_scalar_contracts(self):
+        scalar_observations = extract_config_file_observations(
+            "typed.plist",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<plist xmlns="urn:fixture" version="1.0">
+  <dict>
+    <key>MaxConnections</key>
+    <integer>25</integer>
+    <key>Ratio</key>
+    <real>1.5</real>
+    <key>Enabled</key>
+    <true/>
+    <key>Disabled</key>
+    <false/>
+    <key>PolicyDate</key>
+    <date>2026-06-30T00:00:00Z</date>
+    <key>Blob</key>
+    <data>QUJD</data>
+  </dict>
+</plist>
+""",
+        )
+        malformed = extract_config_file_observations(
+            "malformed.plist",
+            "<plist><dict><key>MissingEnd</key><string>oops</dict></plist>",
+        )
+        unsupported = extract_config_file_observations(
+            "unsupported.plist",
+            "<plist><dict><key>Bad</key><unknown/></dict></plist>",
+        )
+        bad_processing_instruction = extract_config_file_observations(
+            "processing-instruction.plist",
+            """<?xml version="1.0"?>
+<?xml-stylesheet href="https://example.com/style.xsl" type="text/xsl"?>
+<plist><dict/></plist>
+""",
+        )
+
+        paths = {
+            item.metadata["pointer"]: item
+            for item in scalar_observations
+            if item.kind == "config.path"
+        }
+
+        self.assertEqual(scalar_observations[0].metadata["format"], "plist-xml")
+        self.assertEqual(paths["/MaxConnections"].metadata["value_summary"], 25)
+        self.assertEqual(paths["/Ratio"].metadata["value_summary"], 1.5)
+        self.assertEqual(paths["/Enabled"].metadata["value_type"], "boolean")
+        self.assertEqual(paths["/Enabled"].metadata["value_summary"], True)
+        self.assertEqual(paths["/Disabled"].metadata["value_summary"], False)
+        self.assertEqual(
+            paths["/PolicyDate"].metadata["value_summary"],
+            "2026-06-30T00:00:00Z",
+        )
+        self.assertEqual(paths["/Blob"].metadata["value_summary"], "QUJD")
+        self.assertEqual([item.kind for item in malformed], ["config.parse_error"])
+        self.assertEqual(
+            malformed[0].metadata["error_kind"],
+            "malformed-plist-xml",
+        )
+        self.assertEqual([item.kind for item in unsupported], ["config.parse_error"])
+        self.assertEqual(
+            unsupported[0].metadata["error_kind"],
+            "unsupported-plist-shape",
+        )
+        self.assertEqual(
+            bad_processing_instruction[0].metadata["error_kind"],
+            "unsafe-xml-construct",
         )
 
     def test_canonicalization_error_and_ambiguity_contracts(self):

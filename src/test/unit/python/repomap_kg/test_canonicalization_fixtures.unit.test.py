@@ -34,6 +34,7 @@ class CanonicalizationFixtureTests(unittest.TestCase):
             "config_json_basic",
             "config_toml_basic",
             "config_codex_mcp_dogfood",
+            "xml_plist_chrome_policy_basic",
         )
 
         for fixture_name in fixture_names:
