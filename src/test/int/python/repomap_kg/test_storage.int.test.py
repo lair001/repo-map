@@ -9,6 +9,8 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+from repomap_test_support.postgres_harness import PostgresIpcGuard
+
 from repomap_kg.cli import main
 from repomap_kg.observations import RawObservation
 from repomap_kg.storage import (
@@ -3971,6 +3973,36 @@ SELECT (SELECT count(*) FROM raw_observations)::text
         self.assertIn("latest_run_id", text_stdout)
         self.assertIn("/tmp/fixture", text_stdout)
 
+    def test_temporary_postgres_teardown_runs_after_start_failure(self):
+        clusters = []
+
+        class FailingCluster:
+            def __init__(self, root):
+                self.root = root
+                self.stopped = False
+                clusters.append(self)
+
+            def start(self):
+                raise RuntimeError("bootstrap failed")
+
+            def stop(self):
+                self.stopped = True
+
+            def is_running(self):
+                return False
+
+        with patch(__name__ + ".PostgresCluster", FailingCluster):
+            with patch(__name__ + ".PostgresIpcGuard") as guard_class:
+                guard = guard_class.return_value
+                with self.assertRaisesRegex(RuntimeError, "bootstrap failed"):
+                    with temporary_postgres():
+                        pass
+
+        self.assertEqual(len(clusters), 1)
+        self.assertTrue(clusters[0].stopped)
+        guard.capture_baseline.assert_called_once_with()
+        guard.cleanup.assert_called_once_with(live_test_processes=False)
+
 
 class PostgresCluster:
     def __init__(self, root: Path):
@@ -4025,17 +4057,47 @@ class PostgresCluster:
 
     def stop(self):
         if self.data.exists():
-            run(
+            if not self.is_running():
+                return
+            try:
+                self._stop_with_mode("fast")
+            except AssertionError:
+                if self.is_running():
+                    self._stop_with_mode("immediate")
+
+    def _stop_with_mode(self, mode: str):
+        run(
+            [
+                str(self.bin_dir / "pg_ctl"),
+                "-D",
+                str(self.data),
+                "-m",
+                mode,
+                "-w",
+                "stop",
+            ]
+        )
+
+    def is_running(self) -> bool:
+        if not self.data.exists():
+            return False
+        try:
+            result = subprocess.run(
                 [
                     str(self.bin_dir / "pg_ctl"),
                     "-D",
                     str(self.data),
-                    "-m",
-                    "fast",
-                    "-w",
-                    "stop",
-                ]
+                    "status",
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
             )
+        except (FileNotFoundError, OSError, subprocess.SubprocessError):
+            return True
+        return result.returncode == 0
 
     def psql_scalar(self, sql: str) -> str:
         command = [self.psql_command, *self.psql_args, "-At", "-v", "ON_ERROR_STOP=1"]
@@ -4046,15 +4108,39 @@ class PostgresCluster:
 
 class temporary_postgres:
     def __enter__(self):
+        self.ipc_guard = PostgresIpcGuard()
+        self.ipc_guard.capture_baseline()
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.cluster = PostgresCluster(Path(self.tmpdir.name)).start()
-        return self.cluster
+        self.cluster = PostgresCluster(Path(self.tmpdir.name))
+        try:
+            return self.cluster.start()
+        except BaseException:
+            self._teardown()
+            raise
 
     def __exit__(self, exc_type, exc, tb):
+        self._teardown()
+
+    def _teardown(self):
+        cluster = getattr(self, "cluster", None)
+        stop_error = None
+        live_test_processes = False
+        if cluster is not None:
+            try:
+                cluster.stop()
+            except BaseException as error:
+                stop_error = error
+            finally:
+                live_test_processes = cluster.is_running()
+                self.ipc_guard.cleanup(
+                    live_test_processes=live_test_processes,
+                )
         try:
-            self.cluster.stop()
+            if stop_error is not None:
+                raise stop_error
         finally:
-            self.tmpdir.cleanup()
+            if not live_test_processes:
+                self.tmpdir.cleanup()
 
 
 def require_postgres_binaries():

@@ -14,6 +14,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = REPO_ROOT / "src" / "main" / "python"
+TEST_SUPPORT_ROOT = REPO_ROOT / "src" / "test" / "support" / "python"
 TEST_ROOTS = {
     "unit": REPO_ROOT / "src" / "test" / "unit" / "python",
     "int": REPO_ROOT / "src" / "test" / "int" / "python",
@@ -45,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
 
     suites = ("unit", "int") if args.suite == "all" else (args.suite,)
     sys.path.insert(0, str(SOURCE_ROOT))
+    sys.path.insert(0, str(TEST_SUPPORT_ROOT))
 
     tracer = trace.Trace(count=True, trace=False)
     test_suite = tracer.runfunc(load_tests, suites)
