@@ -229,6 +229,45 @@ class DiscoveryUnitTests(unittest.TestCase):
         self.assertNotIn("xml.element", kinds)
         self.assertNotIn("file:///etc/passwd", payload)
 
+    def test_discover_observations_includes_static_html_facts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.write(
+                root / "site" / "index.html",
+                """<!doctype html>
+<html lang="en">
+  <head><title>Fixture</title><link rel="stylesheet" href="assets/site.css"></head>
+  <body>
+    <h1 id="welcome">Welcome</h1>
+    <a href="#welcome">Jump</a>
+    <a href="https://example.com/docs">Docs</a>
+    <script src="assets/app.js">alert("nope")</script>
+    <form action="submit/login"><input name="password" value="html-secret"></form>
+  </body>
+</html>
+""",
+            )
+
+            observations = discover_observations(root)
+
+        payload = "\n".join(item.to_json_line() for item in observations)
+        kinds = [observation.kind for observation in observations]
+        html_file = next(
+            item
+            for item in observations
+            if item.kind == "file" and item.path == "site/index.html"
+        )
+
+        self.assertEqual(html_file.metadata["language"], "html")
+        self.assertIn("html.document", kinds)
+        self.assertIn("html.element", kinds)
+        self.assertIn("html.heading", kinds)
+        self.assertIn("html.link", kinds)
+        self.assertIn("html.asset", kinds)
+        self.assertIn("html.form", kinds)
+        self.assertNotIn("html-secret", payload)
+        self.assertNotIn('alert("nope")', payload)
+
     def test_unknown_language_and_role_fall_back_honestly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

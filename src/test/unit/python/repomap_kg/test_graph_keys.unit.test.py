@@ -12,6 +12,9 @@ from repomap_kg.graph_keys import (
     external_key,
     file_key,
     host_category_key,
+    html_anchor_key,
+    html_document_key,
+    html_element_key,
     doc_adr_key,
     doc_page_key,
     doc_section_key,
@@ -131,6 +134,18 @@ class GraphKeysUnitTests(unittest.TestCase):
                 "%2Fprojects%2Frepo-map%2Fpg_database"
             ),
         )
+        self.assertEqual(
+            html_document_key("site/index.html"),
+            "html.document:file%3Asite%2Findex.html",
+        )
+        self.assertEqual(
+            html_element_key("site/index.html", "/html/body/main/a[2]"),
+            "html.element:file%3Asite%2Findex.html:%2Fhtml%2Fbody%2Fmain%2Fa%5B2%5D",
+        )
+        self.assertEqual(
+            html_anchor_key("site/index.html", "intro"),
+            "html.anchor:file%3Asite%2Findex.html:intro",
+        )
         self.assertEqual(ruby_module_key("RepoMap"), "ruby.module:RepoMap")
         self.assertEqual(
             ruby_class_key("RepoMap::Runner"),
@@ -164,6 +179,9 @@ class GraphKeysUnitTests(unittest.TestCase):
         parsed_config_path = parse_key(
             "config.path:file%3Asettings.json:%2Fa~01b%2Fc~11d"
         )
+        parsed_html_element = parse_key(
+            "html.element:file%3Asite%2Findex.html:%2Fhtml%2Fbody%2Fmain"
+        )
 
         self.assertEqual(parsed_file.graph_key_version, GRAPH_KEY_VERSION)
         self.assertEqual(parsed_file.namespace, "file")
@@ -181,6 +199,11 @@ class GraphKeysUnitTests(unittest.TestCase):
         self.assertEqual(
             parsed_config_path.segments,
             ("file:settings.json", "/a~01b/c~11d"),
+        )
+        self.assertEqual(parsed_html_element.namespace, "html.element")
+        self.assertEqual(
+            parsed_html_element.segments,
+            ("file:site/index.html", "/html/body/main"),
         )
 
     def test_parse_key_rejects_bad_grammar_and_malformed_escapes(self):

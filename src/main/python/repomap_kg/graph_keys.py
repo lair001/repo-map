@@ -32,6 +32,9 @@ _SEGMENT_COUNTS = {
     "external.url": 1,
     "config.document": 1,
     "config.path": 2,
+    "html.document": 1,
+    "html.element": 2,
+    "html.anchor": 2,
     "ruby.module": 1,
     "ruby.class": 1,
     "ruby.method": 2,
@@ -139,6 +142,18 @@ def config_document_key(path_or_file_key: str | os.PathLike[str]) -> str:
 
 def config_path_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
     return _key("config.path", _coerce_file_key(path_or_file_key), _coerce_pointer(pointer))
+
+
+def html_document_key(path_or_file_key: str | os.PathLike[str]) -> str:
+    return _key("html.document", _coerce_file_key(path_or_file_key))
+
+
+def html_element_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
+    return _key("html.element", _coerce_file_key(path_or_file_key), _coerce_pointer(pointer))
+
+
+def html_anchor_key(path_or_file_key: str | os.PathLike[str], fragment: str) -> str:
+    return _key("html.anchor", _coerce_file_key(path_or_file_key), fragment)
 
 
 def ruby_module_key(name: str) -> str:

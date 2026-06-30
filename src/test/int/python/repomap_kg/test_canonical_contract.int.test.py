@@ -26,6 +26,9 @@ from repomap_kg.graph_keys import (
     external_key,
     file_key,
     host_category_key,
+    html_anchor_key,
+    html_document_key,
+    html_element_key,
     nix_app_key,
     nix_check_key,
     nix_dev_shell_key,
@@ -43,6 +46,7 @@ from repomap_kg.graph_keys import (
     unknown_key,
     validate_key,
 )
+from repomap_kg.html import extract_html_file_observations
 from repomap_kg.markdown import (
     extract_markdown_file_observations,
     parse_frontmatter,
@@ -79,6 +83,7 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             "config_toml_basic",
             "config_codex_mcp_dogfood",
             "xml_plist_chrome_policy_basic",
+            "html_static_basic",
         )
 
         for fixture_name in fixture_names:
@@ -125,6 +130,9 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
                 "mcp/config.json",
                 "/mcp_servers/repomap/command",
             ),
+            html_document_key("site/index.html"),
+            html_element_key("site/index.html", "/html/body/main/a[2]"),
+            html_anchor_key("site/index.html", "intro"),
         ]
 
         self.assertEqual(keys[0], "file:bin/tool")
@@ -140,6 +148,12 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             "nix.output:repo-map:packages%2Faarch64-darwin%2Fdefault",
         )
         self.assertEqual(keys[16], "ruby.class:RepoMap%3A%3ARunner")
+        self.assertEqual(keys[-3], "html.document:file%3Asite%2Findex.html")
+        self.assertEqual(
+            keys[-2],
+            "html.element:file%3Asite%2Findex.html:%2Fhtml%2Fbody%2Fmain%2Fa%5B2%5D",
+        )
+        self.assertEqual(keys[-1], "html.anchor:file%3Asite%2Findex.html:intro")
 
         for key in keys:
             with self.subTest(key=key):
@@ -674,6 +688,226 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
         self.assertNotIn(
             "config.document:file%3Adangerous.plist",
             {node["canonical_key"] for node in payload["nodes"]},
+        )
+
+    def test_static_html_extraction_and_canonicalization_contract(self):
+        observations = extract_html_file_observations(
+            "site/index.html",
+            """<!doctype html>
+<html lang="en">
+  <head>
+    <title>Static contract</title>
+    <link rel="stylesheet" href="assets/site.css">
+    <script src="assets/app.js">alert("html-contract-js")</script>
+    <style>.token-banner { color: red; }</style>
+  </head>
+  <body>
+    <h1 id="welcome">Welcome</h1>
+    <h2>Plain Heading</h2>
+    <a href="#welcome">Jump</a>
+    <a href="https://example.com/docs">Docs</a>
+    <a href="mailto:dev@example.com">Email</a>
+    <a href="javascript:alert('html-contract-js')">Bad</a>
+    <a href="../../outside.html">Outside</a>
+    <a href="/Library/file.txt">Absolute</a>
+    <a href="${ASSET_DIR}/logo.png">Dynamic</a>
+    <img src="images/logo.png">
+    <form method="post" action="submit/login">
+      <input name="password" value="html-contract-secret">
+    </form>
+  </body>
+</html>
+""",
+        )
+        broken = extract_html_file_observations(
+            "site/broken.html",
+            "<html><body><section><p>unterminated",
+        )
+
+        serialized = json.dumps(
+            [observation.to_dict() for observation in (*observations, *broken)],
+            sort_keys=True,
+        )
+        kinds = {item.kind for item in observations}
+        references = [
+            item
+            for item in observations
+            if item.kind in ("html.link", "html.asset", "html.form")
+        ]
+        result = canonicalize_observations((*observations, *broken))
+        payload = result.to_dict()
+
+        self.assertNotIn("html-contract-secret", serialized)
+        self.assertNotIn("html-contract-js", serialized)
+        self.assertTrue(
+            {
+                "html.document",
+                "html.element",
+                "html.heading",
+                "html.link",
+                "html.asset",
+                "html.form",
+            }.issubset(kinds)
+        )
+        self.assertEqual(broken[-1].kind, "html.parse_error")
+        self.assertEqual(
+            broken[-1].metadata["error_kind"],
+            "recoverable-unclosed-elements",
+        )
+        self.assertIn(
+            "html.anchor:file%3Asite%2Findex.html:welcome",
+            {item.target for item in references},
+        )
+        self.assertIn("file:site/assets/site.css", {item.target for item in references})
+        self.assertIn(
+            "external.url:https%3A%2F%2Fexample.com%2Fdocs",
+            {item.target for item in references},
+        )
+        self.assertIn("external.url:mailto%3Adev%40example.com", {item.target for item in references})
+        self.assertIn("dynamic:url:javascript-url", {item.target for item in references})
+        self.assertIn(
+            "unknown:file:repo-escaping-config-reference",
+            {item.target for item in references},
+        )
+        self.assertIn(
+            "external:file:absolute-config-reference",
+            {item.target for item in references},
+        )
+        self.assertIn(
+            "dynamic:file:html-reference-expanded-from-variable",
+            {item.target for item in references},
+        )
+        self.assertTrue(result.ok)
+        self.assertIn(
+            "html.document:file%3Asite%2Findex.html",
+            {node["canonical_key"] for node in payload["nodes"]},
+        )
+        self.assertIn(
+            "html.anchor:file%3Asite%2Findex.html:welcome",
+            {node["canonical_key"] for node in payload["nodes"]},
+        )
+        self.assertIn(
+            (
+                "file:site/index.html",
+                "defines",
+                "html.document:file%3Asite%2Findex.html",
+            ),
+            {
+                (edge["source_key"], edge["kind"], edge["target_key"])
+                for edge in payload["edges"]
+            },
+        )
+        self.assertIn(
+            (
+                "html.element:file%3Asite%2Findex.html:%2Fhtml%2Fbody%2Fa",
+                "references",
+                "html.anchor:file%3Asite%2Findex.html:welcome",
+            ),
+            {
+                (edge["source_key"], edge["kind"], edge["target_key"])
+                for edge in payload["edges"]
+            },
+        )
+
+    def test_static_html_canonicalization_error_and_placeholder_contracts(self):
+        warning_result = canonicalize_observations(
+            [
+                RawObservation(
+                    kind="html.heading",
+                    source_id="index.html#html-heading:/html/body/h1",
+                    path="index.html",
+                    name="/html/body/h1",
+                    confidence="heuristic",
+                    extractor="repo-html",
+                    extractor_version="0.1.0",
+                    metadata={
+                        "format": "html",
+                        "source_element_key": "html.element:file%3Aindex.html:%2Fhtml%2Fbody%2Fh1",
+                        "source_element_pointer": "/html/body/h1",
+                        "heading_level": 1,
+                    },
+                ),
+                RawObservation(
+                    kind="html.link",
+                    source_id="index.html#html-link:/html/body/a:href",
+                    path="index.html",
+                    name="/html/body/a",
+                    confidence="heuristic",
+                    extractor="repo-html",
+                    extractor_version="0.1.0",
+                    metadata={
+                        "format": "html",
+                        "source_key": "html.element:file%3Aindex.html:%2Fhtml%2Fbody%2Fa",
+                        "attribute": "href",
+                    },
+                ),
+                RawObservation(
+                    kind="html.link",
+                    source_id="index.html#html-link:/html/body/a[2]:href",
+                    path="index.html",
+                    name="/html/body/a[2]",
+                    target="bad target",
+                    confidence="heuristic",
+                    extractor="repo-html",
+                    extractor_version="0.1.0",
+                    metadata={
+                        "format": "html",
+                        "source_key": "html.element:file%3Aindex.html:%2Fhtml%2Fbody%2Fa%5B2%5D",
+                        "attribute": "href",
+                    },
+                ),
+            ]
+        )
+        bad_source_result = canonicalize_observations(
+            [
+                RawObservation(
+                    kind="html.link",
+                    source_id="index.html#html-link:/html/body/a:href",
+                    path="index.html",
+                    name="/html/body/a",
+                    target="external.url:https%3A%2F%2Fexample.com",
+                    confidence="heuristic",
+                    extractor="repo-html",
+                    extractor_version="0.1.0",
+                    metadata={"source_key": "tool:nix"},
+                )
+            ]
+        )
+        missing_pointer_result = canonicalize_observations(
+            [
+                RawObservation(
+                    kind="html.element",
+                    source_id="index.html#html-element:missing",
+                    path="index.html",
+                    confidence="heuristic",
+                    extractor="repo-html",
+                    extractor_version="0.1.0",
+                    metadata={"format": "html"},
+                )
+            ]
+        )
+
+        warning_payload = warning_result.to_dict()
+        self.assertTrue(warning_result.ok)
+        self.assertEqual(warning_payload["summary"]["warnings"], 2)
+        self.assertIn(
+            "html.element:file%3Aindex.html:%2Fhtml%2Fbody%2Fh1",
+            {node["canonical_key"] for node in warning_payload["nodes"]},
+        )
+        self.assertEqual(
+            warning_payload["diagnostics"][0]["placeholder_key"],
+            "unknown:html.reference:missing-target",
+        )
+        self.assertEqual(
+            warning_payload["diagnostics"][1]["placeholder_key"],
+            "unknown:html.reference:malformed-target",
+        )
+        self.assertFalse(bad_source_result.ok)
+        self.assertIn("source_key", bad_source_result.to_dict()["diagnostics"][0]["message"])
+        self.assertFalse(missing_pointer_result.ok)
+        self.assertIn(
+            "pointer",
+            missing_pointer_result.to_dict()["diagnostics"][0]["message"],
         )
 
     def test_plist_xml_error_and_scalar_contracts(self):

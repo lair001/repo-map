@@ -10,6 +10,7 @@ from typing import Any
 
 from repomap_kg import __version__
 from repomap_kg.config_extractor import extract_config_file_observations
+from repomap_kg.html import extract_html_file_observations
 from repomap_kg.markdown import (
     extract_markdown_file_observations,
     markdown_anchors_for_content,
@@ -44,6 +45,8 @@ LANGUAGE_BY_EXTENSION = {
     ".applescript": "applescript",
     ".awk": "awk",
     ".bash": "shell",
+    ".htm": "html",
+    ".html": "html",
     ".json": "json",
     ".jsonc": "jsonc",
     ".jsonl": "jsonl",
@@ -165,6 +168,13 @@ def discover_observations(
                     file_info.path,
                 )
             )
+        if file_info.language == "html":
+            observations.extend(
+                extract_html_file_observations_from_file(
+                    repository_root,
+                    file_info.path,
+                )
+            )
     return observations
 
 
@@ -218,6 +228,16 @@ def extract_config_file_observations_from_file(
     except UnicodeDecodeError:
         return ()
     return extract_config_file_observations(relative_path, content)
+
+
+def extract_html_file_observations_from_file(
+    repository_root: Path, relative_path: str
+) -> tuple[RawObservation, ...]:
+    try:
+        content = (repository_root / relative_path).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return ()
+    return extract_html_file_observations(relative_path, content)
 
 
 def extract_markdown_file_observations_from_file(
