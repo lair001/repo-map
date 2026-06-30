@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
 
@@ -16,6 +17,8 @@ from repomap_kg.canonical import (
 from repomap_kg.canonical_diagnostics import CanonicalizationDiagnostic
 from repomap_kg.canonicalization import canonicalize_observations
 from repomap_kg.config_extractor import extract_config_file_observations
+from repomap_kg.css import extract_css_file_observations
+from repomap_kg.discovery import extract_css_file_observations_from_file
 from repomap_kg.graph_keys import (
     GRAPH_KEY_VERSION,
     GraphKeyError,
@@ -84,6 +87,7 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             "config_codex_mcp_dogfood",
             "xml_plist_chrome_policy_basic",
             "html_static_basic",
+            "css_static_basic",
         )
 
         for fixture_name in fixture_names:
@@ -807,6 +811,129 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
                 (edge["source_key"], edge["kind"], edge["target_key"])
                 for edge in payload["edges"]
             },
+        )
+
+    def test_static_css_non_utf8_file_extraction_contract(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "bad.css").write_bytes(b"\xff\xfe\x00")
+
+            observations = extract_css_file_observations_from_file(root, "bad.css")
+
+        self.assertEqual(observations, ())
+
+    def test_static_css_extraction_and_canonicalization_contract(self):
+        observations = extract_css_file_observations(
+            "tools/test/report/static/report.css",
+            """
+/* url("https://example.com/comment-secret.png") */
+@import "./reset.css";
+
+:root {
+  --surface: #111a24;
+  --api-token: "css-contract-secret";
+}
+
+.report-header,
+.status-badge[data-status="pass"]:hover::before,
+#summary,
+main[role="main"] > .tree-grid .row + .row {
+  background-image: url("../../assets/panel.svg");
+  mask-image: url(data:image/svg+xml;base64,SECRET_PAYLOAD);
+}
+
+@media (max-width: 720px) {
+  .tree-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+@supports (overflow-wrap: anywhere) {
+  .path-cell { overflow-wrap: anywhere; }
+}
+
+@font-face {
+  font-family: "Report Mono";
+  src: url("/Library/Fonts/report.woff2") format("woff2");
+}
+
+.external { background-image: url("https://example.com/report.png"); }
+.escaping { background-image: url("../../../../../outside.svg"); }
+.dynamic { background-image: url(var(--asset-url)); }
+.javascript { background-image: url("javascript:alert(1)"); }
+@layer utilities { .layered { color: green; } }
+@broken
+""",
+        )
+
+        serialized = json.dumps(
+            [observation.to_dict() for observation in observations],
+            sort_keys=True,
+        )
+        kinds = {item.kind for item in observations}
+        references = [item for item in observations if item.kind == "css.reference"]
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertNotIn("css-contract-secret", serialized)
+        self.assertNotIn("SECRET_PAYLOAD", serialized)
+        self.assertNotIn("comment-secret", serialized)
+        self.assertTrue(
+            {
+                "css.document",
+                "css.rule",
+                "css.selector",
+                "css.declaration",
+                "css.custom_property",
+                "css.reference",
+                "css.parse_error",
+            }.issubset(kinds)
+        )
+        self.assertIn("file:tools/test/report/static/reset.css", {item.target for item in references})
+        self.assertIn("file:tools/test/assets/panel.svg", {item.target for item in references})
+        self.assertIn(
+            "external.url:https%3A%2F%2Fexample.com%2Freport.png",
+            {item.target for item in references},
+        )
+        self.assertIn("unknown:file:repo-escaping-css-reference", {item.target for item in references})
+        self.assertIn("unknown:external.url:data-url-payload-redacted", {item.target for item in references})
+        self.assertIn("dynamic:file:css-url-dynamic", {item.target for item in references})
+        self.assertIn("dynamic:url:unsupported-css-url-scheme", {item.target for item in references})
+        self.assertTrue(result.ok)
+        node_keys = {node["canonical_key"] for node in payload["nodes"]}
+        self.assertIn(
+            "css.document:file%3Atools%2Ftest%2Freport%2Fstatic%2Freport.css",
+            node_keys,
+        )
+        self.assertIn(
+            (
+                "css.selector:"
+                "file%3Atools%2Ftest%2Freport%2Fstatic%2Freport.css:"
+                "%2Frule%3A2%2Fselector%3A2"
+            ),
+            node_keys,
+        )
+        self.assertIn(
+            "css.custom_property:file%3Atools%2Ftest%2Freport%2Fstatic%2Freport.css:--surface",
+            node_keys,
+        )
+        edge_keys = {
+            (edge["source_key"], edge["kind"], edge["target_key"])
+            for edge in payload["edges"]
+        }
+        self.assertIn(
+            (
+                "file:tools/test/report/static/report.css",
+                "defines",
+                "css.document:file%3Atools%2Ftest%2Freport%2Fstatic%2Freport.css",
+            ),
+            edge_keys,
+        )
+        self.assertIn(
+            (
+                "css.rule:file%3Atools%2Ftest%2Freport%2Fstatic%2Freport.css:%2Frule%3A2",
+                "references",
+                "file:tools/test/assets/panel.svg",
+            ),
+            edge_keys,
         )
 
     def test_static_html_canonicalization_error_and_placeholder_contracts(self):

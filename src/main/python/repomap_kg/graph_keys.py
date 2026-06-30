@@ -32,6 +32,10 @@ _SEGMENT_COUNTS = {
     "external.url": 1,
     "config.document": 1,
     "config.path": 2,
+    "css.document": 1,
+    "css.rule": 2,
+    "css.selector": 2,
+    "css.custom_property": 2,
     "html.document": 1,
     "html.element": 2,
     "html.anchor": 2,
@@ -142,6 +146,28 @@ def config_document_key(path_or_file_key: str | os.PathLike[str]) -> str:
 
 def config_path_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
     return _key("config.path", _coerce_file_key(path_or_file_key), _coerce_pointer(pointer))
+
+
+def css_document_key(path_or_file_key: str | os.PathLike[str]) -> str:
+    return _key("css.document", _coerce_file_key(path_or_file_key))
+
+
+def css_rule_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
+    return _key("css.rule", _coerce_file_key(path_or_file_key), _coerce_pointer(pointer))
+
+
+def css_selector_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
+    return _key(
+        "css.selector",
+        _coerce_file_key(path_or_file_key),
+        _coerce_pointer(pointer),
+    )
+
+
+def css_custom_property_key(
+    path_or_file_key: str | os.PathLike[str], property_name: str
+) -> str:
+    return _key("css.custom_property", _coerce_file_key(path_or_file_key), property_name)
 
 
 def html_document_key(path_or_file_key: str | os.PathLike[str]) -> str:

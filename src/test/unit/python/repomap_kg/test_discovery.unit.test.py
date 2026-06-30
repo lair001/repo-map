@@ -6,7 +6,11 @@ from repomap_kg.discovery import (
     classify_path,
     discover_observations,
     discover_repository,
+    extract_css_file_observations_from_file,
 )
+
+
+FIXTURE_ROOT = Path(__file__).parents[3] / "fixtures" / "discovery"
 
 
 class DiscoveryUnitTests(unittest.TestCase):
@@ -267,6 +271,121 @@ class DiscoveryUnitTests(unittest.TestCase):
         self.assertIn("html.form", kinds)
         self.assertNotIn("html-secret", payload)
         self.assertNotIn('alert("nope")', payload)
+
+    def test_discover_observations_includes_static_css_facts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.write(
+                root / "tools" / "test" / "report" / "static" / "report.css",
+                """
+@import url("./reset.css");
+
+:root {
+  --surface: #111827;
+  --api-token: "fixture-secret-token";
+}
+
+.report-header,
+.status-badge[data-status="pass"]:hover::before,
+#summary {
+  background-image: url("../../assets/panel.svg");
+  mask-image: url(data:image/svg+xml;base64,PHNlY3JldD4=);
+}
+
+@media (max-width: 720px) {
+  .tree-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+@supports (overflow-wrap: anywhere) {
+  .path-cell { overflow-wrap: anywhere; }
+}
+
+@font-face {
+  font-family: "Report Mono";
+  src: url("/Library/Fonts/report.woff2");
+}
+
+.broken {
+  color: red;
+""",
+            )
+            self.write(root / "tools" / "test" / "report" / "static" / "reset.css", "")
+
+            observations = discover_observations(root)
+
+        payload = "\n".join(item.to_json_line() for item in observations)
+        kinds = [observation.kind for observation in observations]
+        css_file = next(
+            item
+            for item in observations
+            if item.kind == "file"
+            and item.path == "tools/test/report/static/report.css"
+        )
+
+        self.assertEqual(css_file.metadata["language"], "css")
+        self.assertIn("css.document", kinds)
+        self.assertIn("css.rule", kinds)
+        self.assertIn("css.selector", kinds)
+        self.assertIn("css.declaration", kinds)
+        self.assertIn("css.custom_property", kinds)
+        self.assertIn("css.reference", kinds)
+        self.assertIn("css.parse_error", kinds)
+        self.assertNotIn("fixture-secret-token", payload)
+        self.assertNotIn("PHNlY3JldD4=", payload)
+
+    def test_css_fixture_discovery_emits_report_stylesheet_facts(self):
+        observations = discover_observations(FIXTURE_ROOT / "css_static_basic")
+
+        payload = "\n".join(item.to_json_line() for item in observations)
+        kinds = [observation.kind for observation in observations]
+        selectors = [
+            observation
+            for observation in observations
+            if observation.kind == "css.selector"
+        ]
+        references = [
+            observation
+            for observation in observations
+            if observation.kind == "css.reference"
+        ]
+
+        self.assertIn("css.document", kinds)
+        self.assertIn("css.rule", kinds)
+        self.assertIn("css.selector", kinds)
+        self.assertIn("css.declaration", kinds)
+        self.assertIn("css.custom_property", kinds)
+        self.assertIn("css.reference", kinds)
+        self.assertIn("css.parse_error", kinds)
+        self.assertTrue(
+            any(
+                "status-badge" in observation.metadata["classes"]
+                for observation in selectors
+            )
+        )
+        self.assertTrue(
+            any(
+                observation.target == "file:tools/test/assets/panel.svg"
+                for observation in references
+            )
+        )
+        self.assertTrue(
+            any(
+                observation.target == "unknown:file:repo-escaping-css-reference"
+                for observation in references
+            )
+        )
+        self.assertNotIn("fixture-secret-token", payload)
+        self.assertNotIn("PHNlY3JldD4=", payload)
+
+    def test_css_file_extraction_skips_non_utf8_content(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            css_file = root / "bad.css"
+            css_file.write_bytes(b"\xff\xfe\x00")
+
+            observations = extract_css_file_observations_from_file(root, "bad.css")
+
+        self.assertEqual(observations, ())
 
     def test_unknown_language_and_role_fall_back_honestly(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -36,6 +36,7 @@ class CanonicalizationFixtureTests(unittest.TestCase):
             "config_codex_mcp_dogfood",
             "xml_plist_chrome_policy_basic",
             "html_static_basic",
+            "css_static_basic",
         )
 
         for fixture_name in fixture_names:

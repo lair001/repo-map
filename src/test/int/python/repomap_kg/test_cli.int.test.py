@@ -796,6 +796,74 @@ class CliIntegrationTests(unittest.TestCase):
             {error["metadata"]["error_kind"] for error in parse_errors},
         )
 
+    def test_discover_command_emits_css_static_observations_from_fixture(self):
+        fixture = REPO_ROOT / "src" / "test" / "fixtures" / "discovery" / "css_static_basic"
+
+        exit_code, stdout, stderr = self.run_module_entrypoint(
+            "discover", str(fixture), "--jsonl"
+        )
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertNotIn("fixture-secret-token", stdout)
+        self.assertNotIn("PHNlY3JldD4=", stdout)
+        observations = [
+            json.loads(line)
+            for line in stdout.splitlines()
+            if line.strip()
+        ]
+        kinds = {observation["kind"] for observation in observations}
+        self.assertTrue(
+            {
+                "css.document",
+                "css.rule",
+                "css.selector",
+                "css.declaration",
+                "css.custom_property",
+                "css.reference",
+                "css.parse_error",
+            }.issubset(kinds)
+        )
+        css_files = [
+            observation
+            for observation in observations
+            if observation["kind"] == "file"
+            and observation["metadata"]["language"] == "css"
+        ]
+        self.assertEqual(
+            [observation["path"] for observation in css_files],
+            [
+                "tools/test/report/static/report.css",
+                "tools/test/report/static/reset.css",
+            ],
+        )
+        selector_classes = {
+            class_name
+            for observation in observations
+            if observation["kind"] == "css.selector"
+            for class_name in observation["metadata"]["classes"]
+        }
+        self.assertTrue(
+            {
+                "status-badge",
+                "report-header",
+                "report-badges",
+                "tree-grid",
+                "test-grid",
+                "path-cell",
+                "metric-cell",
+                "status-cell",
+                "row",
+            }.issubset(selector_classes)
+        )
+        reference_targets = {
+            observation["target"]
+            for observation in observations
+            if observation["kind"] == "css.reference"
+        }
+        self.assertIn("file:tools/test/assets/panel.svg", reference_targets)
+        self.assertIn("unknown:file:repo-escaping-css-reference", reference_targets)
+        self.assertIn("dynamic:file:css-url-dynamic", reference_targets)
+
     def test_discover_command_emits_codex_mcp_config_dogfood_observations(self):
         fixture = (
             REPO_ROOT

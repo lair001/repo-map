@@ -7,6 +7,10 @@ from repomap_kg.graph_keys import (
     GraphKeyError,
     config_document_key,
     config_path_key,
+    css_custom_property_key,
+    css_document_key,
+    css_rule_key,
+    css_selector_key,
     dynamic_key,
     env_key,
     external_key,
@@ -135,6 +139,31 @@ class GraphKeysUnitTests(unittest.TestCase):
             ),
         )
         self.assertEqual(
+            css_document_key("tools/test/report/static/report.css"),
+            "css.document:file%3Atools%2Ftest%2Freport%2Fstatic%2Freport.css",
+        )
+        self.assertEqual(
+            css_rule_key("tools/test/report/static/report.css", "/media:1/rule:1"),
+            (
+                "css.rule:file%3Atools%2Ftest%2Freport%2Fstatic%2Freport.css:"
+                "%2Fmedia%3A1%2Frule%3A1"
+            ),
+        )
+        self.assertEqual(
+            css_selector_key("tools/test/report/static/report.css", "/rule:1/selector:2"),
+            (
+                "css.selector:file%3Atools%2Ftest%2Freport%2Fstatic%2Freport.css:"
+                "%2Frule%3A1%2Fselector%3A2"
+            ),
+        )
+        self.assertEqual(
+            css_custom_property_key("tools/test/report/static/report.css", "--surface"),
+            (
+                "css.custom_property:"
+                "file%3Atools%2Ftest%2Freport%2Fstatic%2Freport.css:--surface"
+            ),
+        )
+        self.assertEqual(
             html_document_key("site/index.html"),
             "html.document:file%3Asite%2Findex.html",
         )
@@ -182,6 +211,9 @@ class GraphKeysUnitTests(unittest.TestCase):
         parsed_html_element = parse_key(
             "html.element:file%3Asite%2Findex.html:%2Fhtml%2Fbody%2Fmain"
         )
+        parsed_css_selector = parse_key(
+            "css.selector:file%3Atools%2Freport.css:%2Frule%3A1%2Fselector%3A2"
+        )
 
         self.assertEqual(parsed_file.graph_key_version, GRAPH_KEY_VERSION)
         self.assertEqual(parsed_file.namespace, "file")
@@ -205,6 +237,11 @@ class GraphKeysUnitTests(unittest.TestCase):
             parsed_html_element.segments,
             ("file:site/index.html", "/html/body/main"),
         )
+        self.assertEqual(parsed_css_selector.namespace, "css.selector")
+        self.assertEqual(
+            parsed_css_selector.segments,
+            ("file:tools/report.css", "/rule:1/selector:2"),
+        )
 
     def test_parse_key_rejects_bad_grammar_and_malformed_escapes(self):
         cases = (
@@ -217,6 +254,7 @@ class GraphKeysUnitTests(unittest.TestCase):
             ("not-a-key", "separator"),
             ("unknown.namespace:value", "namespace"),
             ("config.path:file%3Asettings.json:", "segment"),
+            ("css.rule:file%3Astyle.css:", "segment"),
         )
 
         for key, message in cases:
@@ -239,6 +277,13 @@ class GraphKeysUnitTests(unittest.TestCase):
     def test_config_path_key_requires_non_empty_pointer(self):
         with self.assertRaisesRegex(GraphKeyError, "pointer"):
             config_path_key("settings.json", "")
+
+    def test_css_rule_and_selector_keys_require_normalized_pointers(self):
+        with self.assertRaisesRegex(GraphKeyError, "pointer"):
+            css_rule_key("style.css", "")
+
+        with self.assertRaisesRegex(GraphKeyError, "pointer"):
+            css_selector_key("style.css", "rule:1/selector:1")
 
 
 if __name__ == "__main__":
