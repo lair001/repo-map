@@ -10,6 +10,11 @@ from repomap_kg.graph_keys import (
     external_key,
     file_key,
     host_category_key,
+    doc_adr_key,
+    doc_page_key,
+    doc_section_key,
+    doc_skill_key,
+    external_url_key,
     nix_app_key,
     nix_check_key,
     nix_dev_shell_key,
@@ -93,6 +98,23 @@ class GraphKeysUnitTests(unittest.TestCase):
             nix_output_key("repo-map", "packages/aarch64-darwin/default"),
             "nix.output:repo-map:packages%2Faarch64-darwin%2Fdefault",
         )
+        self.assertEqual(
+            doc_page_key("docs/adr/0008-markdown-documentation-graph-model.md"),
+            "doc.page:file%3Adocs%2Fadr%2F0008-markdown-documentation-graph-model.md",
+        )
+        self.assertEqual(
+            doc_section_key("README.md", "current-status"),
+            "doc.section:file%3AREADME.md:current-status",
+        )
+        self.assertEqual(doc_adr_key("0008"), "doc.adr:0008")
+        self.assertEqual(
+            doc_skill_key("docs-only-change-hygiene"),
+            "doc.skill:docs-only-change-hygiene",
+        )
+        self.assertEqual(
+            external_url_key("https://example.com/docs#install"),
+            "external.url:https%3A%2F%2Fexample.com%2Fdocs%23install",
+        )
         self.assertEqual(ruby_module_key("RepoMap"), "ruby.module:RepoMap")
         self.assertEqual(
             ruby_class_key("RepoMap::Runner"),
@@ -120,6 +142,9 @@ class GraphKeysUnitTests(unittest.TestCase):
     def test_parse_key_decodes_file_and_segment_keys(self):
         parsed_file = parse_key("file:docs/My%20Tool%3Aguide%231.md")
         parsed_method = parse_key("python.method:repomap_kg.storage:Record:to_dict")
+        parsed_doc_section = parse_key(
+            "doc.section:file%3AREADME.md:current-status"
+        )
 
         self.assertEqual(parsed_file.graph_key_version, GRAPH_KEY_VERSION)
         self.assertEqual(parsed_file.namespace, "file")
@@ -131,6 +156,8 @@ class GraphKeysUnitTests(unittest.TestCase):
             ("repomap_kg.storage", "Record", "to_dict"),
         )
         self.assertIsNone(parsed_method.path)
+        self.assertEqual(parsed_doc_section.namespace, "doc.section")
+        self.assertEqual(parsed_doc_section.segments, ("file:README.md", "current-status"))
 
     def test_parse_key_rejects_bad_grammar_and_malformed_escapes(self):
         cases = (

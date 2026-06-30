@@ -40,6 +40,11 @@ from repomap_kg.graph_keys import (
     unknown_key,
     validate_key,
 )
+from repomap_kg.markdown import (
+    extract_markdown_file_observations,
+    parse_frontmatter,
+    resolve_markdown_link_target,
+)
 from repomap_kg.observations import RawObservation, read_observations_jsonl
 
 
@@ -66,6 +71,7 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             "unsupported_kind",
             "python_package",
             "nix_flake_basic",
+            "markdown_docs_basic",
         )
 
         for fixture_name in fixture_names:
@@ -102,6 +108,11 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             dynamic_key("file", "shell source expanded"),
             external_key("python.module", "requests"),
             unknown_key("env", "missing variable"),
+            "doc.page:file%3AREADME.md",
+            "doc.section:file%3AREADME.md:current-status",
+            "doc.adr:0008",
+            "doc.skill:docs-only-change-hygiene",
+            "external.url:https%3A%2F%2Fexample.com%2Fdocs",
         ]
 
         self.assertEqual(keys[0], "file:bin/tool")
@@ -581,6 +592,157 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(secret_edges[0]["metadata"]["value_redacted"], True)
         self.assertNotIn("values", secret_edges[0]["metadata"])
+
+    def test_markdown_extractor_ambiguity_contracts(self):
+        frontmatter = parse_frontmatter(
+            "---\n"
+            "title: \"Docs\"\n"
+            "published: true\n"
+            "draft: false\n"
+            "tags:\n"
+            "  - graph\n"
+            "not yaml\n"
+            "api_key: hidden\n"
+            "---\n"
+        )
+        self.assertIsNotNone(frontmatter)
+        assert frontmatter is not None
+        self.assertEqual(frontmatter.parse_status, "partial")
+        self.assertIs(frontmatter.values["published"], True)
+        self.assertIs(frontmatter.values["draft"], False)
+        self.assertIn("api_key", frontmatter.redacted_keys)
+
+        observations = extract_markdown_file_observations(
+            "docs/guide.md",
+            (
+                "---\n"
+                "title: Docs\n"
+                "---\n"
+                "# Guide\n"
+                "## Usage\n"
+                "### Details\n"
+                "## Usage\n"
+                "See [same](#usage), [missing](missing.md), "
+                "[template]({{ site.url }}/docs), [bad](bad%zz), "
+                "[asset](../assets/logo.png), and <https://EXAMPLE.com/docs a>.\n"
+                "[ref][] [missing-ref][missing]\n"
+                "\n"
+                "[ref]: #usage-1 \"title\"\n"
+                "```sh\n"
+                "echo not executed\n"
+            ),
+            repository_paths={"docs/guide.md", "assets/logo.png"},
+            markdown_anchors={"docs/guide.md": {"guide", "usage", "details", "usage-1"}},
+        )
+
+        links = [item for item in observations if item.kind == "markdown.link"]
+        fences = [item for item in observations if item.kind == "markdown.code_fence"]
+        headings = [item for item in observations if item.kind == "markdown.heading"]
+
+        self.assertEqual(
+            [heading.metadata["anchor"] for heading in headings],
+            ["guide", "usage", "details", "usage-1"],
+        )
+        self.assertEqual(headings[2].metadata["parent_anchor"], "usage")
+        self.assertEqual(headings[3].metadata["parent_anchor"], "guide")
+        self.assertFalse(fences[0].metadata["closed"])
+        self.assertEqual(
+            {item.target for item in links},
+            {
+                "doc.section:file%3Adocs%2Fguide.md:usage",
+                "unknown:doc.page:missing-markdown-link-target",
+                "dynamic:external.url:markdown-link-template",
+                "unknown:external.url:malformed-markdown-link",
+                "file:assets/logo.png",
+                "doc.section:file%3Adocs%2Fguide.md:usage-1",
+            },
+        )
+
+        repo_escape = resolve_markdown_link_target(
+            "docs/guide.md",
+            "../../outside.md",
+            repository_paths={"docs/guide.md"},
+            markdown_anchors={"docs/guide.md": {"guide"}},
+        )
+        self.assertEqual(repo_escape.target, "unknown:file:repo-escaping-markdown-link")
+        malformed = parse_frontmatter("---\ntitle: Broken\n")
+        self.assertIsNotNone(malformed)
+        assert malformed is not None
+        self.assertEqual(malformed.malformed_reason, "missing-closing-delimiter")
+
+    def test_markdown_canonicalization_error_contracts(self):
+        observations = [
+            RawObservation(
+                kind="markdown.link",
+                source_id="README.md#link:1:0",
+                path="README.md",
+                name="Missing",
+                confidence="extracted",
+                extractor="repo-markdown",
+                extractor_version="0.1.0",
+                metadata={
+                    "link_text": "Missing",
+                    "raw_target": "",
+                    "link_syntax": "inline",
+                    "resolved_target_kind": "unknown",
+                },
+            ),
+            RawObservation(
+                kind="markdown.link",
+                source_id="README.md#link:2:0",
+                path="README.md",
+                name="Bad",
+                target="bogus:target",
+                confidence="extracted",
+                extractor="repo-markdown",
+                extractor_version="0.1.0",
+                metadata={
+                    "source_anchor": "current-status",
+                    "link_text": "Bad",
+                    "raw_target": "bogus:target",
+                    "link_syntax": "inline",
+                    "resolution_reason": "malformed-percent-escape",
+                },
+            ),
+            RawObservation(
+                kind="markdown.heading",
+                source_id="README.md#heading:missing",
+                path="README.md",
+                name="Missing Anchor",
+                confidence="extracted",
+                extractor="repo-markdown",
+                extractor_version="0.1.0",
+                metadata={"text": "Missing Anchor"},
+            ),
+            RawObservation(
+                kind="markdown.frontmatter",
+                source_id="README.md#frontmatter",
+                path="README.md",
+                confidence="heuristic",
+                extractor="repo-markdown",
+                extractor_version="0.1.0",
+                metadata={"page_key": "bad%zz", "parse_status": "parsed"},
+            ),
+        ]
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertFalse(result.ok)
+        self.assertEqual(payload["summary"]["warnings"], 2)
+        self.assertEqual(payload["summary"]["errors"], 2)
+        self.assertIn(
+            "unknown:external.url:missing-markdown-link-target",
+            {edge["target_key"] for edge in payload["edges"]},
+        )
+        self.assertIn(
+            "unknown:external.url:malformed-markdown-link",
+            {edge["target_key"] for edge in payload["edges"]},
+        )
+        self.assertEqual(
+            [diagnostic["field"] for diagnostic in payload["diagnostics"]],
+            ["target", "target", "target", "metadata.page_key"],
+        )
 
 
 if __name__ == "__main__":

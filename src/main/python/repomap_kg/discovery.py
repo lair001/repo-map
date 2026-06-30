@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from repomap_kg import __version__
+from repomap_kg.markdown import (
+    extract_markdown_file_observations,
+    markdown_anchors_for_content,
+)
 from repomap_kg.nix import extract_nix_file_observations
 from repomap_kg.observations import RawObservation
 from repomap_kg.profiles import ProjectProfile
@@ -118,9 +122,20 @@ def discover_observations(
         (file_info.path for file_info in file_infos if file_info.language == "python"),
         repository_root=repository_root,
     )
+    repository_paths = frozenset(file_info.path for file_info in file_infos)
+    markdown_anchors = markdown_anchor_index(repository_root, file_infos)
     observations = []
     for file_info in file_infos:
         observations.append(file_info.to_observation())
+        if file_info.language == "markdown":
+            observations.extend(
+                extract_markdown_file_observations_from_file(
+                    repository_root,
+                    file_info,
+                    repository_paths=repository_paths,
+                    markdown_anchors=markdown_anchors,
+                )
+            )
         if file_info.language == "shell":
             observations.extend(
                 extract_shell_file_observations(repository_root, file_info.path)
@@ -180,6 +195,43 @@ def extract_nix_file_observations_from_file(
         content,
         flake_ref=repository_root.name,
     )
+
+
+def extract_markdown_file_observations_from_file(
+    repository_root: Path,
+    file_info: FileInfo,
+    *,
+    repository_paths: frozenset[str],
+    markdown_anchors: dict[str, frozenset[str]],
+) -> tuple[RawObservation, ...]:
+    try:
+        content = (repository_root / file_info.path).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return ()
+    return extract_markdown_file_observations(
+        file_info.path,
+        content,
+        repository_paths=repository_paths,
+        markdown_anchors=markdown_anchors,
+        content_hash=file_info.content_hash,
+        generated=file_info.generated,
+    )
+
+
+def markdown_anchor_index(
+    repository_root: Path,
+    file_infos: list[FileInfo],
+) -> dict[str, frozenset[str]]:
+    anchors: dict[str, frozenset[str]] = {}
+    for file_info in file_infos:
+        if file_info.language != "markdown":
+            continue
+        try:
+            content = (repository_root / file_info.path).read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        anchors[file_info.path] = frozenset(markdown_anchors_for_content(content))
+    return anchors
 
 
 def classify_path(

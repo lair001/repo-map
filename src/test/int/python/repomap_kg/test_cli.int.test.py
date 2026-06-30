@@ -524,6 +524,102 @@ class CliIntegrationTests(unittest.TestCase):
             ],
         )
 
+    def test_discover_command_emits_markdown_documentation_observations(self):
+        fixture = REPO_ROOT / "src" / "test" / "fixtures" / "discovery" / "markdown_docs_basic"
+
+        exit_code, stdout, stderr = self.run_module_entrypoint(
+            "discover", str(fixture), "--jsonl"
+        )
+
+        observations = [json.loads(line) for line in stdout.splitlines()]
+        kinds = {item["kind"] for item in observations}
+        links = [item for item in observations if item["kind"] == "markdown.link"]
+        frontmatter = next(
+            item
+            for item in observations
+            if item["kind"] == "markdown.frontmatter" and item["path"] == "README.md"
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, "")
+        self.assertTrue(
+            {
+                "markdown.document",
+                "markdown.heading",
+                "markdown.link",
+                "markdown.frontmatter",
+                "markdown.code_fence",
+                "markdown.adr_metadata",
+                "markdown.skill_metadata",
+            }.issubset(kinds)
+        )
+        self.assertIn("api_key", frontmatter["metadata"]["redacted_keys"])
+        self.assertIn(
+            "doc.section:file%3Adocs%2Fadr%2F0008-markdown-documentation-graph-model.md:decision",
+            {item.get("target") for item in links},
+        )
+        self.assertIn(
+            "external.url:https%3A%2F%2Fexample.com%2Fdocs",
+            {item.get("target") for item in links},
+        )
+
+    def test_discover_command_handles_markdown_ambiguity_without_execution(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "fixture-repo"
+            self.write_fixture(
+                fixture / "docs" / "guide.md",
+                (
+                    "---\n"
+                    "title: \"Guide\"\n"
+                    "published: true\n"
+                    "draft: false\n"
+                    "tags:\n"
+                    "  - docs\n"
+                    "not yaml\n"
+                    "secret_token: hidden\n"
+                    "---\n"
+                    "# Guide\n"
+                    "See [same](#guide), [missing](missing.md), "
+                    "[template]({{ site.url }}/docs), and [bad](bad%zz).\n"
+                    "```sh\n"
+                    "echo '[not](executed.md)'\n"
+                ),
+            )
+            self.write_fixture(
+                fixture / "docs" / "skills" / "path-only" / "SKILL.md",
+                "# Path Only\n",
+            )
+            self.write_fixture(
+                fixture / "docs" / "adr" / "0010-filename-title.md",
+                "No heading here.\n",
+            )
+
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "discover", str(fixture), "--jsonl"
+            )
+
+        observations = [json.loads(line) for line in stdout.splitlines()]
+        guide_items = [item for item in observations if item["path"] == "docs/guide.md"]
+        frontmatter = next(item for item in guide_items if item["kind"] == "markdown.frontmatter")
+        fence = next(item for item in guide_items if item["kind"] == "markdown.code_fence")
+        link_targets = {
+            item.get("target") for item in guide_items if item["kind"] == "markdown.link"
+        }
+        skill = next(item for item in observations if item["kind"] == "markdown.skill_metadata")
+        adr = next(item for item in observations if item["kind"] == "markdown.adr_metadata")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(frontmatter["metadata"]["parse_status"], "partial")
+        self.assertIn("secret_token", frontmatter["metadata"]["redacted_keys"])
+        self.assertFalse(fence["metadata"]["closed"])
+        self.assertIn("doc.section:file%3Adocs%2Fguide.md:guide", link_targets)
+        self.assertIn("unknown:doc.page:missing-markdown-link-target", link_targets)
+        self.assertIn("dynamic:external.url:markdown-link-template", link_targets)
+        self.assertIn("unknown:external.url:malformed-markdown-link", link_targets)
+        self.assertEqual(skill["target"], "doc.skill:path-only")
+        self.assertEqual(adr["metadata"]["metadata_source"], "filename")
+
     def test_nix_repo_path_resolution_contract(self):
         self.assertEqual(
             resolve_repo_path("flake.nix", "${self}/bin/tool"),
@@ -795,7 +891,10 @@ generated_dirs = ["out"]
             )
 
         observations = [json.loads(line) for line in stdout.splitlines()]
-        by_path = {observation["path"]: observation for observation in observations}
+        file_observations = [
+            observation for observation in observations if observation["kind"] == "file"
+        ]
+        by_path = {observation["path"]: observation for observation in file_observations}
         self.assertEqual(exit_code, 0)
         self.assertEqual(stderr, "")
         self.assertEqual(by_path["ops/ship"]["metadata"]["role"], "entrypoint")

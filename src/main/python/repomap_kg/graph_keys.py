@@ -25,6 +25,11 @@ _SEGMENT_COUNTS = {
     "nix.devShell": 3,
     "nix.check": 3,
     "nix.output": 2,
+    "doc.page": 1,
+    "doc.section": 2,
+    "doc.adr": 1,
+    "doc.skill": 1,
+    "external.url": 1,
     "ruby.module": 1,
     "ruby.class": 1,
     "ruby.method": 2,
@@ -106,6 +111,26 @@ def nix_output_key(flake_ref: str, output_path: str) -> str:
     return _key("nix.output", flake_ref, output_path)
 
 
+def doc_page_key(path_or_file_key: str | os.PathLike[str]) -> str:
+    return _key("doc.page", _coerce_file_key(path_or_file_key))
+
+
+def doc_section_key(path_or_file_key: str | os.PathLike[str], anchor: str) -> str:
+    return _key("doc.section", _coerce_file_key(path_or_file_key), anchor)
+
+
+def doc_adr_key(number: str) -> str:
+    return _key("doc.adr", number)
+
+
+def doc_skill_key(name: str) -> str:
+    return _key("doc.skill", name)
+
+
+def external_url_key(url: str) -> str:
+    return _key("external.url", url)
+
+
 def ruby_module_key(name: str) -> str:
     return _key("ruby.module", name)
 
@@ -175,6 +200,15 @@ def _key(namespace: str, *segments: str) -> str:
     if len(segments) != expected_count:
         raise GraphKeyError(f"{namespace} keys require {expected_count} segments")
     return namespace + ":" + ":".join(_encode_segment(segment) for segment in segments)
+
+
+def _coerce_file_key(path_or_file_key: str | os.PathLike[str]) -> str:
+    if isinstance(path_or_file_key, str) and path_or_file_key.startswith("file:"):
+        parsed = parse_key(path_or_file_key)
+        if parsed.namespace != "file":
+            raise GraphKeyError("documentation page keys require a file key")
+        return path_or_file_key
+    return file_key(path_or_file_key)
 
 
 def _normalize_file_components(path: str | os.PathLike[str]) -> tuple[str, ...]:

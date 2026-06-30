@@ -1490,6 +1490,176 @@ FROM canonical_edges;
         )
         self.assertEqual(raw_path_refs, "2")
 
+    def test_storage_loads_markdown_discovery_into_canonical_readback(self):
+        require_postgres_binaries()
+        fixture_root = discovery_fixture("markdown_docs_basic")
+
+        discover_exit_code, discover_stdout, discover_stderr = (
+            run_repo_map_in_process(
+                "discover",
+                str(fixture_root),
+                "--jsonl",
+            )
+        )
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as jsonl_file:
+            jsonl_file.write(discover_stdout)
+            jsonl_file.flush()
+
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                storage_args = (
+                    "--root-path",
+                    str(fixture_root),
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                )
+                load_exit_code, _load_stdout, load_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "load-files",
+                        jsonl_file.name,
+                        "--repository-name",
+                        "markdown-fixture",
+                        *storage_args,
+                        "--json",
+                    )
+                )
+
+                def canonical_nodes(kind):
+                    return run_repo_map_in_process(
+                        "storage",
+                        "canonical-nodes",
+                        *storage_args,
+                        "--kind",
+                        kind,
+                        "--json",
+                    )
+
+                page_exit, page_stdout, page_stderr = canonical_nodes("doc.page")
+                section_exit, section_stdout, section_stderr = canonical_nodes(
+                    "doc.section"
+                )
+                adr_exit, adr_stdout, adr_stderr = canonical_nodes("doc.adr")
+                skill_exit, skill_stdout, skill_stderr = canonical_nodes("doc.skill")
+
+                def canonical_edges(kind):
+                    return run_repo_map_in_process(
+                        "storage",
+                        "canonical-edges",
+                        *storage_args,
+                        "--kind",
+                        kind,
+                        "--json",
+                    )
+
+                defines_exit, defines_stdout, defines_stderr = canonical_edges(
+                    "defines"
+                )
+                links_exit, links_stdout, links_stderr = canonical_edges("links_to")
+                explain_exit, explain_stdout, explain_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "explain-canonical-edge",
+                        *storage_args,
+                        "--source-key",
+                        "doc.section:file%3AREADME.md:docs-fixture",
+                        "--kind",
+                        "links_to",
+                        "--target-key",
+                        "doc.section:file%3Adocs%2Fadr%2F0008-markdown-documentation-graph-model.md:decision",
+                        "--json",
+                    )
+                )
+
+        self.assertEqual(discover_exit_code, 0, discover_stderr)
+        discovered_kinds = {
+            json.loads(line)["kind"]
+            for line in discover_stdout.splitlines()
+            if line.strip()
+        }
+        self.assertTrue(
+            {
+                "markdown.document",
+                "markdown.heading",
+                "markdown.link",
+                "markdown.frontmatter",
+                "markdown.code_fence",
+                "markdown.adr_metadata",
+                "markdown.skill_metadata",
+            }.issubset(discovered_kinds)
+        )
+        self.assertEqual(load_exit_code, 0, load_stderr)
+
+        self.assertEqual(page_exit, 0, page_stderr)
+        page_keys = {record["canonical_key"] for record in json.loads(page_stdout)}
+        self.assertTrue(
+            {
+                "doc.page:file%3AREADME.md",
+                "doc.page:file%3Adocs%2Fadr%2F0008-markdown-documentation-graph-model.md",
+                "doc.page:file%3Adocs%2Fskills%2Fexample%2FSKILL.md",
+                "doc.page:file%3AAGENTS.md",
+            }.issubset(page_keys)
+        )
+        self.assertEqual(section_exit, 0, section_stderr)
+        self.assertIn(
+            "doc.section:file%3AREADME.md:docs-fixture",
+            {record["canonical_key"] for record in json.loads(section_stdout)},
+        )
+        self.assertEqual(adr_exit, 0, adr_stderr)
+        self.assertEqual(
+            [record["canonical_key"] for record in json.loads(adr_stdout)],
+            ["doc.adr:0008"],
+        )
+        self.assertEqual(skill_exit, 0, skill_stderr)
+        self.assertEqual(
+            [record["canonical_key"] for record in json.loads(skill_stdout)],
+            ["doc.skill:example"],
+        )
+
+        self.assertEqual(defines_exit, 0, defines_stderr)
+        define_targets = {record["target_key"] for record in json.loads(defines_stdout)}
+        self.assertIn("doc.page:file%3AREADME.md", define_targets)
+        self.assertIn("doc.adr:0008", define_targets)
+        self.assertIn("doc.skill:example", define_targets)
+
+        self.assertEqual(links_exit, 0, links_stderr)
+        link_edges = json.loads(links_stdout)
+        self.assertIn(
+            (
+                "doc.section:file%3AREADME.md:docs-fixture",
+                "doc.section:file%3Adocs%2Fadr%2F0008-markdown-documentation-graph-model.md:decision",
+            ),
+            {
+                (record["source_key"], record["target_key"])
+                for record in link_edges
+            },
+        )
+        self.assertIn(
+            "external.url:https%3A%2F%2Fexample.com%2Fdocs",
+            {record["target_key"] for record in link_edges},
+        )
+
+        self.assertEqual(explain_exit, 0, explain_stderr)
+        explanation = json.loads(explain_stdout)
+        self.assertEqual(explanation["edge"]["edge_kind"], "links_to")
+        self.assertEqual(len(explanation["evidence"]), 1)
+        self.assertEqual(
+            explanation["evidence"][0]["raw_observation"]["kind"],
+            "markdown.link",
+        )
+
     def test_mcp_read_only_tools_read_python_canonical_graph(self):
         require_postgres_binaries()
         raw_jsonl = canonicalization_fixture(

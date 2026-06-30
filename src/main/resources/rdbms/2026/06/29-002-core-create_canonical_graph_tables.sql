@@ -75,6 +75,7 @@ CREATE TABLE canonical_edges (
             'mutates_host',
             'imports',
             'exposes_script',
+            'links_to',
             'depends_on',
             'wraps',
             'tests'

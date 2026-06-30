@@ -118,6 +118,37 @@ class DiscoveryUnitTests(unittest.TestCase):
         self.assertEqual(app.metadata["flake_ref"], root.name)
         self.assertEqual(app.metadata["program_path"], "bin/tool")
 
+    def test_discover_observations_includes_markdown_documentation_facts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.write(
+                root / "README.md",
+                (
+                    "# Fixture\n"
+                    "\n"
+                    "See [ADR](docs/adr/0008-markdown-documentation-graph-model.md#decision).\n"
+                ),
+            )
+            self.write(
+                root / "docs" / "adr" / "0008-markdown-documentation-graph-model.md",
+                "# ADR 0008: Markdown Documentation Graph Model\n\n## Decision\n",
+            )
+
+            observations = discover_observations(root)
+
+        kinds = [observation.kind for observation in observations]
+        self.assertIn("markdown.document", kinds)
+        self.assertIn("markdown.heading", kinds)
+        self.assertIn("markdown.link", kinds)
+        self.assertIn("markdown.adr_metadata", kinds)
+        link = next(item for item in observations if item.kind == "markdown.link")
+        self.assertEqual(
+            link.target,
+            "doc.section:file%3Adocs%2Fadr%2F0008-markdown-documentation-graph-model.md:decision",
+        )
+        adr = next(item for item in observations if item.kind == "markdown.adr_metadata")
+        self.assertEqual(adr.target, "doc.adr:0008")
+
     def test_unknown_language_and_role_fall_back_honestly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
