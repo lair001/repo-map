@@ -1,7 +1,5 @@
 import os
 import json
-import shutil
-import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -9,7 +7,10 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from repomap_test_support.postgres_harness import PostgresIpcGuard
+from repomap_test_support.postgres_harness import (
+    require_postgres_binaries,
+    temporary_postgres,
+)
 
 from repomap_kg.cli import main
 from repomap_kg.observations import RawObservation
@@ -5106,190 +5107,6 @@ SELECT (SELECT count(*) FROM raw_observations)::text
         self.assertIsInstance(legacy_payload["latest_run_id"], int)
         self.assertNotIn("canonical_nodes", legacy_payload)
 
-    def test_temporary_postgres_teardown_runs_after_start_failure(self):
-        clusters = []
-
-        class FailingCluster:
-            def __init__(self, root):
-                self.root = root
-                self.stopped = False
-                clusters.append(self)
-
-            def start(self):
-                raise RuntimeError("bootstrap failed")
-
-            def stop(self):
-                self.stopped = True
-
-            def is_running(self):
-                return False
-
-        with patch(__name__ + ".PostgresCluster", FailingCluster):
-            with patch(__name__ + ".PostgresIpcGuard") as guard_class:
-                guard = guard_class.return_value
-                with self.assertRaisesRegex(RuntimeError, "bootstrap failed"):
-                    with temporary_postgres():
-                        pass
-
-        self.assertEqual(len(clusters), 1)
-        self.assertTrue(clusters[0].stopped)
-        guard.capture_baseline.assert_called_once_with()
-        guard.cleanup.assert_called_once_with(live_test_processes=False)
-
-
-class PostgresCluster:
-    def __init__(self, root: Path):
-        self.root = root
-        self.data = root / "data"
-        self.socket_dir = root / "socket"
-        self.log = root / "postgres.log"
-        self.port = 5432
-        self.user = "repo_map_test"
-        self.bin_dir = postgres_bin_dir()
-        self.psql_command = str(self.bin_dir / "psql")
-        self.socket_dir.mkdir()
-        self.psql_args = [
-            "-h",
-            str(self.socket_dir),
-            "-p",
-            str(self.port),
-            "-U",
-            self.user,
-            "-d",
-            "postgres",
-        ]
-
-    def start(self):
-        run(
-            [
-                str(self.bin_dir / "initdb"),
-                "-D",
-                str(self.data),
-                "-A",
-                "trust",
-                "-U",
-                self.user,
-                "-L",
-                str(postgres_share_dir()),
-            ]
-        )
-        run(
-            [
-                str(self.bin_dir / "pg_ctl"),
-                "-D",
-                str(self.data),
-                "-l",
-                str(self.log),
-                "-o",
-                f"-k {self.socket_dir} -h '' -p {self.port}",
-                "-w",
-                "start",
-            ]
-        )
-        return self
-
-    def stop(self):
-        if self.data.exists():
-            if not self.is_running():
-                return
-            try:
-                self._stop_with_mode("fast")
-            except AssertionError:
-                if self.is_running():
-                    self._stop_with_mode("immediate")
-
-    def _stop_with_mode(self, mode: str):
-        run(
-            [
-                str(self.bin_dir / "pg_ctl"),
-                "-D",
-                str(self.data),
-                "-m",
-                mode,
-                "-w",
-                "stop",
-            ]
-        )
-
-    def is_running(self) -> bool:
-        if not self.data.exists():
-            return False
-        try:
-            result = subprocess.run(
-                [
-                    str(self.bin_dir / "pg_ctl"),
-                    "-D",
-                    str(self.data),
-                    "status",
-                ],
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=10,
-            )
-        except (FileNotFoundError, OSError, subprocess.SubprocessError):
-            return True
-        return result.returncode == 0
-
-    def psql_scalar(self, sql: str) -> str:
-        command = [self.psql_command, *self.psql_args, "-At", "-v", "ON_ERROR_STOP=1"]
-        result = run(command, sql)
-        lines = [line for line in result.stdout.splitlines() if line]
-        return lines[-1] if lines else ""
-
-
-class temporary_postgres:
-    def __enter__(self):
-        self.ipc_guard = PostgresIpcGuard()
-        self.ipc_guard.capture_baseline()
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.cluster = PostgresCluster(Path(self.tmpdir.name))
-        try:
-            return self.cluster.start()
-        except BaseException:
-            self._teardown()
-            raise
-
-    def __exit__(self, exc_type, exc, tb):
-        self._teardown()
-
-    def _teardown(self):
-        cluster = getattr(self, "cluster", None)
-        stop_error = None
-        live_test_processes = False
-        if cluster is not None:
-            try:
-                cluster.stop()
-            except BaseException as error:
-                stop_error = error
-            finally:
-                live_test_processes = cluster.is_running()
-                self.ipc_guard.cleanup(
-                    live_test_processes=live_test_processes,
-                )
-        try:
-            if stop_error is not None:
-                raise stop_error
-        finally:
-            if not live_test_processes:
-                self.tmpdir.cleanup()
-
-
-def require_postgres_binaries():
-    bin_dir = postgres_bin_dir()
-    missing = [
-        command
-        for command in ("initdb", "pg_ctl", "psql")
-        if not (bin_dir / command).exists()
-    ]
-    if missing:
-        raise unittest.SkipTest(
-            f"missing Postgres binaries in {bin_dir}: {', '.join(missing)}"
-        )
-    postgres_share_dir()
-
-
 def canonicalization_fixture(name: str, filename: str) -> Path:
     return (
         Path(__file__).parents[3]
@@ -5302,65 +5119,6 @@ def canonicalization_fixture(name: str, filename: str) -> Path:
 
 def discovery_fixture(name: str) -> Path:
     return Path(__file__).parents[3] / "fixtures" / "discovery" / name
-
-
-def postgres_share_dir() -> Path:
-    share = postgres_config_path("--sharedir")
-    if share is None:
-        share = postgres_bin_dir().parent / "share" / "postgresql"
-    if not (share / "postgres.bki").exists():
-        raise unittest.SkipTest(f"missing Postgres share directory: {share}")
-    return share
-
-
-def postgres_bin_dir() -> Path:
-    bindir = postgres_config_path("--bindir")
-    if bindir is not None:
-        return bindir
-    initdb = Path(shutil.which("initdb") or "initdb").resolve()
-    return initdb.parent
-
-
-def postgres_config_path(option: str) -> Path | None:
-    pg_config = shutil.which("pg_config")
-    if pg_config is None:
-        return None
-    result = subprocess.run(
-        [pg_config, option],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=10,
-    )
-    if result.returncode != 0:
-        return None
-    value = result.stdout.strip()
-    if not value:
-        return None
-    return Path(value).resolve()
-
-
-def run(command, input_text=None):
-    env = os.environ.copy()
-    env["LC_ALL"] = "C"
-    try:
-        return subprocess.run(
-            command,
-            check=True,
-            env=env,
-            input=input_text,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=30,
-        )
-    except subprocess.CalledProcessError as error:
-        raise AssertionError(
-            f"command failed: {command}\n"
-            f"stdout:\n{error.stdout}\n"
-            f"stderr:\n{error.stderr}"
-        ) from error
 
 
 def run_repo_map_in_process(*args):
