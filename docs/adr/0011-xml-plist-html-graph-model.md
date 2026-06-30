@@ -10,10 +10,12 @@ Accepted
 
 ## Context
 
-RepoMap now extracts and canonicalizes shell, Python, Nix, Markdown, and
-structured JSON-family/TOML configuration facts. Canonical graph readback is the
-preferred public query model, while Phase F3 intentionally pauses further
-legacy-readback migration before higher-risk commands.
+RepoMap now extracts and canonicalizes Python, Nix, Markdown, and structured
+JSON-family/TOML configuration facts, while retaining earlier shell-family file,
+command, and host-mutation observations for legacy and compatibility workflows.
+Canonical graph readback is the preferred public query model, while Phase F3
+intentionally pauses further legacy-readback migration before higher-risk
+commands.
 
 XML-family files are both documents and structured configuration. Apple plist
 XML is structurally closer to configuration than prose, and the immediate
