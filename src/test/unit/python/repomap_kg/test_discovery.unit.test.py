@@ -149,6 +149,36 @@ class DiscoveryUnitTests(unittest.TestCase):
         adr = next(item for item in observations if item.kind == "markdown.adr_metadata")
         self.assertEqual(adr.target, "doc.adr:0008")
 
+    def test_discover_observations_includes_json_family_config_facts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.write(
+                root / "mcp" / "repo-map" / "config.json",
+                '{"command": "repomap-kg", "api_key": "secret-value"}\n',
+            )
+            self.write(
+                root / "events.jsonl",
+                '{"event": "start"}\n{"event": \n{"path": "./mcp/repo-map/config.json"}\n',
+            )
+            self.write(
+                root / "settings.jsonc",
+                '{ // comment\n "url": "https://example.com/docs", }\n',
+            )
+
+            observations = discover_observations(root)
+
+        payload = "\n".join(item.to_json_line() for item in observations)
+        kinds = [observation.kind for observation in observations]
+
+        self.assertNotIn("secret-value", payload)
+        self.assertIn("config.document", kinds)
+        self.assertIn("config.path", kinds)
+        self.assertIn("config.reference", kinds)
+        self.assertIn("config.jsonl_record", kinds)
+        self.assertIn("config.parse_error", kinds)
+        self.assertIn(".jsonl", {item.path[-6:] for item in observations})
+        self.assertIn(".jsonc", {item.path[-6:] for item in observations})
+
     def test_unknown_language_and_role_fall_back_honestly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

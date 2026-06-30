@@ -5,6 +5,8 @@ from pathlib import PurePosixPath
 from repomap_kg.graph_keys import (
     GRAPH_KEY_VERSION,
     GraphKeyError,
+    config_document_key,
+    config_path_key,
     dynamic_key,
     env_key,
     external_key,
@@ -115,6 +117,20 @@ class GraphKeysUnitTests(unittest.TestCase):
             external_url_key("https://example.com/docs#install"),
             "external.url:https%3A%2F%2Fexample.com%2Fdocs%23install",
         )
+        self.assertEqual(
+            config_document_key("mcp/repo-map/config.json"),
+            "config.document:file%3Amcp%2Frepo-map%2Fconfig.json",
+        )
+        self.assertEqual(
+            config_path_key(
+                "mcp/repo-map/config.json",
+                "/projects/repo-map/pg_database",
+            ),
+            (
+                "config.path:file%3Amcp%2Frepo-map%2Fconfig.json:"
+                "%2Fprojects%2Frepo-map%2Fpg_database"
+            ),
+        )
         self.assertEqual(ruby_module_key("RepoMap"), "ruby.module:RepoMap")
         self.assertEqual(
             ruby_class_key("RepoMap::Runner"),
@@ -145,6 +161,9 @@ class GraphKeysUnitTests(unittest.TestCase):
         parsed_doc_section = parse_key(
             "doc.section:file%3AREADME.md:current-status"
         )
+        parsed_config_path = parse_key(
+            "config.path:file%3Asettings.json:%2Fa~01b%2Fc~11d"
+        )
 
         self.assertEqual(parsed_file.graph_key_version, GRAPH_KEY_VERSION)
         self.assertEqual(parsed_file.namespace, "file")
@@ -158,6 +177,11 @@ class GraphKeysUnitTests(unittest.TestCase):
         self.assertIsNone(parsed_method.path)
         self.assertEqual(parsed_doc_section.namespace, "doc.section")
         self.assertEqual(parsed_doc_section.segments, ("file:README.md", "current-status"))
+        self.assertEqual(parsed_config_path.namespace, "config.path")
+        self.assertEqual(
+            parsed_config_path.segments,
+            ("file:settings.json", "/a~01b/c~11d"),
+        )
 
     def test_parse_key_rejects_bad_grammar_and_malformed_escapes(self):
         cases = (
@@ -169,6 +193,7 @@ class GraphKeysUnitTests(unittest.TestCase):
             ("file:docs//guide.md", "empty"),
             ("not-a-key", "separator"),
             ("unknown.namespace:value", "namespace"),
+            ("config.path:file%3Asettings.json:", "segment"),
         )
 
         for key, message in cases:
@@ -187,6 +212,10 @@ class GraphKeysUnitTests(unittest.TestCase):
         self.assertIn("escape", invalid.error)
         self.assertFalse(wrong_type.valid)
         self.assertIn("string", wrong_type.error)
+
+    def test_config_path_key_requires_non_empty_pointer(self):
+        with self.assertRaisesRegex(GraphKeyError, "pointer"):
+            config_path_key("settings.json", "")
 
 
 if __name__ == "__main__":

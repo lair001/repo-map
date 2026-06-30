@@ -31,6 +31,7 @@ class CanonicalizationFixtureTests(unittest.TestCase):
             "python_package",
             "nix_flake_basic",
             "markdown_docs_basic",
+            "config_json_basic",
         )
 
         for fixture_name in fixture_names:

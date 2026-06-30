@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from repomap_kg import __version__
+from repomap_kg.config_extractor import extract_config_file_observations
 from repomap_kg.markdown import (
     extract_markdown_file_observations,
     markdown_anchors_for_content,
@@ -44,6 +45,8 @@ LANGUAGE_BY_EXTENSION = {
     ".awk": "awk",
     ".bash": "shell",
     ".json": "json",
+    ".jsonc": "jsonc",
+    ".jsonl": "jsonl",
     ".md": "markdown",
     ".nix": "nix",
     ".py": "python",
@@ -152,6 +155,13 @@ def discover_observations(
             observations.extend(
                 extract_nix_file_observations_from_file(repository_root, file_info.path)
             )
+        if file_info.language in ("json", "jsonc", "jsonl"):
+            observations.extend(
+                extract_config_file_observations_from_file(
+                    repository_root,
+                    file_info.path,
+                )
+            )
     return observations
 
 
@@ -195,6 +205,16 @@ def extract_nix_file_observations_from_file(
         content,
         flake_ref=repository_root.name,
     )
+
+
+def extract_config_file_observations_from_file(
+    repository_root: Path, relative_path: str
+) -> tuple[RawObservation, ...]:
+    try:
+        content = (repository_root / relative_path).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return ()
+    return extract_config_file_observations(relative_path, content)
 
 
 def extract_markdown_file_observations_from_file(

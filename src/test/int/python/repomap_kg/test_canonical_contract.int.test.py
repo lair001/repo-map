@@ -18,6 +18,8 @@ from repomap_kg.canonicalization import canonicalize_observations
 from repomap_kg.graph_keys import (
     GRAPH_KEY_VERSION,
     GraphKeyError,
+    config_document_key,
+    config_path_key,
     dynamic_key,
     env_key,
     external_key,
@@ -72,6 +74,7 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             "python_package",
             "nix_flake_basic",
             "markdown_docs_basic",
+            "config_json_basic",
         )
 
         for fixture_name in fixture_names:
@@ -113,6 +116,11 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             "doc.adr:0008",
             "doc.skill:docs-only-change-hygiene",
             "external.url:https%3A%2F%2Fexample.com%2Fdocs",
+            config_document_key("mcp/config.json"),
+            config_path_key(
+                "mcp/config.json",
+                "/mcp_servers/repomap/command",
+            ),
         ]
 
         self.assertEqual(keys[0], "file:bin/tool")
@@ -430,6 +438,131 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
         self.assertEqual(
             bad_path_payload["diagnostics"][0]["category"],
             "repo_escaping_path",
+        )
+
+    def test_config_canonicalization_placeholder_and_raw_only_contracts(self):
+        result = canonicalize_observations(
+            [
+                RawObservation(
+                    kind="config.path",
+                    source_id="settings.json#config-path:missing",
+                    path="settings.json",
+                    confidence="extracted",
+                    extractor="repo-config",
+                    extractor_version="0.1.0",
+                    metadata={"format": "json"},
+                ),
+                RawObservation(
+                    kind="config.reference",
+                    source_id="settings.json#config-reference:/missing:0",
+                    path="settings.json",
+                    name="/missing",
+                    confidence="heuristic",
+                    extractor="repo-config",
+                    extractor_version="0.1.0",
+                    metadata={
+                        "format": "json",
+                        "pointer": "/missing",
+                        "source_path_key": (
+                            "config.path:file%3Asettings.json:%2Fmissing"
+                        ),
+                    },
+                ),
+                RawObservation(
+                    kind="config.reference",
+                    source_id="settings.json#config-reference:/bad:0",
+                    path="settings.json",
+                    name="/bad",
+                    target="bad target",
+                    confidence="heuristic",
+                    extractor="repo-config",
+                    extractor_version="0.1.0",
+                    metadata={
+                        "format": "json",
+                        "pointer": "/bad",
+                        "source_path_key": (
+                            "config.path:file%3Asettings.json:%2Fbad"
+                        ),
+                    },
+                ),
+                RawObservation(
+                    kind="config.parse_error",
+                    source_id="settings.json#config-parse-error:document",
+                    path="settings.json",
+                    confidence="unknown",
+                    extractor="repo-config",
+                    extractor_version="0.1.0",
+                    metadata={"format": "json", "error_kind": "malformed-json"},
+                ),
+                RawObservation(
+                    kind="config.jsonl_record",
+                    source_id="events.jsonl#jsonl-record:1",
+                    path="events.jsonl",
+                    start_line=1,
+                    end_line=1,
+                    confidence="extracted",
+                    extractor="repo-config",
+                    extractor_version="0.1.0",
+                    metadata={"format": "jsonl", "record_index": 0},
+                ),
+            ]
+        )
+        payload = result.to_dict()
+
+        self.assertFalse(result.ok)
+        self.assertEqual(payload["summary"]["raw_observations"], 5)
+        self.assertEqual(payload["summary"]["warnings"], 2)
+        self.assertEqual(payload["summary"]["errors"], 1)
+        self.assertEqual(payload["summary"]["edges"], 2)
+        self.assertEqual(payload["summary"]["evidence"], 4)
+        self.assertEqual(
+            payload["diagnostics"][1]["placeholder_key"],
+            "unknown:config.reference:missing-target",
+        )
+        self.assertEqual(
+            payload["diagnostics"][2]["placeholder_key"],
+            "unknown:config.reference:malformed-target",
+        )
+        self.assertEqual(
+            {
+                edge["target_key"]
+                for edge in payload["edges"]
+                if edge["kind"] == "references"
+            },
+            {
+                "unknown:config.reference:missing-target",
+                "unknown:config.reference:malformed-target",
+            },
+        )
+
+    def test_config_reference_rejects_non_config_source_path_key_contract(self):
+        result = canonicalize_observations(
+            [
+                RawObservation(
+                    kind="config.reference",
+                    source_id="settings.json#config-reference:/command:0",
+                    path="settings.json",
+                    name="/command",
+                    target="tool:repomap-kg",
+                    confidence="heuristic",
+                    extractor="repo-config",
+                    extractor_version="0.1.0",
+                    metadata={
+                        "format": "json",
+                        "pointer": "/command",
+                        "source_path_key": "file:settings.json",
+                    },
+                )
+            ]
+        )
+        payload = result.to_dict()
+
+        self.assertFalse(result.ok)
+        self.assertEqual(payload["summary"]["edges"], 0)
+        self.assertEqual(payload["summary"]["errors"], 1)
+        self.assertEqual(
+            payload["diagnostics"][0]["category"],
+            "invalid_canonical_key",
         )
 
     def test_canonicalization_error_and_ambiguity_contracts(self):

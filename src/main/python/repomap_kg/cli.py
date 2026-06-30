@@ -94,6 +94,7 @@ CANONICAL_EDGE_KINDS = frozenset(
         "imports",
         "exposes_script",
         "links_to",
+        "references",
         "depends_on",
         "wraps",
         "tests",

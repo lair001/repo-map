@@ -30,6 +30,8 @@ _SEGMENT_COUNTS = {
     "doc.adr": 1,
     "doc.skill": 1,
     "external.url": 1,
+    "config.document": 1,
+    "config.path": 2,
     "ruby.module": 1,
     "ruby.class": 1,
     "ruby.method": 2,
@@ -131,6 +133,14 @@ def external_url_key(url: str) -> str:
     return _key("external.url", url)
 
 
+def config_document_key(path_or_file_key: str | os.PathLike[str]) -> str:
+    return _key("config.document", _coerce_file_key(path_or_file_key))
+
+
+def config_path_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
+    return _key("config.path", _coerce_file_key(path_or_file_key), _coerce_pointer(pointer))
+
+
 def ruby_module_key(name: str) -> str:
     return _key("ruby.module", name)
 
@@ -209,6 +219,14 @@ def _coerce_file_key(path_or_file_key: str | os.PathLike[str]) -> str:
             raise GraphKeyError("documentation page keys require a file key")
         return path_or_file_key
     return file_key(path_or_file_key)
+
+
+def _coerce_pointer(pointer: str) -> str:
+    if not isinstance(pointer, str) or not pointer:
+        raise GraphKeyError("config pointer is required")
+    if not pointer.startswith("/"):
+        raise GraphKeyError("config pointer must be normalized")
+    return pointer
 
 
 def _normalize_file_components(path: str | os.PathLike[str]) -> tuple[str, ...]:

@@ -563,6 +563,158 @@ class CliIntegrationTests(unittest.TestCase):
             {item.get("target") for item in links},
         )
 
+    def test_discover_command_emits_json_family_config_observations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "fixture-repo"
+            self.write_fixture(
+                fixture / "mcp" / "config.json",
+                json.dumps(
+                    {
+                        "projects": {
+                            "repo-map": {
+                                "root_path": "./projects/repo-map",
+                                "pg_database": "repomap_repo_map",
+                            }
+                        },
+                        "mcp_servers": {
+                            "repomap": {
+                                "command": "repomap-kg",
+                                "args": ["python3", "-m", "repomap_kg"],
+                                "program": "repomap-kg --serve",
+                                "executable": "bin/tool",
+                                "env": {
+                                    "REPOMAP_MCP_CONFIG": "$REPOMAP_MCP_CONFIG",
+                                    "TOKEN": "cfg1-sensitive-token",
+                                },
+                                "docs_url": "https://example.com/docs",
+                                "mailto": "mailto:dev@example.com",
+                                "path": "../../outside.json",
+                                "absolute_path": "/tmp/external.json",
+                                "template_path": "${PROJECT_ROOT}/config.json",
+                            }
+                        },
+                        "items": [{"name": "alpha", "path": "./alpha.json"}],
+                        "array": ["one", "two"],
+                        "api_key": "cfg1-sensitive-api-key",
+                    },
+                    sort_keys=True,
+                    indent=2,
+                )
+                + "\n",
+            )
+            self.write_fixture(
+                fixture / "events.jsonl",
+                "\n".join(
+                    [
+                        json.dumps({"event": "load", "command": "repomap-kg"}),
+                        json.dumps(["array", "record"]),
+                        "{bad json",
+                    ]
+                )
+                + "\n",
+            )
+            self.write_fixture(
+                fixture / "settings.jsonc",
+                """
+{
+  // line comment
+  /* block comment */
+  "command": "repomap-kg",
+  "docs_url": "mailto:dev@example.com",
+  "note": "keep // inside string",
+  "block_note": "keep /* inside string */",
+  "quoted": "escaped \\" quote",
+  "nested": {
+    "path": "./mcp/config.json",
+  },
+}
+""",
+            )
+            self.write_fixture(
+                fixture / "broken.jsonc",
+                "{ /* unterminated block comment\n",
+            )
+            self.write_fixture(fixture / "broken.json", "{bad json}\n")
+
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "discover", str(fixture), "--jsonl"
+            )
+
+        self.assertEqual(exit_code, 0, stderr)
+        observations = [
+            json.loads(line)
+            for line in stdout.splitlines()
+            if line.strip()
+        ]
+        kinds = {observation["kind"] for observation in observations}
+        self.assertTrue(
+            {
+                "config.document",
+                "config.path",
+                "config.reference",
+                "config.jsonl_record",
+                "config.parse_error",
+            }.issubset(kinds)
+        )
+        self.assertNotIn("cfg1-sensitive-token", stdout)
+        self.assertNotIn("cfg1-sensitive-api-key", stdout)
+
+        references = [
+            observation
+            for observation in observations
+            if observation["kind"] == "config.reference"
+        ]
+        reference_targets = {observation["target"] for observation in references}
+        self.assertTrue(
+            {
+                "tool:repomap-kg",
+                "tool:python3",
+                "dynamic:tool:config-command-fragment",
+                "unknown:tool:unknown-config-command",
+                "env:REPOMAP_MCP_CONFIG",
+                "env:TOKEN",
+                "external.url:https%3A%2F%2Fexample.com%2Fdocs",
+                "external.url:mailto%3Adev%40example.com",
+                "file:mcp/config.json",
+                "unknown:file:repo-escaping-config-reference",
+                "external:file:absolute-config-reference",
+                "dynamic:file:config-reference-expanded-from-variable",
+            }.issubset(reference_targets)
+        )
+
+        path_metadata = {
+            observation["metadata"]["pointer"]: observation["metadata"]
+            for observation in observations
+            if observation["kind"] == "config.path"
+            and observation["path"] == "mcp/config.json"
+        }
+        self.assertTrue(path_metadata["/api_key"]["redacted"])
+        self.assertEqual(path_metadata["/array"]["array_policy"], "summary-only")
+
+        parse_errors = [
+            observation
+            for observation in observations
+            if observation["kind"] == "config.parse_error"
+        ]
+        self.assertTrue(
+            {
+                "malformed-json",
+                "malformed-jsonl-line",
+                "unsupported-jsonc-construct",
+            }.issubset(
+                {error["metadata"]["error_kind"] for error in parse_errors}
+            )
+        )
+        jsonl_records = [
+            observation
+            for observation in observations
+            if observation["kind"] == "config.jsonl_record"
+        ]
+        self.assertEqual(
+            [record["metadata"]["top_level_type"] for record in jsonl_records],
+            ["object", "array"],
+        )
+
     def test_discover_command_handles_markdown_ambiguity_without_execution(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture = Path(tmpdir) / "fixture-repo"
