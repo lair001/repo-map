@@ -74,7 +74,8 @@ Typical sequence:
 1. Call `repomap_status`.
    Confirm `read_only=true`, the expected repository identity, and
    `graph_key_version=1`.
-2. Call `repomap_canonical_nodes` with a `kind`, such as `python.module`.
+2. Call `repomap_canonical_nodes` with a `kind`, such as `python.module`,
+   `feed.document`, or `feed.item`.
 3. Call `repomap_canonical_edges` with an edge kind, such as `imports`, and a
    `source_key` when focusing on one node.
 4. Call `repomap_explain_canonical_edge` when evidence matters.
@@ -124,10 +125,20 @@ Show an outgoing neighborhood:
 }
 ```
 
+List feed items loaded by RSS1/RSS2:
+
+```json
+{
+  "project": "example",
+  "kind": "feed.item"
+}
+```
+
 ## Safety Rules
 
 - Treat the MCP surface as read-only.
-- Run discovery and storage loading outside MCP through the normal RepoMap CLI.
+- Run discovery, storage loading, and configured feed ingestion outside MCP
+  through the normal RepoMap CLI.
 - Report canonical keys, not database integer ids.
 - Do not use legacy storage keys as canonical identity.
 - Keep line numbers in evidence and diagnostics, never in canonical keys.

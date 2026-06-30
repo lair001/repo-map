@@ -66,11 +66,46 @@ RepoMap has static extraction and canonicalization for:
   TOML, including `config.document`, `config.path`, and conservative
   `references` edges for file, tool, env, URL, external, dynamic, and unknown
   targets.
+- XML-family facts for plist and generic XML, static HTML, static CSS, and
+  conservative CSS selector-to-HTML matches.
+- local RSS, Atom, and JSON Feed artifacts, including feed documents, channels,
+  items, authors, categories, links, enclosures, and references.
 
-Do not run `nix eval`, execute project code, fetch URLs, execute Markdown code
-blocks, execute commands found in config files, expand environment variables,
-or treat MCP as a write surface unless a later accepted phase explicitly
-changes that.
+Do not run `nix eval`, execute project code, fetch URLs outside configured RSS2
+feed ingestion, execute Markdown code blocks, execute commands found in config
+files, expand environment variables, or treat MCP as a write surface unless a
+later accepted phase explicitly changes that.
+
+## Configured Feed Ingestion
+
+Use RSS2 feed ingestion only for explicit policy-approved source configs. The
+command fetches exactly the configured feed URL, retains the bytes as a local
+artifact, runs the RSS1 local feed extractor on that artifact, and loads through
+the existing storage path:
+
+```sh
+repomap-kg sources ingest-feed \
+  --config <feed-source.toml> \
+  --repository-name <name> \
+  --root-path <repo-root> \
+  --pg-database <database> \
+  --json
+```
+
+The command intentionally does not accept `--url`. Do not use it to fetch item
+links, enclosures, web pages, schemas, namespaces, arbitrary model-selected
+URLs, or source-specific publisher targets. Fetched artifacts are retained
+under `<repo-root>/.repomap/source-artifacts/` unless an in-root artifact
+directory is explicitly supplied.
+
+After ingestion, query feed facts through canonical readback:
+
+```sh
+repomap-kg storage nodes --root-path <repo-root> --kind feed.document --json
+repomap-kg storage nodes --root-path <repo-root> --kind feed.item --json
+repomap-kg storage edges --root-path <repo-root> --kind references --source-key <feed.item-key> --json
+repomap-kg storage explain-canonical-edge --root-path <repo-root> --source-key <feed.item-key> --kind references --target-key <target-key> --json
+```
 
 ## Query Config Graphs
 

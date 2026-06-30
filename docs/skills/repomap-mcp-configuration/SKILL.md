@@ -28,15 +28,15 @@ Example:
   "default_project": "repo-map",
   "projects": {
     "repo-map": {
-      "root_path": "/Users/slair/projs/repo-map",
+      "root_path": "/path/to/repo-map",
       "pg_database": "repomap_repo_map"
     },
     "codex-vc": {
-      "root_path": "/Users/slair/.codex/codex-vc",
+      "root_path": "/path/to/codex-vc",
       "pg_database": "repomap_codex_vc"
     },
     "flakes": {
-      "root_path": "/Users/slair/.flakes",
+      "root_path": "/path/to/flakes",
       "pg_database": "repomap_flakes"
     }
   }
@@ -48,9 +48,8 @@ secrets out of this file.
 
 ## MCP Server Environment
 
-The local development MCP server runs from `/Users/slair/projs/repo-map` with
-`PYTHONPATH=/Users/slair/projs/repo-map/src/main/python` and module
-`repomap_kg.mcp_server`.
+The local development MCP server runs from a RepoMap checkout with
+`PYTHONPATH=<repo-map>/src/main/python` and module `repomap_kg.mcp_server`.
 
 Use environment variables for server-level settings:
 
@@ -60,6 +59,15 @@ Use environment variables for server-level settings:
   `REPOMAP_PG_DATABASE` only for explicit development mode defaults.
 
 `psql_command` must remain absent from MCP tool schemas.
+
+## Source Ingestion Boundary
+
+RepoMap feed ingestion is a CLI/storage workflow, not an MCP write surface.
+Run `repomap-kg sources ingest-feed --config <feed-source.toml> ...` outside
+MCP, then use the read-only MCP tools to query the loaded canonical graph.
+
+Do not add arbitrary URL fetching, discovery, storage loading, source-ingestion
+commands, scheduler behavior, or write-capable tools to the MCP configuration.
 
 ## Resolution Rules
 
