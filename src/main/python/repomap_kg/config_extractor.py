@@ -1,9 +1,10 @@
-"""Static JSON-family structured configuration raw observation extraction."""
+"""Static structured configuration raw observation extraction."""
 
 from __future__ import annotations
 
 import json
 import re
+import tomllib
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
@@ -40,7 +41,8 @@ SECRET_PRONE_KEYS = (
 )
 ENV_CONTAINER_KEYS = frozenset(("env", "environment", "env_vars"))
 TOOL_KEYS = frozenset(("command", "cmd", "executable", "program"))
-PATH_KEY_MARKERS = ("path", "file")
+PATH_KEY_MARKERS = ("path", "file", "cwd")
+STABLE_ARRAY_MEMBER_KEYS = ("name", "id", "key", "project")
 SIMPLE_COMMAND_PATTERN = re.compile(r"^[0-9A-Za-z_.+-]+$")
 ENV_REFERENCE_PATTERN = re.compile(r"^\$(?P<brace>\{?)(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}?$")
 ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -60,6 +62,8 @@ def extract_config_file_observations(
         return _extract_jsonl_observations(relative_path, content)
     if suffix == ".jsonc":
         return _extract_jsonc_observations(relative_path, content)
+    if suffix == ".toml":
+        return _extract_toml_observations(relative_path, content)
     return _extract_json_observations(relative_path, content)
 
 
@@ -216,6 +220,43 @@ def _extract_jsonl_observations(
         *reference_observations,
         *errors,
     )
+
+
+def _extract_toml_observations(
+    relative_path: str,
+    content: str,
+) -> tuple[RawObservation, ...]:
+    try:
+        parsed = tomllib.loads(content)
+    except tomllib.TOMLDecodeError as error:
+        return (
+            _parse_error_observation(
+                relative_path,
+                format_name="toml",
+                error_kind="malformed-toml",
+                message=str(error),
+                start_line=getattr(error, "lineno", None),
+                recovered=False,
+            ),
+        )
+    path_observations, reference_observations = _structure_observations(
+        relative_path,
+        parsed,
+        format_name="toml",
+        confidence="extracted",
+        content=content,
+    )
+    document = _document_observation(
+        relative_path,
+        format_name="toml",
+        parser="stdlib-tomllib",
+        confidence="extracted",
+        top_level_type=_value_type(parsed),
+        path_count=len(path_observations),
+        record_count=None,
+        parse_error_count=0,
+    )
+    return (document, *path_observations, *reference_observations)
 
 
 def normalize_jsonc(content: str) -> str:
@@ -396,6 +437,21 @@ def _walk_value(
                 paths=paths,
                 references=references,
             )
+    if isinstance(value, list) and format_name == "toml":
+        for member in _stable_array_members(value):
+            _walk_value(
+                relative_path,
+                member.value,
+                pointer_segments=(*pointer_segments, member.segment),
+                parent_type="array",
+                format_name=format_name,
+                confidence=confidence,
+                content=content,
+                source_suffix=source_suffix,
+                line_offset=line_offset,
+                paths=paths,
+                references=references,
+            )
 
 
 def _path_observation(
@@ -460,8 +516,15 @@ def _path_metadata(
     if value_summary is not None:
         metadata["value_summary"] = value_summary
     if isinstance(value, list):
-        metadata["array_policy"] = "summary-only"
         metadata["item_count"] = len(value)
+        stable_members = _stable_array_members(value) if format_name == "toml" else ()
+        if stable_members:
+            metadata["array_policy"] = "stable-member-key"
+            metadata["stable_member_keys"] = sorted(
+                {member.key for member in stable_members}
+            )
+        else:
+            metadata["array_policy"] = "summary-only"
         scalar_summaries = [
             summary
             for item in value[:5]
@@ -470,6 +533,45 @@ def _path_metadata(
         if scalar_summaries:
             metadata["value_summaries"] = scalar_summaries
     return metadata
+
+
+class _StableArrayMember:
+    def __init__(self, *, key: str, segment: str, value: dict[str, Any]) -> None:
+        self.key = key
+        self.segment = segment
+        self.value = value
+
+
+def _stable_array_members(value: list[Any]) -> tuple[_StableArrayMember, ...]:
+    members: list[_StableArrayMember] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            return ()
+        stable_key = _stable_member_key(item)
+        if stable_key is None:
+            return ()
+        stable_value = item[stable_key]
+        summary = _safe_value_summary(stable_value)
+        if summary is None or isinstance(summary, bool):
+            return ()
+        segment = str(summary)
+        if segment in seen:
+            return ()
+        seen.add(segment)
+        members.append(
+            _StableArrayMember(key=stable_key, segment=segment, value=item)
+        )
+    return tuple(members)
+
+
+def _stable_member_key(value: dict[str, Any]) -> str | None:
+    normalized_keys = {_normalized_key(str(key)): str(key) for key in value}
+    for candidate in STABLE_ARRAY_MEMBER_KEYS:
+        key = normalized_keys.get(candidate)
+        if key is not None and not _is_secret_key(key):
+            return key
+    return None
 
 
 def _reference_observations_for_value(
@@ -535,6 +637,9 @@ def _detect_references(
         return ()
     key = pointer_segments[-1]
     key_normalized = _normalized_key(key)
+    pointer_key_normalized = "_".join(
+        _normalized_key(segment) for segment in pointer_segments
+    )
     parent_key = _normalized_key(pointer_segments[-2]) if len(pointer_segments) > 1 else ""
     redacted = _is_secret_pointer(json_pointer(pointer_segments))
     references: list[dict[str, Any]] = []
@@ -545,13 +650,14 @@ def _detect_references(
             _string_references(
                 relative_path,
                 key_normalized,
+                pointer_key_normalized,
                 value,
                 redacted=redacted,
             )
         )
     elif isinstance(value, list) and key_normalized == "args" and value:
         first = value[0]
-        if isinstance(first, str):
+        if isinstance(first, str) and _is_clear_command_name(first):
             references.append(_tool_reference_from_command(first, redacted=redacted))
     return tuple(references)
 
@@ -559,6 +665,7 @@ def _detect_references(
 def _string_references(
     relative_path: str,
     key_normalized: str,
+    pointer_key_normalized: str,
     value: str,
     *,
     redacted: bool,
@@ -586,13 +693,16 @@ def _string_references(
         )
     if key_normalized in TOOL_KEYS:
         return (_tool_reference_from_command(value, redacted=redacted),)
-    if _looks_like_file_key(key_normalized, value):
+    if _looks_like_file_key(key_normalized, value) or _looks_like_file_key(
+        pointer_key_normalized,
+        value,
+    ):
         return (_file_reference(relative_path, value, redacted=redacted),)
     return ()
 
 
 def _tool_reference_from_command(command: str, *, redacted: bool) -> dict[str, Any]:
-    if SIMPLE_COMMAND_PATTERN.match(command):
+    if _is_clear_command_name(command):
         return _reference(
             "tool",
             tool_key(command),
@@ -615,6 +725,10 @@ def _tool_reference_from_command(command: str, *, redacted: bool) -> dict[str, A
         command,
         redacted=redacted,
     )
+
+
+def _is_clear_command_name(command: str) -> bool:
+    return bool(SIMPLE_COMMAND_PATTERN.match(command)) and not command.startswith("-")
 
 
 def _file_reference(relative_path: str, value: str, *, redacted: bool) -> dict[str, Any]:
@@ -777,7 +891,7 @@ def _parse_error_observation(
     *,
     format_name: str,
     error_kind: str,
-    error: json.JSONDecodeError | None = None,
+    error: Any | None = None,
     message: str | None = None,
     start_line: int | None = None,
     recovered: bool,
@@ -785,15 +899,16 @@ def _parse_error_observation(
     line_number = start_line or (error.lineno if error is not None else None)
     metadata: dict[str, Any] = {
         "format": format_name,
-        "parser": "jsonc-conservative" if format_name == "jsonc" else "stdlib-json",
+        "parser": _parser_name(format_name),
         "error_kind": error_kind,
         "message_summary": _safe_error_message(error, message),
         "recovered": recovered,
     }
     if line_number is not None:
         metadata["line_number"] = line_number
-    if error is not None:
-        metadata["column_number"] = error.colno
+    column_number = getattr(error, "colno", None)
+    if column_number is not None:
+        metadata["column_number"] = column_number
     return RawObservation(
         kind="config.parse_error",
         source_id=f"{relative_path}#config-parse-error:{line_number or 'document'}",
@@ -808,22 +923,166 @@ def _parse_error_observation(
 
 
 def _safe_error_message(
-    error: json.JSONDecodeError | None,
+    error: Any | None,
     message: str | None,
 ) -> str:
-    summary = message if message is not None else (error.msg if error is not None else "parse error")
+    if message is not None:
+        summary = message
+    elif error is not None:
+        summary = getattr(error, "msg", str(error))
+    else:
+        summary = "parse error"
     return summary[:120]
+
+
+def _parser_name(format_name: str) -> str:
+    if format_name == "jsonc":
+        return "jsonc-conservative"
+    if format_name == "toml":
+        return "stdlib-tomllib"
+    return "stdlib-json"
 
 
 def _line_for_pointer(content: str, pointer: str) -> int | None:
     if pointer == "":
         return None
+    toml_line = _line_for_toml_pointer(content, pointer)
+    if toml_line is not None:
+        return toml_line
     key = pointer.rsplit("/", 1)[-1].replace("~1", "/").replace("~0", "~")
-    pattern = re.compile(rf'"{re.escape(key)}"\s*:')
+    json_pattern = re.compile(rf'"{re.escape(key)}"\s*:')
+    toml_pattern = re.compile(
+        rf"^\s*(?:{re.escape(key)}|\"{re.escape(key)}\"|'{re.escape(key)}')\s*="
+    )
     for line_number, line in enumerate(content.splitlines(), start=1):
-        if pattern.search(line):
+        if json_pattern.search(line) or toml_pattern.search(line):
             return line_number
     return None
+
+
+def _line_for_toml_pointer(content: str, pointer: str) -> int | None:
+    pointer_segments = _pointer_segments(pointer)
+    if not pointer_segments:
+        return None
+    sections = _toml_sections(content)
+    for section in sections:
+        if section.path == pointer_segments:
+            return section.header_line
+        member_segment = _toml_array_member_segment(section)
+        for line_number, line in section.lines:
+            key_segments = _toml_key_segments(line)
+            if key_segments is None:
+                continue
+            if section.is_array:
+                if member_segment is None:
+                    continue
+                candidate = (*section.path, member_segment, *key_segments)
+            else:
+                candidate = (*section.path, *key_segments)
+            if candidate == pointer_segments:
+                return line_number
+    return None
+
+
+class _TomlSection:
+    def __init__(
+        self,
+        *,
+        path: tuple[str, ...],
+        header_line: int | None,
+        is_array: bool,
+        lines: tuple[tuple[int, str], ...],
+    ) -> None:
+        self.path = path
+        self.header_line = header_line
+        self.is_array = is_array
+        self.lines = lines
+
+
+def _toml_sections(content: str) -> tuple[_TomlSection, ...]:
+    sections: list[_TomlSection] = []
+    path: tuple[str, ...] = ()
+    header_line: int | None = None
+    is_array = False
+    lines: list[tuple[int, str]] = []
+    for line_number, line in enumerate(content.splitlines(), start=1):
+        header = _toml_table_header(line)
+        if header is not None:
+            sections.append(
+                _TomlSection(
+                    path=path,
+                    header_line=header_line,
+                    is_array=is_array,
+                    lines=tuple(lines),
+                )
+            )
+            path, is_array = header
+            header_line = line_number
+            lines = []
+            continue
+        lines.append((line_number, line))
+    sections.append(
+        _TomlSection(
+            path=path,
+            header_line=header_line,
+            is_array=is_array,
+            lines=tuple(lines),
+        )
+    )
+    return tuple(sections)
+
+
+def _toml_table_header(line: str) -> tuple[tuple[str, ...], bool] | None:
+    stripped = line.strip()
+    if stripped.startswith("[[") and stripped.endswith("]]"):
+        return _toml_dotted_segments(stripped[2:-2]), True
+    if stripped.startswith("[") and stripped.endswith("]"):
+        return _toml_dotted_segments(stripped[1:-1]), False
+    return None
+
+
+def _toml_array_member_segment(section: _TomlSection) -> str | None:
+    if not section.is_array:
+        return None
+    parsed = _parse_toml_section_lines(section.lines)
+    if not isinstance(parsed, dict):
+        return None
+    stable_key = _stable_member_key(parsed)
+    if stable_key is None:
+        return None
+    summary = _safe_value_summary(parsed[stable_key])
+    if summary is None or isinstance(summary, bool):
+        return None
+    return str(summary)
+
+
+def _parse_toml_section_lines(lines: tuple[tuple[int, str], ...]) -> dict[str, Any] | None:
+    body = "\n".join(line for _line_number, line in lines)
+    if not body.strip():
+        return None
+    try:
+        parsed = tomllib.loads(body)
+    except tomllib.TOMLDecodeError:
+        return None
+    return parsed
+
+
+def _toml_key_segments(line: str) -> tuple[str, ...] | None:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        return None
+    key_text = stripped.split("=", 1)[0].strip()
+    if not key_text:
+        return None
+    return _toml_dotted_segments(key_text)
+
+
+def _toml_dotted_segments(value: str) -> tuple[str, ...]:
+    return tuple(
+        segment.strip().strip("\"'")
+        for segment in value.split(".")
+        if segment.strip()
+    )
 
 
 def _value_type(value: Any) -> str:

@@ -32,6 +32,7 @@ class CanonicalizationFixtureTests(unittest.TestCase):
             "nix_flake_basic",
             "markdown_docs_basic",
             "config_json_basic",
+            "config_toml_basic",
         )
 
         for fixture_name in fixture_names:

@@ -715,6 +715,87 @@ class CliIntegrationTests(unittest.TestCase):
             ["object", "array"],
         )
 
+    def test_discover_command_emits_toml_config_observations_from_fixture(self):
+        fixture = REPO_ROOT / "src" / "test" / "fixtures" / "discovery" / "config_toml_basic"
+
+        exit_code, stdout, stderr = self.run_module_entrypoint(
+            "discover", str(fixture), "--jsonl"
+        )
+
+        self.assertEqual(exit_code, 0, stderr)
+        observations = [
+            json.loads(line)
+            for line in stdout.splitlines()
+            if line.strip()
+        ]
+        kinds = {observation["kind"] for observation in observations}
+        self.assertTrue(
+            {
+                "config.document",
+                "config.path",
+                "config.reference",
+                "config.parse_error",
+            }.issubset(kinds)
+        )
+        self.assertNotIn("cfg2-sensitive-api-key", stdout)
+        self.assertNotIn("cfg2-sensitive-token", stdout)
+
+        toml_files = [
+            observation
+            for observation in observations
+            if observation["kind"] == "file"
+            and observation["metadata"]["language"] == "toml"
+        ]
+        self.assertEqual(
+            [observation["path"] for observation in toml_files],
+            ["bad.toml", "mcp/config.toml"],
+        )
+
+        references = [
+            observation
+            for observation in observations
+            if observation["kind"] == "config.reference"
+        ]
+        reference_targets = {observation["target"] for observation in references}
+        self.assertTrue(
+            {
+                "tool:python3",
+                "tool:repomap-kg",
+                "env:PYTHONPATH",
+                "env:TOKEN",
+                "file:src/main/python",
+                "file:docs/guide.md",
+                "file:projects/repo-map",
+                "file:bin/tool",
+                "external.url:https%3A%2F%2Fexample.com%2Fdocs",
+            }.issubset(reference_targets)
+        )
+        self.assertNotIn("tool:-m", reference_targets)
+
+        path_metadata = {
+            observation["metadata"]["pointer"]: observation["metadata"]
+            for observation in observations
+            if observation["kind"] == "config.path"
+            and observation["path"] == "mcp/config.toml"
+        }
+        self.assertTrue(path_metadata["/mcp_servers/repomap/api_key"]["redacted"])
+        self.assertEqual(path_metadata["/tools"]["array_policy"], "stable-member-key")
+        self.assertEqual(path_metadata["/anonymous"]["array_policy"], "summary-only")
+        self.assertIn("/tools/repomap/command", path_metadata)
+        self.assertIn("/tools/helper/command", path_metadata)
+        self.assertNotIn("/tools/0/command", path_metadata)
+        self.assertNotIn("/anonymous/0/command", path_metadata)
+
+        parse_errors = [
+            observation
+            for observation in observations
+            if observation["kind"] == "config.parse_error"
+        ]
+        self.assertIn(
+            "malformed-toml",
+            {error["metadata"]["error_kind"] for error in parse_errors},
+        )
+
     def test_discover_command_handles_markdown_ambiguity_without_execution(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture = Path(tmpdir) / "fixture-repo"

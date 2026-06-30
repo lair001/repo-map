@@ -327,6 +327,163 @@ class ConfigExtractorUnitTests(unittest.TestCase):
         self.assertIn("dynamic:tool:config-command-fragment", {item.target for item in references})
         self.assertIn("dynamic:env:dynamic-config-env-name", {item.target for item in references})
 
+    def test_toml_document_paths_references_and_redaction(self):
+        observations = extract_config_file_observations(
+            "config.toml",
+            """
+[mcp_servers.repomap]
+command = "python3"
+args = ["-m", "repomap_kg.mcp_server"]
+cwd = "src/main/python"
+docs_url = "https://example.com/docs"
+api_key = "toml-secret-api-key"
+dotted.path.value = "docs/guide.md"
+
+[mcp_servers.repomap.env]
+PYTHONPATH = "src/main/python"
+TOKEN = "toml-secret-token"
+
+[projects.repo-map]
+root_path = "projects/repo-map"
+pg_database = "repomap_repo_map"
+""",
+        )
+
+        payload = json.dumps(
+            [observation.to_dict() for observation in observations],
+            sort_keys=True,
+        )
+        paths = [item for item in observations if item.kind == "config.path"]
+        references = [item for item in observations if item.kind == "config.reference"]
+        pointer_by_path = {item.metadata["pointer"]: item for item in paths}
+
+        self.assertNotIn("toml-secret-api-key", payload)
+        self.assertNotIn("toml-secret-token", payload)
+        self.assertEqual(observations[0].kind, "config.document")
+        self.assertEqual(observations[0].metadata["format"], "toml")
+        self.assertEqual(observations[0].metadata["parser"], "stdlib-tomllib")
+        self.assertIn("/mcp_servers/repomap", pointer_by_path)
+        self.assertIn("/mcp_servers/repomap/command", pointer_by_path)
+        self.assertIn("/mcp_servers/repomap/dotted/path/value", pointer_by_path)
+        self.assertIn("/projects/repo-map/root_path", pointer_by_path)
+        self.assertTrue(pointer_by_path["/mcp_servers/repomap/api_key"].metadata["redacted"])
+        self.assertNotIn(
+            "value_summary",
+            pointer_by_path["/mcp_servers/repomap/api_key"].metadata,
+        )
+        self.assertIn(
+            (
+                "/mcp_servers/repomap/command",
+                "tool:python3",
+                "tool",
+            ),
+            {
+                (item.metadata["pointer"], item.target, item.metadata["reference_kind"])
+                for item in references
+            },
+        )
+        self.assertIn(
+            (
+                "/mcp_servers/repomap/cwd",
+                "file:src/main/python",
+                "file",
+            ),
+            {
+                (item.metadata["pointer"], item.target, item.metadata["reference_kind"])
+                for item in references
+            },
+        )
+        self.assertIn(
+            (
+                "/mcp_servers/repomap/env/PYTHONPATH",
+                "env:PYTHONPATH",
+                "env",
+            ),
+            {
+                (item.metadata["pointer"], item.target, item.metadata["reference_kind"])
+                for item in references
+            },
+        )
+        self.assertIn("env:TOKEN", {item.target for item in references})
+        self.assertIn(
+            "external.url:https%3A%2F%2Fexample.com%2Fdocs",
+            {item.target for item in references},
+        )
+        self.assertIn("file:docs/guide.md", {item.target for item in references})
+
+    def test_toml_arrays_of_tables_use_stable_member_keys_without_indexes(self):
+        observations = extract_config_file_observations(
+            "tools.toml",
+            """
+plugins = ["python", "ruby"]
+
+[[tools]]
+name = "repomap"
+command = "repomap-kg"
+path = "bin/tool"
+
+[[tools]]
+id = "helper"
+command = "python3"
+
+[[anonymous]]
+command = "do-not-index-with-number"
+""",
+        )
+
+        paths = [item for item in observations if item.kind == "config.path"]
+        pointers = {item.metadata["pointer"] for item in paths}
+        references = [item for item in observations if item.kind == "config.reference"]
+        plugins = next(item for item in paths if item.metadata["pointer"] == "/plugins")
+        tools = next(item for item in paths if item.metadata["pointer"] == "/tools")
+        anonymous = next(item for item in paths if item.metadata["pointer"] == "/anonymous")
+
+        self.assertEqual(plugins.metadata["array_policy"], "summary-only")
+        self.assertEqual(plugins.metadata["value_summaries"], ["python", "ruby"])
+        self.assertEqual(tools.metadata["array_policy"], "stable-member-key")
+        self.assertEqual(anonymous.metadata["array_policy"], "summary-only")
+        self.assertIn("/tools/repomap", pointers)
+        self.assertIn("/tools/repomap/command", pointers)
+        self.assertIn("/tools/helper/command", pointers)
+        self.assertNotIn("/tools/0/command", pointers)
+        self.assertNotIn("/anonymous/0/command", pointers)
+        self.assertIn("tool:repomap-kg", {item.target for item in references})
+        self.assertIn("tool:python3", {item.target for item in references})
+        self.assertIn("file:bin/tool", {item.target for item in references})
+
+    def test_toml_malformed_parse_error_is_raw_only(self):
+        observations = extract_config_file_observations(
+            "bad.toml",
+            "[mcp_servers.repomap]\ncommand =\n",
+        )
+
+        self.assertEqual([item.kind for item in observations], ["config.parse_error"])
+        self.assertEqual(observations[0].confidence, "unknown")
+        self.assertEqual(observations[0].metadata["format"], "toml")
+        self.assertEqual(observations[0].metadata["parser"], "stdlib-tomllib")
+        self.assertEqual(observations[0].metadata["error_kind"], "malformed-toml")
+
+    def test_toml_dynamic_and_unknown_references_use_placeholders(self):
+        observations = extract_config_file_observations(
+            "settings.toml",
+            """
+outside_path = "../outside.toml"
+absolute_path = "/var/db/config.toml"
+dynamic_path = "${PROJECT_ROOT}/config.toml"
+program = "echo hello"
+
+[env]
+"${NAME}" = "value"
+""",
+        )
+
+        references = [item for item in observations if item.kind == "config.reference"]
+        self.assertIn("unknown:file:repo-escaping-config-reference", {item.target for item in references})
+        self.assertIn("external:file:absolute-config-reference", {item.target for item in references})
+        self.assertIn("dynamic:file:config-reference-expanded-from-variable", {item.target for item in references})
+        self.assertIn("dynamic:tool:config-command-fragment", {item.target for item in references})
+        self.assertIn("dynamic:env:dynamic-config-env-name", {item.target for item in references})
+
 
 if __name__ == "__main__":
     unittest.main()

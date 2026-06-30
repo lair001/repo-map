@@ -53,6 +53,7 @@ LANGUAGE_BY_EXTENSION = {
     ".rb": "ruby",
     ".sh": "shell",
     ".sql": "sql",
+    ".toml": "toml",
     ".yaml": "yaml",
     ".yml": "yaml",
     ".zsh": "shell",
@@ -155,7 +156,7 @@ def discover_observations(
             observations.extend(
                 extract_nix_file_observations_from_file(repository_root, file_info.path)
             )
-        if file_info.language in ("json", "jsonc", "jsonl"):
+        if file_info.language in ("json", "jsonc", "jsonl", "toml"):
             observations.extend(
                 extract_config_file_observations_from_file(
                     repository_root,

@@ -2,6 +2,7 @@ import unittest
 
 from repomap_kg.canonical import canonical_edge_key
 from repomap_kg.canonicalization import canonicalize_observations
+from repomap_kg.config_extractor import extract_config_file_observations
 from repomap_kg.observations import RawObservation
 
 
@@ -2599,6 +2600,51 @@ class CanonicalizationUnitTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["evidence"], 2)
         self.assertEqual(payload["summary"]["node_evidence_links"], 0)
         self.assertEqual(payload["summary"]["edge_evidence_links"], 0)
+
+    def test_toml_config_observations_reuse_config_canonicalization_contract(self):
+        observations = extract_config_file_observations(
+            "config.toml",
+            """
+[mcp_servers.repomap]
+command = "python3"
+cwd = "src/main/python"
+""",
+        )
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        self.assertIn(
+            "config.document:file%3Aconfig.toml",
+            {node["canonical_key"] for node in payload["nodes"]},
+        )
+        self.assertIn(
+            "config.path:file%3Aconfig.toml:%2Fmcp_servers%2Frepomap%2Fcommand",
+            {node["canonical_key"] for node in payload["nodes"]},
+        )
+        self.assertIn(
+            (
+                "file:config.toml",
+                "defines",
+                "config.document:file%3Aconfig.toml",
+            ),
+            {
+                (edge["source_key"], edge["kind"], edge["target_key"])
+                for edge in payload["edges"]
+            },
+        )
+        self.assertIn(
+            (
+                "config.path:file%3Aconfig.toml:%2Fmcp_servers%2Frepomap%2Fcommand",
+                "references",
+                "tool:python3",
+            ),
+            {
+                (edge["source_key"], edge["kind"], edge["target_key"])
+                for edge in payload["edges"]
+            },
+        )
 
     def test_config_definition_and_reference_diagnostics_use_placeholders(self):
         observations = [
