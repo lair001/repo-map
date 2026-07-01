@@ -94,6 +94,7 @@ class SourceIngestionIntegrationTests(unittest.TestCase):
         self.assertEqual(skipped[".hidden/hidden.eml"], "hidden_excluded")
         self.assertEqual(skipped["node_modules/ignored.js"], "excluded_directory")
         self.assertEqual(skipped["archive/export.zip"], "archive_deferred")
+        self.assertEqual(skipped["archive/export.warc"], "warc_deferred")
         self.assertEqual(skipped["unsupported/ignored.pdf"], "unsupported_extension")
         kinds = {observation.kind for observation in observations}
         self.assertIn("email.message", kinds)

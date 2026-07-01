@@ -14,7 +14,7 @@ follow_symlinks = false
 include_hidden = false
 
 [include]
-extensions = [".eml", ".mbox", ".js", ".zip", ".pdf"]
+extensions = [".eml", ".mbox", ".js", ".zip", ".warc", ".pdf"]
 
 [exclude]
 directories = ["node_modules"]

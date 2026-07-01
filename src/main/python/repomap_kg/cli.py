@@ -60,6 +60,7 @@ from repomap_kg.storage import (
     canonical_neighborhood_to_jsonable,
     canonical_node_records_to_jsonable,
     canonical_storage_summary_to_jsonable,
+    bulk_summary_to_jsonable,
     edge_records_to_jsonable,
     file_neighborhood_to_jsonable,
     file_node_records_to_jsonable,
@@ -68,6 +69,7 @@ from repomap_kg.storage import (
     format_canonical_neighborhood_table,
     format_canonical_node_table,
     format_canonical_storage_summary_table,
+    format_bulk_summary_table,
     format_edge_table,
     format_email_summary_table,
     format_file_neighborhood_table,
@@ -87,6 +89,7 @@ from repomap_kg.storage import (
     query_canonical_node_records,
     query_canonical_edge_records,
     query_canonical_storage_summary,
+    query_bulk_summary,
     query_edge_records,
     query_email_summary,
     query_file_neighborhood,
@@ -818,6 +821,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit stored email summary as JSON",
+    )
+    storage_bulk_summary = storage_subcommands.add_parser(
+        "bulk-summary",
+        help="summarize stored bulk local import runs from Postgres storage",
+    )
+    add_storage_root_argument(storage_bulk_summary)
+    add_storage_connection_arguments(storage_bulk_summary)
+    storage_bulk_summary.add_argument(
+        "--json",
+        action="store_true",
+        help="emit stored bulk summary as JSON",
     )
 
     return parser
@@ -1678,6 +1692,22 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(email_summary_to_jsonable(summary), sort_keys=True))
         else:
             print(format_email_summary_table(summary))
+        return 0
+
+    if args.command == "storage" and args.storage_command == "bulk-summary":
+        try:
+            summary = query_bulk_summary(
+                psql_args_from_args(args),
+                root_path=args.root_path,
+                psql_command=args.psql_command,
+            )
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(bulk_summary_to_jsonable(summary), sort_keys=True))
+        else:
+            print(format_bulk_summary_table(summary))
         return 0
 
     parser.print_help()

@@ -6,6 +6,7 @@ import json
 import hashlib
 import re
 import subprocess
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -547,6 +548,41 @@ class EmailSummaryRecord:
     no_mutation: bool
     no_body_text: bool
     no_attachment_content: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class BulkSummaryRecord:
+    root_path_summary: str
+    repository_name: str | None
+    bulk_runs: int
+    sources: int
+    source_ids: tuple[str, ...]
+    corpus_kinds: dict[str, int]
+    policy_statuses: dict[str, int]
+    file_count_included: int
+    file_count_skipped: int
+    total_bytes_included: int
+    extractor_counts: dict[str, int]
+    skip_reasons: dict[str, int]
+    diagnostic_counts: dict[str, int]
+    redaction_counts: dict[str, int]
+    limit_hit_count: int
+    max_files_hit_count: int
+    max_total_bytes_hit_count: int
+    max_file_bytes_hit_count: int
+    max_depth_hit_count: int
+    archive_deferred: int
+    warc_deferred: int
+    email_export_runs: int
+    mixed_corpus_runs: int
+    observations_with_bulk_provenance: int
+    no_provider_api: bool
+    no_external_fetch: bool
+    no_source_mutation: bool
+    no_archive_decompression: bool
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -1235,6 +1271,49 @@ def query_email_summary(
     )
     return email_summary_from_storage_payload(
         parse_psql_json(result.stdout, "email summary")
+    )
+
+
+def query_bulk_summary(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    psql_command: str = "psql",
+) -> BulkSummaryRecord:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_bulk_summary_query_sql(root_path),
+    )
+    storage_payload = parse_psql_json(result.stdout, "bulk summary")
+    if not isinstance(storage_payload, dict):
+        raise StorageSchemaError("psql returned a malformed bulk summary")
+    manifest_payload = bulk_manifest_summary_payload(Path(root_path))
+    redaction_counts = dict(manifest_payload["redaction_counts"])
+    redacted_observations = payload_int(
+        storage_payload,
+        "redacted_observations",
+        label="bulk summary",
+    )
+    if redacted_observations:
+        redaction_counts["raw_observations"] = max(
+            redaction_counts.get("raw_observations", 0),
+            redacted_observations,
+        )
+    return bulk_summary_from_storage_payload(
+        {
+            **manifest_payload,
+            "repository_name": payload_optional_text(
+                storage_payload,
+                "repository_name",
+                label="bulk summary",
+            ),
+            "observations_with_bulk_provenance": payload_int(
+                storage_payload,
+                "observations_with_bulk_provenance",
+                label="bulk summary",
+            ),
+            "redaction_counts": redaction_counts,
+        }
     )
 
 
@@ -2691,6 +2770,28 @@ def build_email_summary_query_sql(root_path: str) -> str:
     )
 
 
+def build_bulk_summary_query_sql(root_path: str) -> str:
+    quoted_root = sql_literal(root_path)
+    return (
+        "WITH repo AS ("
+        "SELECT id, name, root_path FROM repositories "
+        f"WHERE repositories.root_path = {quoted_root}"
+        "), "
+        "bulk_raw AS ("
+        "SELECT raw_observations.* FROM raw_observations "
+        "JOIN repo ON repo.id = raw_observations.repository_id "
+        "WHERE raw_observations.payload_json->'metadata' ? 'bulk_run_id'"
+        ") "
+        "SELECT json_build_object("
+        "'repository_name', (SELECT name FROM repo), "
+        "'observations_with_bulk_provenance', (SELECT COUNT(*) FROM bulk_raw), "
+        "'redacted_observations', (SELECT COUNT(*) FROM bulk_raw "
+        "WHERE bulk_raw.payload_json->'metadata'->>'redacted' = 'true' "
+        "OR bulk_raw.payload_json->'metadata' ? 'redaction_reason')"
+        ")::text;"
+    )
+
+
 def build_source_summary_query_sql(root_path: str, *, source_id: str) -> str:
     source_filter = f"source_id_configured = {sql_literal(source_id)}"
     return (
@@ -4036,6 +4137,164 @@ def source_reference_record_from_storage_payload(payload: Any) -> SourceReferenc
     )
 
 
+def bulk_manifest_summary_payload(root_path: Path) -> dict[str, Any]:
+    resolved_root = root_path.resolve()
+    run_root = resolved_root / ".repomap" / "bulk-runs"
+    manifests = read_bulk_manifest_payloads(run_root, root_path=resolved_root)
+    source_ids: set[str] = set()
+    run_ids: set[str] = set()
+    corpus_kinds: Counter[str] = Counter()
+    policy_statuses: Counter[str] = Counter()
+    extractor_counts: Counter[str] = Counter()
+    skip_reasons: Counter[str] = Counter()
+    diagnostic_counts: Counter[str] = Counter()
+    redaction_counts: Counter[str] = Counter()
+    file_count_included = 0
+    file_count_skipped = 0
+    total_bytes_included = 0
+    limit_hit_count = 0
+    max_files_hit_count = 0
+    max_total_bytes_hit_count = 0
+    max_file_bytes_hit_count = 0
+    max_depth_hit_count = 0
+
+    for manifest in manifests:
+        if manifest.get("_manifest_parse_error"):
+            diagnostic_counts["manifest_parse_error"] += 1
+            continue
+        source_id = optional_manifest_text(manifest, "source_id")
+        run_id = optional_manifest_text(manifest, "bulk_run_id")
+        corpus_kind = optional_manifest_text(manifest, "corpus_kind")
+        policy_status = optional_manifest_text(manifest, "policy_status")
+        if source_id is not None:
+            source_ids.add(source_id)
+        if run_id is not None:
+            run_ids.add(run_id)
+        if corpus_kind is not None:
+            corpus_kinds[corpus_kind] += 1
+        if policy_status is not None:
+            policy_statuses[policy_status] += 1
+        file_count_included += manifest_int(manifest, "file_count_included")
+        file_count_skipped += manifest_int(manifest, "file_count_skipped")
+        total_bytes_included += manifest_int(manifest, "total_bytes_included")
+        extractor_counts.update(manifest_counter(manifest.get("extractor_counts")))
+        diagnostic_counts.update(manifest_counter(manifest.get("diagnostic_counts")))
+        redaction_counts.update(manifest_counter(manifest.get("redaction_counts")))
+        for skipped_file in manifest_list(manifest.get("skipped_files")):
+            reason = optional_manifest_text(skipped_file, "reason")
+            if reason is not None:
+                skip_reasons[reason] += 1
+        if manifest.get("limit_hit") is True:
+            limit_hit_count += 1
+            limit_reason = optional_manifest_text(manifest, "limit_reason") or ""
+            reasons = {item.strip() for item in limit_reason.split(",") if item.strip()}
+            if "max_files_exceeded" in reasons:
+                max_files_hit_count += 1
+            if "max_total_bytes_exceeded" in reasons:
+                max_total_bytes_hit_count += 1
+            if "max_file_bytes_exceeded" in reasons:
+                max_file_bytes_hit_count += 1
+            if "max_depth_exceeded" in reasons:
+                max_depth_hit_count += 1
+
+    return {
+        "root_path_summary": ".",
+        "repository_name": None,
+        "bulk_runs": len(run_ids),
+        "sources": len(source_ids),
+        "source_ids": sorted(source_ids),
+        "corpus_kinds": dict(sorted(corpus_kinds.items())),
+        "policy_statuses": dict(sorted(policy_statuses.items())),
+        "file_count_included": file_count_included,
+        "file_count_skipped": file_count_skipped,
+        "total_bytes_included": total_bytes_included,
+        "extractor_counts": dict(sorted(extractor_counts.items())),
+        "skip_reasons": dict(sorted(skip_reasons.items())),
+        "diagnostic_counts": dict(sorted(diagnostic_counts.items())),
+        "redaction_counts": dict(sorted(redaction_counts.items())),
+        "limit_hit_count": limit_hit_count,
+        "max_files_hit_count": max_files_hit_count,
+        "max_total_bytes_hit_count": max_total_bytes_hit_count,
+        "max_file_bytes_hit_count": max_file_bytes_hit_count,
+        "max_depth_hit_count": max_depth_hit_count,
+        "archive_deferred": skip_reasons.get("archive_deferred", 0),
+        "warc_deferred": skip_reasons.get("warc_deferred", 0),
+        "email_export_runs": sum(
+            corpus_kinds.get(kind, 0)
+            for kind in ("email_export", "eml_export", "mbox_export")
+        ),
+        "mixed_corpus_runs": corpus_kinds.get("mixed_corpus", 0),
+        "observations_with_bulk_provenance": 0,
+        "no_provider_api": True,
+        "no_external_fetch": True,
+        "no_source_mutation": True,
+        "no_archive_decompression": True,
+    }
+
+
+def read_bulk_manifest_payloads(
+    run_root: Path,
+    *,
+    root_path: Path,
+) -> tuple[dict[str, Any], ...]:
+    if not run_root.is_dir():
+        return ()
+    resolved_run_root = run_root.resolve()
+    try:
+        resolved_run_root.relative_to(root_path)
+    except ValueError:
+        return ({"_manifest_parse_error": True},)
+    payloads: list[dict[str, Any]] = []
+    for manifest_path in sorted(run_root.glob("*/*/manifest.json")):
+        try:
+            resolved_manifest = manifest_path.resolve()
+            resolved_manifest.relative_to(resolved_run_root)
+            payload = json.loads(resolved_manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            payloads.append({"_manifest_parse_error": True})
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+        else:
+            payloads.append({"_manifest_parse_error": True})
+    return tuple(payloads)
+
+
+def optional_manifest_text(payload: Mapping[str, Any], key: str) -> str | None:
+    value = payload.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def manifest_int(payload: Mapping[str, Any], key: str) -> int:
+    value = payload.get(key, 0)
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def manifest_counter(value: Any) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    if not isinstance(value, Mapping):
+        return counts
+    for key, count in value.items():
+        if not isinstance(key, str) or not key:
+            continue
+        try:
+            normalized_count = int(count)
+        except (TypeError, ValueError):
+            continue
+        if normalized_count > 0:
+            counts[key] += normalized_count
+    return counts
+
+
+def manifest_list(value: Any) -> tuple[Mapping[str, Any], ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, Mapping))
+
+
 def host_mutator_record_from_storage_payload(payload: Any) -> HostMutatorRecord:
     if not isinstance(payload, dict):
         raise StorageSchemaError("psql returned a malformed host-mutator record")
@@ -4472,6 +4731,145 @@ def email_summary_from_storage_payload(payload: Any) -> EmailSummaryRecord:
     )
 
 
+def bulk_summary_from_storage_payload(payload: Any) -> BulkSummaryRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed bulk summary")
+    return BulkSummaryRecord(
+        root_path_summary=payload_text(
+            payload,
+            "root_path_summary",
+            label="bulk summary",
+        ),
+        repository_name=payload_optional_text(
+            payload,
+            "repository_name",
+            label="bulk summary",
+        ),
+        bulk_runs=payload_int(payload, "bulk_runs", label="bulk summary"),
+        sources=payload_int(payload, "sources", label="bulk summary"),
+        source_ids=payload_string_tuple(
+            payload,
+            "source_ids",
+            label="bulk summary",
+        ),
+        corpus_kinds=payload_count_map(
+            payload,
+            "corpus_kinds",
+            label="bulk summary",
+        ),
+        policy_statuses=payload_count_map(
+            payload,
+            "policy_statuses",
+            label="bulk summary",
+        ),
+        file_count_included=payload_int(
+            payload,
+            "file_count_included",
+            label="bulk summary",
+        ),
+        file_count_skipped=payload_int(
+            payload,
+            "file_count_skipped",
+            label="bulk summary",
+        ),
+        total_bytes_included=payload_int(
+            payload,
+            "total_bytes_included",
+            label="bulk summary",
+        ),
+        extractor_counts=payload_count_map(
+            payload,
+            "extractor_counts",
+            label="bulk summary",
+        ),
+        skip_reasons=payload_count_map(
+            payload,
+            "skip_reasons",
+            label="bulk summary",
+        ),
+        diagnostic_counts=payload_count_map(
+            payload,
+            "diagnostic_counts",
+            label="bulk summary",
+        ),
+        redaction_counts=payload_count_map(
+            payload,
+            "redaction_counts",
+            label="bulk summary",
+        ),
+        limit_hit_count=payload_int(
+            payload,
+            "limit_hit_count",
+            label="bulk summary",
+        ),
+        max_files_hit_count=payload_int(
+            payload,
+            "max_files_hit_count",
+            label="bulk summary",
+        ),
+        max_total_bytes_hit_count=payload_int(
+            payload,
+            "max_total_bytes_hit_count",
+            label="bulk summary",
+        ),
+        max_file_bytes_hit_count=payload_int(
+            payload,
+            "max_file_bytes_hit_count",
+            label="bulk summary",
+        ),
+        max_depth_hit_count=payload_int(
+            payload,
+            "max_depth_hit_count",
+            label="bulk summary",
+        ),
+        archive_deferred=payload_int(
+            payload,
+            "archive_deferred",
+            label="bulk summary",
+        ),
+        warc_deferred=payload_int(
+            payload,
+            "warc_deferred",
+            label="bulk summary",
+        ),
+        email_export_runs=payload_int(
+            payload,
+            "email_export_runs",
+            label="bulk summary",
+        ),
+        mixed_corpus_runs=payload_int(
+            payload,
+            "mixed_corpus_runs",
+            label="bulk summary",
+        ),
+        observations_with_bulk_provenance=payload_int(
+            payload,
+            "observations_with_bulk_provenance",
+            label="bulk summary",
+        ),
+        no_provider_api=payload_bool(
+            payload,
+            "no_provider_api",
+            label="bulk summary",
+        ),
+        no_external_fetch=payload_bool(
+            payload,
+            "no_external_fetch",
+            label="bulk summary",
+        ),
+        no_source_mutation=payload_bool(
+            payload,
+            "no_source_mutation",
+            label="bulk summary",
+        ),
+        no_archive_decompression=payload_bool(
+            payload,
+            "no_archive_decompression",
+            label="bulk summary",
+        ),
+    )
+
+
 def file_node_records_to_jsonable(
     records: Sequence[FileNodeRecord],
 ) -> list[dict[str, Any]]:
@@ -4537,6 +4935,10 @@ def js_summary_to_jsonable(record: JSSummaryRecord) -> dict[str, Any]:
 
 
 def email_summary_to_jsonable(record: EmailSummaryRecord) -> dict[str, Any]:
+    return record.to_dict()
+
+
+def bulk_summary_to_jsonable(record: BulkSummaryRecord) -> dict[str, Any]:
     return record.to_dict()
 
 
@@ -5032,6 +5434,63 @@ def format_email_summary_table(record: EmailSummaryRecord) -> str:
     )
 
 
+def format_bulk_summary_table(record: BulkSummaryRecord) -> str:
+    row = record.to_dict()
+    row["source_ids"] = ", ".join(record.source_ids)
+    for key in (
+        "corpus_kinds",
+        "policy_statuses",
+        "extractor_counts",
+        "skip_reasons",
+        "diagnostic_counts",
+        "redaction_counts",
+    ):
+        value = row[key]
+        if isinstance(value, Mapping):
+            row[key] = ", ".join(
+                f"{item_key}={item_value}"
+                for item_key, item_value in sorted(value.items())
+            )
+    columns = (
+        "root_path_summary",
+        "repository_name",
+        "bulk_runs",
+        "sources",
+        "source_ids",
+        "corpus_kinds",
+        "policy_statuses",
+        "file_count_included",
+        "file_count_skipped",
+        "total_bytes_included",
+        "extractor_counts",
+        "skip_reasons",
+        "diagnostic_counts",
+        "redaction_counts",
+        "limit_hit_count",
+        "max_files_hit_count",
+        "max_total_bytes_hit_count",
+        "max_file_bytes_hit_count",
+        "max_depth_hit_count",
+        "archive_deferred",
+        "warc_deferred",
+        "email_export_runs",
+        "mixed_corpus_runs",
+        "observations_with_bulk_provenance",
+        "no_provider_api",
+        "no_external_fetch",
+        "no_source_mutation",
+        "no_archive_decompression",
+    )
+    rendered_row = {key: render_table_value(row[key]) for key in columns}
+    widths = {key: max(len(key), len(rendered_row[key])) for key in columns}
+    return "\n".join(
+        [
+            format_table_row(dict(zip(columns, columns, strict=True)), columns, widths),
+            format_table_row(rendered_row, columns, widths),
+        ]
+    )
+
+
 def load_summary_from_payload(payload: Any) -> LoadSummary:
     if not isinstance(payload, dict):
         raise StorageSchemaError("psql returned a malformed load summary")
@@ -5135,6 +5594,23 @@ def payload_json_object(
     if not isinstance(normalized, dict):
         raise StorageSchemaError(f"psql returned a malformed {label}: {key}")
     return normalized
+
+
+def payload_count_map(
+    payload: dict[str, Any], key: str, *, label: str
+) -> dict[str, int]:
+    value = payload_json_object(payload, key, label=label)
+    counts: dict[str, int] = {}
+    for count_key, count in value.items():
+        if not isinstance(count_key, str) or not count_key:
+            raise StorageSchemaError(f"psql returned a malformed {label}: {key}")
+        try:
+            counts[count_key] = int(count)
+        except (TypeError, ValueError) as error:
+            raise StorageSchemaError(
+                f"psql returned a malformed {label}: {key}"
+            ) from error
+    return dict(sorted(counts.items()))
 
 
 def payload_int(payload: dict[str, Any], key: str, *, label: str) -> int:

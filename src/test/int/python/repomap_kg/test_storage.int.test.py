@@ -27,6 +27,7 @@ from repomap_kg.storage import (
     apply_migrations,
     default_rdbms_root,
     load_file_observations,
+    query_bulk_summary,
     query_canonical_edge_explanation,
     query_canonical_edge_records,
     query_canonical_node_records,
@@ -523,6 +524,46 @@ SELECT COALESCE(jsonb_agg(payload_json ORDER BY ordinal)::text, '[]')
 FROM raw_observations;
 """
                 )
+                bulk_summary = query_bulk_summary(
+                    postgres.psql_args,
+                    root_path=corpus_root,
+                    psql_command=postgres.psql_command,
+                )
+                bulk_summary_exit_code, bulk_summary_stdout, bulk_summary_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "bulk-summary",
+                        "--root-path",
+                        corpus_root,
+                        "--pg-host",
+                        str(postgres.socket_dir),
+                        "--pg-port",
+                        str(postgres.port),
+                        "--pg-user",
+                        postgres.user,
+                        "--pg-database",
+                        "postgres",
+                        "--psql-command",
+                        postgres.psql_command,
+                        "--json",
+                    )
+                )
+                table_exit_code, table_stdout, table_stderr = run_repo_map_in_process(
+                    "storage",
+                    "bulk-summary",
+                    "--root-path",
+                    corpus_root,
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                )
                 manifest_count = postgres.psql_scalar(
                     """
 SELECT count(*)::text
@@ -549,6 +590,31 @@ WHERE payload_json->'metadata' ? 'bulk_run_id';
         self.assertNotIn(str(corpus), raw_payload)
         self.assertNotIn("mixed-corpus-secret-value", raw_payload)
         self.assertIn("mixed-corpus-secret-value", input_body)
+        self.assertEqual(bulk_summary_exit_code, 0, bulk_summary_stderr)
+        self.assertEqual(table_exit_code, 0, table_stderr)
+        bulk_summary_payload = json.loads(bulk_summary_stdout)
+        self.assertEqual(bulk_summary.bulk_runs, 1)
+        self.assertEqual(bulk_summary.sources, 1)
+        self.assertEqual(bulk_summary.source_ids, ("fixture-mixed-corpus",))
+        self.assertEqual(bulk_summary.corpus_kinds["mixed_corpus"], 1)
+        self.assertEqual(bulk_summary.file_count_included, 6)
+        self.assertEqual(bulk_summary.file_count_skipped, 2)
+        self.assertEqual(bulk_summary.extractor_counts["javascript"], 1)
+        self.assertEqual(bulk_summary.skip_reasons["excluded_directory"], 1)
+        self.assertGreater(bulk_summary.observations_with_bulk_provenance, 0)
+        self.assertTrue(bulk_summary.no_provider_api)
+        self.assertTrue(bulk_summary.no_external_fetch)
+        self.assertTrue(bulk_summary.no_source_mutation)
+        self.assertTrue(bulk_summary.no_archive_decompression)
+        self.assertEqual(bulk_summary_payload["bulk_runs"], 1)
+        self.assertEqual(bulk_summary_payload["source_ids"], ["fixture-mixed-corpus"])
+        self.assertEqual(bulk_summary_payload["corpus_kinds"]["mixed_corpus"], 1)
+        self.assertNotIn(str(corpus), bulk_summary_stdout)
+        self.assertNotIn("mixed-corpus-secret-value", bulk_summary_stdout)
+        self.assertIn("bulk_runs", table_stdout)
+        self.assertIn("mixed_corpus=1", table_stdout)
+        self.assertNotIn(str(corpus), table_stdout)
+        self.assertNotIn("mixed-corpus-secret-value", table_stdout)
 
     def test_storage_load_files_dual_writes_canonical_shell_collapse_fixture(self):
         require_postgres_binaries()

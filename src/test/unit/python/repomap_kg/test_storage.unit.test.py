@@ -10,6 +10,7 @@ from unittest.mock import patch
 from repomap_kg.canonicalization import canonicalize_observations
 from repomap_kg.observations import RawObservation
 from repomap_kg.storage import (
+    BulkSummaryRecord,
     CanonicalEdgeRecord,
     CanonicalEdgeEvidenceRecord,
     CanonicalEdgeExplanationRecord,
@@ -27,6 +28,7 @@ from repomap_kg.storage import (
     StorageSummaryRecord,
     StorageSchemaError,
     build_canonical_storage_summary_query_sql,
+    build_bulk_summary_query_sql,
     build_email_summary_query_sql,
     build_ingested_source_query_sql,
     build_js_summary_query_sql,
@@ -52,6 +54,7 @@ from repomap_kg.storage import (
     default_rdbms_root,
     discover_migrations,
     format_edge_table,
+    format_bulk_summary_table,
     format_email_summary_table,
     format_file_node_table,
     format_file_neighborhood_table,
@@ -62,6 +65,7 @@ from repomap_kg.storage import (
     format_storage_summary_table,
     file_rows_from_observations,
     query_edge_records,
+    query_bulk_summary,
     query_email_summary,
     query_file_node_records,
     query_file_records,
@@ -107,6 +111,8 @@ from repomap_kg.storage import (
     query_canonical_node_records,
     query_canonical_storage_summary,
     query_ingested_source_records,
+    bulk_summary_from_storage_payload,
+    bulk_summary_to_jsonable,
     js_summary_to_jsonable,
     ruby_summary_to_jsonable,
     email_summary_to_jsonable,
@@ -2360,6 +2366,129 @@ SELECT 1;
             with self.assertRaisesRegex(StorageSchemaError, "email summary"):
                 query_email_summary(["-d", "postgres"], root_path="/tmp/fixture")
 
+    def test_query_bulk_summary_combines_manifests_and_bulk_provenance(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_dir = root / ".repomap" / "bulk-runs" / "source-one" / "run-one"
+            run_dir.mkdir(parents=True)
+            (run_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "bulk_run_id": "run-one",
+                        "source_id": "source-one",
+                        "source_type": "local.directory",
+                        "corpus_kind": "mixed_corpus",
+                        "policy_status": "allowed_with_limits",
+                        "file_count_included": 3,
+                        "file_count_skipped": 2,
+                        "total_bytes_included": 123,
+                        "limit_hit": True,
+                        "limit_reason": "max_files_exceeded",
+                        "extractor_counts": {"eml": 1, "javascript": 1},
+                        "diagnostic_counts": {"extractor_error": 1},
+                        "redaction_counts": {"raw_observations": 2},
+                        "skipped_files": [
+                            {"relative_path": ".hidden/a.eml", "reason": "hidden_excluded"},
+                            {"relative_path": "archive/export.zip", "reason": "archive_deferred"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            completed = SimpleNamespace(
+                stdout=(
+                    '{"repository_name":"fixture",'
+                    '"observations_with_bulk_provenance":7,'
+                    '"redacted_observations":2}\n'
+                )
+            )
+
+            with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+                summary = query_bulk_summary(
+                    ["-d", "postgres"],
+                    root_path=str(root),
+                    psql_command="/bin/psql",
+                )
+
+        self.assertEqual(summary.root_path_summary, ".")
+        self.assertEqual(summary.repository_name, "fixture")
+        self.assertEqual(summary.bulk_runs, 1)
+        self.assertEqual(summary.sources, 1)
+        self.assertEqual(summary.source_ids, ("source-one",))
+        self.assertEqual(summary.corpus_kinds["mixed_corpus"], 1)
+        self.assertEqual(summary.policy_statuses["allowed_with_limits"], 1)
+        self.assertEqual(summary.file_count_included, 3)
+        self.assertEqual(summary.file_count_skipped, 2)
+        self.assertEqual(summary.extractor_counts["eml"], 1)
+        self.assertEqual(summary.skip_reasons["archive_deferred"], 1)
+        self.assertEqual(summary.archive_deferred, 1)
+        self.assertEqual(summary.limit_hit_count, 1)
+        self.assertEqual(summary.max_files_hit_count, 1)
+        self.assertEqual(summary.observations_with_bulk_provenance, 7)
+        self.assertEqual(summary.redaction_counts["raw_observations"], 2)
+        self.assertTrue(summary.no_provider_api)
+        self.assertTrue(summary.no_external_fetch)
+        self.assertTrue(summary.no_source_mutation)
+        self.assertTrue(summary.no_archive_decompression)
+        self.assertIn("payload_json->'metadata' ? 'bulk_run_id'", run.call_args.kwargs["input"])
+
+    def test_query_bulk_summary_empty_repo_returns_zero_counts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            completed = SimpleNamespace(
+                stdout=(
+                    '{"repository_name":null,'
+                    '"observations_with_bulk_provenance":0,'
+                    '"redacted_observations":0}\n'
+                )
+            )
+
+            with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+                summary = query_bulk_summary(["-d", "postgres"], root_path=tmpdir)
+
+        self.assertEqual(summary.bulk_runs, 0)
+        self.assertEqual(summary.sources, 0)
+        self.assertEqual(summary.file_count_included, 0)
+        self.assertEqual(summary.file_count_skipped, 0)
+        self.assertEqual(summary.extractor_counts, {})
+        self.assertEqual(summary.skip_reasons, {})
+        self.assertEqual(summary.observations_with_bulk_provenance, 0)
+        self.assertTrue(summary.no_provider_api)
+
+    def test_query_bulk_summary_rejects_escaped_manifest_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with tempfile.TemporaryDirectory() as escaped_tmpdir:
+                root = Path(tmpdir)
+                escaped_root = Path(escaped_tmpdir) / "bulk-runs"
+                escaped_root.mkdir()
+                (root / ".repomap").mkdir()
+                (root / ".repomap" / "bulk-runs").symlink_to(
+                    escaped_root,
+                    target_is_directory=True,
+                )
+                completed = SimpleNamespace(
+                    stdout=(
+                        '{"repository_name":null,'
+                        '"observations_with_bulk_provenance":0,'
+                        '"redacted_observations":0}\n'
+                    )
+                )
+
+                with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+                    summary = query_bulk_summary(["-d", "postgres"], root_path=tmpdir)
+
+        self.assertEqual(summary.bulk_runs, 0)
+        self.assertEqual(summary.sources, 0)
+        self.assertEqual(summary.diagnostic_counts["manifest_parse_error"], 1)
+        self.assertTrue(summary.no_provider_api)
+
+    def test_query_bulk_summary_rejects_malformed_storage_json(self):
+        completed = SimpleNamespace(stdout='{"repository_name": "fixture"}\n')
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+                with self.assertRaisesRegex(StorageSchemaError, "bulk summary"):
+                    query_bulk_summary(["-d", "postgres"], root_path=tmpdir)
+
     def test_email_summary_payload_parser_preserves_safe_counts(self):
         summary = email_summary_from_storage_payload(
             {
@@ -2405,6 +2534,48 @@ SELECT 1;
         self.assertEqual(summary.malformed_or_oversized_diagnostics, 2)
         self.assertTrue(summary.no_body_text)
         self.assertEqual(email_summary_to_jsonable(summary), summary.to_dict())
+
+    def test_bulk_summary_payload_parser_preserves_safe_counts(self):
+        summary = bulk_summary_from_storage_payload(
+            {
+                "root_path_summary": ".",
+                "repository_name": "fixture",
+                "bulk_runs": 2,
+                "sources": 2,
+                "source_ids": ["email-export", "mixed-corpus"],
+                "corpus_kinds": {"email_export": 1, "mixed_corpus": 1},
+                "policy_statuses": {"allowed_with_limits": 2},
+                "file_count_included": 12,
+                "file_count_skipped": 5,
+                "total_bytes_included": 4096,
+                "extractor_counts": {"eml": 3, "javascript": 1},
+                "skip_reasons": {"archive_deferred": 1, "hidden_excluded": 1},
+                "diagnostic_counts": {"extractor_error": 1},
+                "redaction_counts": {"raw_observations": 2},
+                "limit_hit_count": 1,
+                "max_files_hit_count": 1,
+                "max_total_bytes_hit_count": 0,
+                "max_file_bytes_hit_count": 0,
+                "max_depth_hit_count": 0,
+                "archive_deferred": 1,
+                "warc_deferred": 0,
+                "email_export_runs": 1,
+                "mixed_corpus_runs": 1,
+                "observations_with_bulk_provenance": 42,
+                "no_provider_api": True,
+                "no_external_fetch": True,
+                "no_source_mutation": True,
+                "no_archive_decompression": True,
+            }
+        )
+
+        self.assertEqual(summary.source_ids, ("email-export", "mixed-corpus"))
+        self.assertEqual(summary.corpus_kinds["mixed_corpus"], 1)
+        self.assertEqual(summary.extractor_counts["eml"], 3)
+        self.assertEqual(summary.skip_reasons["archive_deferred"], 1)
+        self.assertEqual(summary.observations_with_bulk_provenance, 42)
+        self.assertTrue(summary.no_archive_decompression)
+        self.assertEqual(bulk_summary_to_jsonable(summary), summary.to_dict())
 
     def test_js_summary_payload_parser_preserves_safe_counts(self):
         summary = js_summary_from_storage_payload(
@@ -3150,6 +3321,47 @@ SELECT 1;
         self.assertIn("list_unsubscribe_references", table)
         self.assertIn("no_provider_api", table)
         self.assertIn("no_attachment_content", table)
+
+    def test_format_bulk_summary_table_uses_manifest_and_safety_columns(self):
+        table = format_bulk_summary_table(
+            BulkSummaryRecord(
+                root_path_summary=".",
+                repository_name="fixture",
+                bulk_runs=2,
+                sources=2,
+                source_ids=("email-export", "mixed-corpus"),
+                corpus_kinds={"email_export": 1, "mixed_corpus": 1},
+                policy_statuses={"allowed_with_limits": 2},
+                file_count_included=12,
+                file_count_skipped=5,
+                total_bytes_included=4096,
+                extractor_counts={"eml": 3, "javascript": 1},
+                skip_reasons={"archive_deferred": 1, "hidden_excluded": 1},
+                diagnostic_counts={"extractor_error": 1},
+                redaction_counts={"raw_observations": 2},
+                limit_hit_count=1,
+                max_files_hit_count=1,
+                max_total_bytes_hit_count=0,
+                max_file_bytes_hit_count=0,
+                max_depth_hit_count=0,
+                archive_deferred=1,
+                warc_deferred=0,
+                email_export_runs=1,
+                mixed_corpus_runs=1,
+                observations_with_bulk_provenance=42,
+                no_provider_api=True,
+                no_external_fetch=True,
+                no_source_mutation=True,
+                no_archive_decompression=True,
+            )
+        )
+
+        self.assertIn("bulk_runs", table)
+        self.assertIn("source_ids", table)
+        self.assertIn("mixed_corpus=1", table)
+        self.assertIn("archive_deferred=1", table)
+        self.assertIn("observations_with_bulk_provenance", table)
+        self.assertIn("no_archive_decompression", table)
 
     def test_format_node_table_uses_node_columns(self):
         table = format_node_table(
