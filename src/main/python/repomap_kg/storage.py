@@ -588,6 +588,41 @@ class BulkSummaryRecord:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class APISummaryRecord:
+    root_path_summary: str
+    repository_name: str | None
+    api_runs: int
+    sources: int
+    source_ids: tuple[str, ...]
+    source_types: dict[str, int]
+    api_source_classes: dict[str, int]
+    provider_names: dict[str, int]
+    provider_products: dict[str, int]
+    policy_statuses: dict[str, int]
+    requests: int
+    responses: int
+    endpoints: int
+    endpoint_names: tuple[str, ...]
+    methods: dict[str, int]
+    downstream_routes: dict[str, int]
+    response_types: dict[str, int]
+    response_byte_count: int
+    redacted_responses: int
+    diagnostic_counts: dict[str, int]
+    routed_artifacts: int
+    observations_with_api_provenance: int
+    config_documents_from_api: int
+    no_network: bool
+    no_mutation: bool
+    no_credentials_resolved: bool
+    no_scheduler: bool
+    no_provider_specific_behavior: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 CHANGESET_PATTERN = re.compile(r"^--changeset\s+(\S+)")
 
 
@@ -1313,6 +1348,42 @@ def query_bulk_summary(
                 label="bulk summary",
             ),
             "redaction_counts": redaction_counts,
+        }
+    )
+
+
+def query_api_summary(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    psql_command: str = "psql",
+) -> APISummaryRecord:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_api_summary_query_sql(root_path),
+    )
+    storage_payload = parse_psql_json(result.stdout, "api summary")
+    if not isinstance(storage_payload, dict):
+        raise StorageSchemaError("psql returned a malformed api summary")
+    manifest_payload = api_manifest_summary_payload(Path(root_path))
+    return api_summary_from_storage_payload(
+        {
+            **manifest_payload,
+            "repository_name": payload_optional_text(
+                storage_payload,
+                "repository_name",
+                label="api summary",
+            ),
+            "observations_with_api_provenance": payload_int(
+                storage_payload,
+                "observations_with_api_provenance",
+                label="api summary",
+            ),
+            "config_documents_from_api": payload_int(
+                storage_payload,
+                "config_documents_from_api",
+                label="api summary",
+            ),
         }
     )
 
@@ -2792,6 +2863,39 @@ def build_bulk_summary_query_sql(root_path: str) -> str:
     )
 
 
+def build_api_summary_query_sql(root_path: str) -> str:
+    quoted_root = sql_literal(root_path)
+    return (
+        "WITH repo AS ("
+        "SELECT id, name, root_path FROM repositories "
+        f"WHERE repositories.root_path = {quoted_root}"
+        "), "
+        "api_raw AS ("
+        "SELECT raw_observations.* FROM raw_observations "
+        "JOIN repo ON repo.id = raw_observations.repository_id "
+        "WHERE raw_observations.payload_json->'metadata' ? 'api_run_id'"
+        "), "
+        "api_config_documents AS ("
+        "SELECT DISTINCT canonical_nodes.canonical_key "
+        "FROM canonical_nodes "
+        "JOIN canonical_node_evidence "
+        "ON canonical_node_evidence.canonical_node_id = canonical_nodes.id "
+        "JOIN canonical_evidence "
+        "ON canonical_evidence.id = "
+        "canonical_node_evidence.canonical_evidence_id "
+        "JOIN api_raw "
+        "ON api_raw.id = canonical_evidence.raw_observation_id "
+        "WHERE canonical_nodes.kind = 'config.document'"
+        ") "
+        "SELECT json_build_object("
+        "'repository_name', (SELECT name FROM repo), "
+        "'observations_with_api_provenance', (SELECT COUNT(*) FROM api_raw), "
+        "'config_documents_from_api', "
+        "(SELECT COUNT(*) FROM api_config_documents)"
+        ")::text;"
+    )
+
+
 def build_source_summary_query_sql(root_path: str, *, source_id: str) -> str:
     source_filter = f"source_id_configured = {sql_literal(source_id)}"
     return (
@@ -4260,6 +4364,150 @@ def read_bulk_manifest_payloads(
     return tuple(payloads)
 
 
+def api_manifest_summary_payload(root_path: Path) -> dict[str, Any]:
+    resolved_root = root_path.resolve()
+    run_root = resolved_root / ".repomap" / "api-runs"
+    manifests = read_api_manifest_payloads(run_root, root_path=resolved_root)
+    source_ids: set[str] = set()
+    run_ids: set[str] = set()
+    endpoint_names: set[str] = set()
+    source_types: Counter[str] = Counter()
+    api_source_classes: Counter[str] = Counter()
+    provider_names: Counter[str] = Counter()
+    provider_products: Counter[str] = Counter()
+    policy_statuses: Counter[str] = Counter()
+    methods: Counter[str] = Counter()
+    downstream_routes: Counter[str] = Counter()
+    response_types: Counter[str] = Counter()
+    diagnostic_counts: Counter[str] = Counter()
+    request_count = 0
+    response_count = 0
+    response_byte_count = 0
+    redacted_responses = 0
+    routed_artifacts = 0
+    no_network = True
+    no_mutation = True
+    no_credentials_resolved = True
+    no_scheduler = True
+
+    for manifest in manifests:
+        if manifest.get("_manifest_parse_error"):
+            diagnostic_counts["manifest_parse_error"] += 1
+            continue
+        source_id = optional_manifest_text(manifest, "source_id")
+        run_id = optional_manifest_text(manifest, "api_run_id")
+        source_type = optional_manifest_text(manifest, "source_type")
+        api_source_class = optional_manifest_text(manifest, "api_source_class")
+        provider_name = optional_manifest_text(manifest, "provider_name")
+        provider_product = optional_manifest_text(manifest, "provider_product")
+        policy_status = optional_manifest_text(manifest, "policy_status")
+        if source_id is not None:
+            source_ids.add(source_id)
+        if run_id is not None:
+            run_ids.add(run_id)
+        if source_type is not None:
+            source_types[source_type] += 1
+        if api_source_class is not None:
+            api_source_classes[api_source_class] += 1
+        if provider_name is not None:
+            provider_names[provider_name] += 1
+        if provider_product is not None:
+            provider_products[provider_product] += 1
+        if policy_status is not None:
+            policy_statuses[policy_status] += 1
+        if manifest.get("no_network") is False:
+            no_network = False
+        if manifest.get("no_mutation") is False:
+            no_mutation = False
+        if manifest.get("no_credentials_resolved") is False:
+            no_credentials_resolved = False
+        if manifest.get("no_scheduler") is False:
+            no_scheduler = False
+        for request in manifest_list(manifest.get("requests")):
+            request_count += 1
+            endpoint_name = optional_manifest_text(request, "endpoint_name")
+            method = optional_manifest_text(request, "method")
+            downstream_route = optional_manifest_text(request, "downstream_route")
+            response_type = optional_manifest_text(request, "response_type")
+            if endpoint_name is not None:
+                endpoint_names.add(endpoint_name)
+            if method is not None:
+                methods[method] += 1
+            if downstream_route is not None:
+                downstream_routes[downstream_route] += 1
+            if response_type is not None:
+                response_types[response_type] += 1
+        for response in manifest_list(manifest.get("responses")):
+            response_count += 1
+            endpoint_name = optional_manifest_text(response, "endpoint_name")
+            if endpoint_name is not None:
+                endpoint_names.add(endpoint_name)
+            response_byte_count += manifest_int(response, "response_byte_count")
+            if response.get("redacted") is True:
+                redacted_responses += 1
+            if optional_manifest_text(response, "artifact_path") is not None:
+                routed_artifacts += 1
+
+    return {
+        "root_path_summary": ".",
+        "repository_name": None,
+        "api_runs": len(run_ids),
+        "sources": len(source_ids),
+        "source_ids": sorted(source_ids),
+        "source_types": dict(sorted(source_types.items())),
+        "api_source_classes": dict(sorted(api_source_classes.items())),
+        "provider_names": dict(sorted(provider_names.items())),
+        "provider_products": dict(sorted(provider_products.items())),
+        "policy_statuses": dict(sorted(policy_statuses.items())),
+        "requests": request_count,
+        "responses": response_count,
+        "endpoints": len(endpoint_names),
+        "endpoint_names": sorted(endpoint_names),
+        "methods": dict(sorted(methods.items())),
+        "downstream_routes": dict(sorted(downstream_routes.items())),
+        "response_types": dict(sorted(response_types.items())),
+        "response_byte_count": response_byte_count,
+        "redacted_responses": redacted_responses,
+        "diagnostic_counts": dict(sorted(diagnostic_counts.items())),
+        "routed_artifacts": routed_artifacts,
+        "observations_with_api_provenance": 0,
+        "config_documents_from_api": 0,
+        "no_network": no_network,
+        "no_mutation": no_mutation,
+        "no_credentials_resolved": no_credentials_resolved,
+        "no_scheduler": no_scheduler,
+        "no_provider_specific_behavior": True,
+    }
+
+
+def read_api_manifest_payloads(
+    run_root: Path,
+    *,
+    root_path: Path,
+) -> tuple[dict[str, Any], ...]:
+    if not run_root.is_dir():
+        return ()
+    resolved_run_root = run_root.resolve()
+    try:
+        resolved_run_root.relative_to(root_path)
+    except ValueError:
+        return ({"_manifest_parse_error": True},)
+    payloads: list[dict[str, Any]] = []
+    for manifest_path in sorted(run_root.glob("*/*/manifest.json")):
+        try:
+            resolved_manifest = manifest_path.resolve()
+            resolved_manifest.relative_to(resolved_run_root)
+            payload = json.loads(resolved_manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            payloads.append({"_manifest_parse_error": True})
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+        else:
+            payloads.append({"_manifest_parse_error": True})
+    return tuple(payloads)
+
+
 def optional_manifest_text(payload: Mapping[str, Any], key: str) -> str | None:
     value = payload.get(key)
     return value if isinstance(value, str) and value else None
@@ -4870,6 +5118,117 @@ def bulk_summary_from_storage_payload(payload: Any) -> BulkSummaryRecord:
     )
 
 
+def api_summary_from_storage_payload(payload: Any) -> APISummaryRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed api summary")
+    return APISummaryRecord(
+        root_path_summary=payload_text(
+            payload,
+            "root_path_summary",
+            label="api summary",
+        ),
+        repository_name=payload_optional_text(
+            payload,
+            "repository_name",
+            label="api summary",
+        ),
+        api_runs=payload_int(payload, "api_runs", label="api summary"),
+        sources=payload_int(payload, "sources", label="api summary"),
+        source_ids=payload_string_tuple(
+            payload,
+            "source_ids",
+            label="api summary",
+        ),
+        source_types=payload_count_map(
+            payload,
+            "source_types",
+            label="api summary",
+        ),
+        api_source_classes=payload_count_map(
+            payload,
+            "api_source_classes",
+            label="api summary",
+        ),
+        provider_names=payload_count_map(
+            payload,
+            "provider_names",
+            label="api summary",
+        ),
+        provider_products=payload_count_map(
+            payload,
+            "provider_products",
+            label="api summary",
+        ),
+        policy_statuses=payload_count_map(
+            payload,
+            "policy_statuses",
+            label="api summary",
+        ),
+        requests=payload_int(payload, "requests", label="api summary"),
+        responses=payload_int(payload, "responses", label="api summary"),
+        endpoints=payload_int(payload, "endpoints", label="api summary"),
+        endpoint_names=payload_string_tuple(
+            payload,
+            "endpoint_names",
+            label="api summary",
+        ),
+        methods=payload_count_map(payload, "methods", label="api summary"),
+        downstream_routes=payload_count_map(
+            payload,
+            "downstream_routes",
+            label="api summary",
+        ),
+        response_types=payload_count_map(
+            payload,
+            "response_types",
+            label="api summary",
+        ),
+        response_byte_count=payload_int(
+            payload,
+            "response_byte_count",
+            label="api summary",
+        ),
+        redacted_responses=payload_int(
+            payload,
+            "redacted_responses",
+            label="api summary",
+        ),
+        diagnostic_counts=payload_count_map(
+            payload,
+            "diagnostic_counts",
+            label="api summary",
+        ),
+        routed_artifacts=payload_int(
+            payload,
+            "routed_artifacts",
+            label="api summary",
+        ),
+        observations_with_api_provenance=payload_int(
+            payload,
+            "observations_with_api_provenance",
+            label="api summary",
+        ),
+        config_documents_from_api=payload_int(
+            payload,
+            "config_documents_from_api",
+            label="api summary",
+        ),
+        no_network=payload_bool(payload, "no_network", label="api summary"),
+        no_mutation=payload_bool(payload, "no_mutation", label="api summary"),
+        no_credentials_resolved=payload_bool(
+            payload,
+            "no_credentials_resolved",
+            label="api summary",
+        ),
+        no_scheduler=payload_bool(payload, "no_scheduler", label="api summary"),
+        no_provider_specific_behavior=payload_bool(
+            payload,
+            "no_provider_specific_behavior",
+            label="api summary",
+        ),
+    )
+
+
 def file_node_records_to_jsonable(
     records: Sequence[FileNodeRecord],
 ) -> list[dict[str, Any]]:
@@ -4939,6 +5298,10 @@ def email_summary_to_jsonable(record: EmailSummaryRecord) -> dict[str, Any]:
 
 
 def bulk_summary_to_jsonable(record: BulkSummaryRecord) -> dict[str, Any]:
+    return record.to_dict()
+
+
+def api_summary_to_jsonable(record: APISummaryRecord) -> dict[str, Any]:
     return record.to_dict()
 
 
@@ -5480,6 +5843,67 @@ def format_bulk_summary_table(record: BulkSummaryRecord) -> str:
         "no_external_fetch",
         "no_source_mutation",
         "no_archive_decompression",
+    )
+    rendered_row = {key: render_table_value(row[key]) for key in columns}
+    widths = {key: max(len(key), len(rendered_row[key])) for key in columns}
+    return "\n".join(
+        [
+            format_table_row(dict(zip(columns, columns, strict=True)), columns, widths),
+            format_table_row(rendered_row, columns, widths),
+        ]
+    )
+
+
+def format_api_summary_table(record: APISummaryRecord) -> str:
+    row = record.to_dict()
+    row["source_ids"] = ", ".join(record.source_ids)
+    row["endpoint_names"] = ", ".join(record.endpoint_names)
+    for key in (
+        "source_types",
+        "api_source_classes",
+        "provider_names",
+        "provider_products",
+        "policy_statuses",
+        "methods",
+        "downstream_routes",
+        "response_types",
+        "diagnostic_counts",
+    ):
+        value = row[key]
+        if isinstance(value, Mapping):
+            row[key] = ", ".join(
+                f"{item_key}={item_value}"
+                for item_key, item_value in sorted(value.items())
+            )
+    columns = (
+        "root_path_summary",
+        "repository_name",
+        "api_runs",
+        "sources",
+        "source_ids",
+        "source_types",
+        "api_source_classes",
+        "provider_names",
+        "provider_products",
+        "policy_statuses",
+        "requests",
+        "responses",
+        "endpoints",
+        "endpoint_names",
+        "methods",
+        "downstream_routes",
+        "response_types",
+        "response_byte_count",
+        "redacted_responses",
+        "diagnostic_counts",
+        "routed_artifacts",
+        "observations_with_api_provenance",
+        "config_documents_from_api",
+        "no_network",
+        "no_mutation",
+        "no_credentials_resolved",
+        "no_scheduler",
+        "no_provider_specific_behavior",
     )
     rendered_row = {key: render_table_value(row[key]) for key in columns}
     widths = {key: max(len(key), len(rendered_row[key])) for key in columns}

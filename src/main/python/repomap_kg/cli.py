@@ -60,6 +60,7 @@ from repomap_kg.source_ingestion import (
 )
 from repomap_kg.storage import (
     StorageSchemaError,
+    api_summary_to_jsonable,
     canonical_edge_explanation_to_jsonable,
     canonical_edge_records_to_jsonable,
     canonical_neighborhood_to_jsonable,
@@ -69,6 +70,7 @@ from repomap_kg.storage import (
     edge_records_to_jsonable,
     file_neighborhood_to_jsonable,
     file_node_records_to_jsonable,
+    format_api_summary_table,
     format_canonical_edge_explanation_table,
     format_canonical_edge_table,
     format_canonical_neighborhood_table,
@@ -94,6 +96,7 @@ from repomap_kg.storage import (
     query_canonical_node_records,
     query_canonical_edge_records,
     query_canonical_storage_summary,
+    query_api_summary,
     query_bulk_summary,
     query_edge_records,
     query_email_summary,
@@ -875,6 +878,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit stored bulk summary as JSON",
+    )
+    storage_api_summary = storage_subcommands.add_parser(
+        "api-summary",
+        help="summarize stored API acquisition runs from Postgres storage",
+    )
+    add_storage_root_argument(storage_api_summary)
+    add_storage_connection_arguments(storage_api_summary)
+    storage_api_summary.add_argument(
+        "--json",
+        action="store_true",
+        help="emit stored API summary as JSON",
     )
 
     return parser
@@ -1792,6 +1806,22 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(bulk_summary_to_jsonable(summary), sort_keys=True))
         else:
             print(format_bulk_summary_table(summary))
+        return 0
+
+    if args.command == "storage" and args.storage_command == "api-summary":
+        try:
+            summary = query_api_summary(
+                psql_args_from_args(args),
+                root_path=args.root_path,
+                psql_command=args.psql_command,
+            )
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(api_summary_to_jsonable(summary), sort_keys=True))
+        else:
+            print(format_api_summary_table(summary))
         return 0
 
     parser.print_help()

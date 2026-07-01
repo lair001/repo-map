@@ -14,6 +14,7 @@ from repomap_kg.files import FileRecord
 from repomap_kg.host_mutators import HostMutatorRecord
 from repomap_kg.observations import RawObservation, write_observations_jsonl
 from repomap_kg.storage import (
+    APISummaryRecord,
     BulkSummaryRecord,
     CanonicalEdgeEvidenceRecord,
     CanonicalEdgeExplanationRecord,
@@ -4194,6 +4195,146 @@ class CliUnitTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertIn("psql did not return bulk summary", stderr.getvalue())
+
+    def test_storage_api_summary_prints_json_record(self):
+        summary = APISummaryRecord(
+            root_path_summary=".",
+            repository_name="fixture",
+            api_runs=1,
+            sources=1,
+            source_ids=("fixture-readonly-api",),
+            source_types={"api.rest": 1},
+            api_source_classes={"api.custom_documented_api": 1},
+            provider_names={"Fixture Provider": 1},
+            provider_products={"Fixture API": 1},
+            policy_statuses={"allowed_with_limits": 1},
+            requests=1,
+            responses=1,
+            endpoints=1,
+            endpoint_names=("items",),
+            methods={"GET": 1},
+            downstream_routes={"config": 1},
+            response_types={"application/json": 1},
+            response_byte_count=512,
+            redacted_responses=1,
+            diagnostic_counts={},
+            routed_artifacts=1,
+            observations_with_api_provenance=7,
+            config_documents_from_api=1,
+            no_network=True,
+            no_mutation=True,
+            no_credentials_resolved=True,
+            no_scheduler=True,
+            no_provider_specific_behavior=True,
+        )
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_api_summary",
+            return_value=summary,
+        ) as query:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "api-summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--pg-database",
+                        "postgres",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["root_path_summary"], ".")
+        self.assertEqual(payload["api_runs"], 1)
+        self.assertEqual(payload["source_ids"], ["fixture-readonly-api"])
+        self.assertEqual(payload["provider_names"]["Fixture Provider"], 1)
+        self.assertEqual(payload["methods"]["GET"], 1)
+        self.assertEqual(payload["observations_with_api_provenance"], 7)
+        self.assertTrue(payload["no_network"])
+        self.assertTrue(payload["no_mutation"])
+        self.assertTrue(payload["no_credentials_resolved"])
+        self.assertTrue(payload["no_scheduler"])
+        self.assertTrue(payload["no_provider_specific_behavior"])
+        self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
+        self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+
+    def test_storage_api_summary_prints_table_record(self):
+        summary = APISummaryRecord(
+            root_path_summary=".",
+            repository_name="fixture",
+            api_runs=1,
+            sources=1,
+            source_ids=("fixture-readonly-api",),
+            source_types={"api.rest": 1},
+            api_source_classes={"api.custom_documented_api": 1},
+            provider_names={"Fixture Provider": 1},
+            provider_products={"Fixture API": 1},
+            policy_statuses={"allowed_with_limits": 1},
+            requests=1,
+            responses=1,
+            endpoints=1,
+            endpoint_names=("items",),
+            methods={"GET": 1},
+            downstream_routes={"config": 1},
+            response_types={"application/json": 1},
+            response_byte_count=512,
+            redacted_responses=1,
+            diagnostic_counts={},
+            routed_artifacts=1,
+            observations_with_api_provenance=7,
+            config_documents_from_api=1,
+            no_network=True,
+            no_mutation=True,
+            no_credentials_resolved=True,
+            no_scheduler=True,
+            no_provider_specific_behavior=True,
+        )
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_api_summary",
+            return_value=summary,
+        ):
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "api-summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("api_runs", stdout.getvalue())
+        self.assertIn("source_ids", stdout.getvalue())
+        self.assertIn("api.rest=1", stdout.getvalue())
+        self.assertIn("Fixture Provider=1", stdout.getvalue())
+        self.assertIn("no_provider_specific_behavior", stdout.getvalue())
+
+    def test_storage_api_summary_reports_query_errors(self):
+        stderr = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_api_summary",
+            side_effect=StorageSchemaError("psql did not return api summary"),
+        ):
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "storage",
+                        "api-summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("psql did not return api summary", stderr.getvalue())
 
     def test_discover_prints_text_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:

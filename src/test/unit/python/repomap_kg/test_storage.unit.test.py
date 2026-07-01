@@ -10,6 +10,7 @@ from unittest.mock import patch
 from repomap_kg.canonicalization import canonicalize_observations
 from repomap_kg.observations import RawObservation
 from repomap_kg.storage import (
+    APISummaryRecord,
     BulkSummaryRecord,
     CanonicalEdgeRecord,
     CanonicalEdgeEvidenceRecord,
@@ -27,6 +28,7 @@ from repomap_kg.storage import (
     RubySummaryRecord,
     StorageSummaryRecord,
     StorageSchemaError,
+    build_api_summary_query_sql,
     build_canonical_storage_summary_query_sql,
     build_bulk_summary_query_sql,
     build_email_summary_query_sql,
@@ -54,6 +56,7 @@ from repomap_kg.storage import (
     default_rdbms_root,
     discover_migrations,
     format_edge_table,
+    format_api_summary_table,
     format_bulk_summary_table,
     format_email_summary_table,
     format_file_node_table,
@@ -65,6 +68,7 @@ from repomap_kg.storage import (
     format_storage_summary_table,
     file_rows_from_observations,
     query_edge_records,
+    query_api_summary,
     query_bulk_summary,
     query_email_summary,
     query_file_node_records,
@@ -97,6 +101,7 @@ from repomap_kg.storage import (
     source_reference_record_from_storage_payload,
     source_run_record_from_storage_payload,
     source_summary_from_storage_payload,
+    api_summary_from_storage_payload,
     js_summary_from_storage_payload,
     ruby_summary_from_storage_payload,
     email_summary_from_storage_payload,
@@ -111,6 +116,7 @@ from repomap_kg.storage import (
     query_canonical_node_records,
     query_canonical_storage_summary,
     query_ingested_source_records,
+    api_summary_to_jsonable,
     bulk_summary_from_storage_payload,
     bulk_summary_to_jsonable,
     js_summary_to_jsonable,
@@ -2489,6 +2495,151 @@ SELECT 1;
                 with self.assertRaisesRegex(StorageSchemaError, "bulk summary"):
                     query_bulk_summary(["-d", "postgres"], root_path=tmpdir)
 
+    def test_query_api_summary_combines_manifests_and_api_provenance(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_dir = root / ".repomap" / "api-runs" / "source-one" / "run-one"
+            run_dir.mkdir(parents=True)
+            (run_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "api_run_id": "run-one",
+                        "source_id": "source-one",
+                        "source_type": "api.rest",
+                        "api_source_class": "api.custom_documented_api",
+                        "provider_name": "Fixture Provider",
+                        "provider_product": "Fixture API",
+                        "policy_status": "allowed_with_limits",
+                        "requests": [
+                            {
+                                "endpoint_name": "items",
+                                "method": "GET",
+                                "path": "/v1/items",
+                                "response_type": "application/json",
+                                "downstream_route": "config",
+                            }
+                        ],
+                        "responses": [
+                            {
+                                "endpoint_name": "items",
+                                "method": "GET",
+                                "path_template": "/v1/items",
+                                "response_type": "application/json",
+                                "response_byte_count": 512,
+                                "redacted": True,
+                                "downstream_route": "config",
+                                "artifact_path": "artifacts/items.json",
+                            }
+                        ],
+                        "no_network": True,
+                        "no_mutation": True,
+                        "no_credentials_resolved": True,
+                        "no_scheduler": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            completed = SimpleNamespace(
+                stdout=(
+                    '{"repository_name":"fixture",'
+                    '"observations_with_api_provenance":7,'
+                    '"config_documents_from_api":1}\n'
+                )
+            )
+
+            with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+                summary = query_api_summary(
+                    ["-d", "postgres"],
+                    root_path=str(root),
+                    psql_command="/bin/psql",
+                )
+
+        self.assertEqual(summary.root_path_summary, ".")
+        self.assertEqual(summary.repository_name, "fixture")
+        self.assertEqual(summary.api_runs, 1)
+        self.assertEqual(summary.sources, 1)
+        self.assertEqual(summary.source_ids, ("source-one",))
+        self.assertEqual(summary.source_types["api.rest"], 1)
+        self.assertEqual(summary.api_source_classes["api.custom_documented_api"], 1)
+        self.assertEqual(summary.provider_names["Fixture Provider"], 1)
+        self.assertEqual(summary.provider_products["Fixture API"], 1)
+        self.assertEqual(summary.policy_statuses["allowed_with_limits"], 1)
+        self.assertEqual(summary.requests, 1)
+        self.assertEqual(summary.responses, 1)
+        self.assertEqual(summary.endpoints, 1)
+        self.assertEqual(summary.endpoint_names, ("items",))
+        self.assertEqual(summary.methods["GET"], 1)
+        self.assertEqual(summary.downstream_routes["config"], 1)
+        self.assertEqual(summary.response_types["application/json"], 1)
+        self.assertEqual(summary.response_byte_count, 512)
+        self.assertEqual(summary.redacted_responses, 1)
+        self.assertEqual(summary.routed_artifacts, 1)
+        self.assertEqual(summary.observations_with_api_provenance, 7)
+        self.assertEqual(summary.config_documents_from_api, 1)
+        self.assertTrue(summary.no_network)
+        self.assertTrue(summary.no_mutation)
+        self.assertTrue(summary.no_credentials_resolved)
+        self.assertTrue(summary.no_scheduler)
+        self.assertTrue(summary.no_provider_specific_behavior)
+        self.assertIn("payload_json->'metadata' ? 'api_run_id'", run.call_args.kwargs["input"])
+
+    def test_query_api_summary_empty_repo_returns_zero_counts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            completed = SimpleNamespace(
+                stdout=(
+                    '{"repository_name":null,'
+                    '"observations_with_api_provenance":0,'
+                    '"config_documents_from_api":0}\n'
+                )
+            )
+
+            with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+                summary = query_api_summary(["-d", "postgres"], root_path=tmpdir)
+
+        self.assertEqual(summary.api_runs, 0)
+        self.assertEqual(summary.sources, 0)
+        self.assertEqual(summary.requests, 0)
+        self.assertEqual(summary.responses, 0)
+        self.assertEqual(summary.observations_with_api_provenance, 0)
+        self.assertEqual(summary.config_documents_from_api, 0)
+        self.assertTrue(summary.no_network)
+        self.assertTrue(summary.no_mutation)
+
+    def test_query_api_summary_rejects_escaped_manifest_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with tempfile.TemporaryDirectory() as escaped_tmpdir:
+                root = Path(tmpdir)
+                escaped_root = Path(escaped_tmpdir) / "api-runs"
+                escaped_root.mkdir()
+                (root / ".repomap").mkdir()
+                (root / ".repomap" / "api-runs").symlink_to(
+                    escaped_root,
+                    target_is_directory=True,
+                )
+                completed = SimpleNamespace(
+                    stdout=(
+                        '{"repository_name":null,'
+                        '"observations_with_api_provenance":0,'
+                        '"config_documents_from_api":0}\n'
+                    )
+                )
+
+                with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+                    summary = query_api_summary(["-d", "postgres"], root_path=tmpdir)
+
+        self.assertEqual(summary.api_runs, 0)
+        self.assertEqual(summary.sources, 0)
+        self.assertEqual(summary.diagnostic_counts["manifest_parse_error"], 1)
+        self.assertTrue(summary.no_network)
+
+    def test_query_api_summary_rejects_malformed_storage_json(self):
+        completed = SimpleNamespace(stdout='{"repository_name": "fixture"}\n')
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+                with self.assertRaisesRegex(StorageSchemaError, "api summary"):
+                    query_api_summary(["-d", "postgres"], root_path=tmpdir)
+
     def test_email_summary_payload_parser_preserves_safe_counts(self):
         summary = email_summary_from_storage_payload(
             {
@@ -2576,6 +2727,48 @@ SELECT 1;
         self.assertEqual(summary.observations_with_bulk_provenance, 42)
         self.assertTrue(summary.no_archive_decompression)
         self.assertEqual(bulk_summary_to_jsonable(summary), summary.to_dict())
+
+    def test_api_summary_payload_parser_preserves_safe_counts(self):
+        summary = api_summary_from_storage_payload(
+            {
+                "root_path_summary": ".",
+                "repository_name": "fixture",
+                "api_runs": 1,
+                "sources": 1,
+                "source_ids": ["fixture-readonly-api"],
+                "source_types": {"api.rest": 1},
+                "api_source_classes": {"api.custom_documented_api": 1},
+                "provider_names": {"Fixture Provider": 1},
+                "provider_products": {"Fixture API": 1},
+                "policy_statuses": {"allowed_with_limits": 1},
+                "requests": 1,
+                "responses": 1,
+                "endpoints": 1,
+                "endpoint_names": ["items"],
+                "methods": {"GET": 1},
+                "downstream_routes": {"config": 1},
+                "response_types": {"application/json": 1},
+                "response_byte_count": 512,
+                "redacted_responses": 1,
+                "diagnostic_counts": {},
+                "routed_artifacts": 1,
+                "observations_with_api_provenance": 7,
+                "config_documents_from_api": 1,
+                "no_network": True,
+                "no_mutation": True,
+                "no_credentials_resolved": True,
+                "no_scheduler": True,
+                "no_provider_specific_behavior": True,
+            }
+        )
+
+        self.assertEqual(summary.source_ids, ("fixture-readonly-api",))
+        self.assertEqual(summary.provider_names["Fixture Provider"], 1)
+        self.assertEqual(summary.endpoint_names, ("items",))
+        self.assertEqual(summary.methods["GET"], 1)
+        self.assertEqual(summary.observations_with_api_provenance, 7)
+        self.assertTrue(summary.no_credentials_resolved)
+        self.assertEqual(api_summary_to_jsonable(summary), summary.to_dict())
 
     def test_js_summary_payload_parser_preserves_safe_counts(self):
         summary = js_summary_from_storage_payload(
@@ -3362,6 +3555,48 @@ SELECT 1;
         self.assertIn("archive_deferred=1", table)
         self.assertIn("observations_with_bulk_provenance", table)
         self.assertIn("no_archive_decompression", table)
+
+    def test_format_api_summary_table_uses_manifest_and_safety_columns(self):
+        table = format_api_summary_table(
+            APISummaryRecord(
+                root_path_summary=".",
+                repository_name="fixture",
+                api_runs=1,
+                sources=1,
+                source_ids=("fixture-readonly-api",),
+                source_types={"api.rest": 1},
+                api_source_classes={"api.custom_documented_api": 1},
+                provider_names={"Fixture Provider": 1},
+                provider_products={"Fixture API": 1},
+                policy_statuses={"allowed_with_limits": 1},
+                requests=1,
+                responses=1,
+                endpoints=1,
+                endpoint_names=("items",),
+                methods={"GET": 1},
+                downstream_routes={"config": 1},
+                response_types={"application/json": 1},
+                response_byte_count=512,
+                redacted_responses=1,
+                diagnostic_counts={},
+                routed_artifacts=1,
+                observations_with_api_provenance=7,
+                config_documents_from_api=1,
+                no_network=True,
+                no_mutation=True,
+                no_credentials_resolved=True,
+                no_scheduler=True,
+                no_provider_specific_behavior=True,
+            )
+        )
+
+        self.assertIn("api_runs", table)
+        self.assertIn("source_ids", table)
+        self.assertIn("api.rest=1", table)
+        self.assertIn("Fixture Provider=1", table)
+        self.assertIn("GET=1", table)
+        self.assertIn("observations_with_api_provenance", table)
+        self.assertIn("no_provider_specific_behavior", table)
 
     def test_format_node_table_uses_node_columns(self):
         table = format_node_table(

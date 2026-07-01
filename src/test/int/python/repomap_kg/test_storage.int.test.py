@@ -27,6 +27,7 @@ from repomap_kg.storage import (
     apply_migrations,
     default_rdbms_root,
     load_file_observations,
+    query_api_summary,
     query_bulk_summary,
     query_canonical_edge_explanation,
     query_canonical_edge_records,
@@ -685,10 +686,51 @@ FROM raw_observations
 WHERE payload_json->'metadata' ? 'api_run_id';
 """
                 )
+                api_summary = query_api_summary(
+                    postgres.psql_args,
+                    root_path=root_path,
+                    psql_command=postgres.psql_command,
+                )
+                api_summary_exit_code, api_summary_stdout, api_summary_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "api-summary",
+                        "--root-path",
+                        root_path,
+                        "--pg-host",
+                        str(postgres.socket_dir),
+                        "--pg-port",
+                        str(postgres.port),
+                        "--pg-user",
+                        postgres.user,
+                        "--pg-database",
+                        "postgres",
+                        "--psql-command",
+                        postgres.psql_command,
+                        "--json",
+                    )
+                )
+                table_exit_code, table_stdout, table_stderr = run_repo_map_in_process(
+                    "storage",
+                    "api-summary",
+                    "--root-path",
+                    root_path,
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                )
                 manifest_dir_exists = (root / ".repomap" / "api-runs").is_dir()
 
         self.assertEqual(exit_code, 0, stderr)
         payload = json.loads(stdout)
+        api_summary_payload = json.loads(api_summary_stdout)
         self.assertEqual(payload["source_id"], "fixture-readonly-api")
         self.assertEqual(payload["repository_id"], 1)
         self.assertTrue(payload["no_network"])
@@ -707,6 +749,43 @@ WHERE payload_json->'metadata' ? 'api_run_id';
         self.assertIn("fixture-secret-value", source_text)
         self.assertNotIn(str(root), stdout)
         self.assertNotIn("fixture-secret-value", stdout)
+        self.assertEqual(api_summary_exit_code, 0, api_summary_stderr)
+        self.assertEqual(table_exit_code, 0, table_stderr)
+        self.assertEqual(api_summary.api_runs, 1)
+        self.assertEqual(api_summary.sources, 1)
+        self.assertEqual(api_summary.source_ids, ("fixture-readonly-api",))
+        self.assertEqual(api_summary.source_types["api.rest"], 1)
+        self.assertEqual(
+            api_summary.api_source_classes["api.custom_documented_api"],
+            1,
+        )
+        self.assertEqual(api_summary.provider_names["Fixture Provider"], 1)
+        self.assertEqual(api_summary.policy_statuses["allowed_with_limits"], 1)
+        self.assertEqual(api_summary.requests, 1)
+        self.assertEqual(api_summary.responses, 1)
+        self.assertEqual(api_summary.methods["GET"], 1)
+        self.assertEqual(api_summary.downstream_routes["config"], 1)
+        self.assertEqual(api_summary.response_types["application/json"], 1)
+        self.assertEqual(api_summary.redacted_responses, 1)
+        self.assertEqual(api_summary.routed_artifacts, 1)
+        self.assertGreater(api_summary.observations_with_api_provenance, 0)
+        self.assertGreaterEqual(api_summary.config_documents_from_api, 1)
+        self.assertTrue(api_summary.no_network)
+        self.assertTrue(api_summary.no_mutation)
+        self.assertTrue(api_summary.no_credentials_resolved)
+        self.assertTrue(api_summary.no_scheduler)
+        self.assertTrue(api_summary.no_provider_specific_behavior)
+        self.assertEqual(api_summary_payload["api_runs"], 1)
+        self.assertEqual(api_summary_payload["source_ids"], ["fixture-readonly-api"])
+        self.assertEqual(api_summary_payload["methods"]["GET"], 1)
+        self.assertNotIn(str(root), api_summary_stdout)
+        self.assertNotIn("fixture-secret-value", api_summary_stdout)
+        self.assertNotIn("fixture-api-token", api_summary_stdout)
+        self.assertNotIn(str(root), table_stdout)
+        self.assertNotIn("fixture-secret-value", table_stdout)
+        self.assertNotIn("fixture-api-token", table_stdout)
+        self.assertIn("api_runs", table_stdout)
+        self.assertIn("Fixture Provider=1", table_stdout)
 
     def test_storage_load_files_dual_writes_canonical_shell_collapse_fixture(self):
         require_postgres_binaries()
