@@ -6,6 +6,7 @@ import json
 import re
 import tomllib
 import xml.etree.ElementTree as ElementTree
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
@@ -42,6 +43,24 @@ SECRET_PRONE_KEYS = (
     "refresh_token",
     "bearer",
     "auth",
+    "client_secret",
+    "secret_key",
+    "access_token",
+    "id_token",
+    "session",
+    "cookie",
+    "kubeconfig",
+    "service_account",
+    "dockerconfigjson",
+    "registry_password",
+    "connection_string",
+    "jdbc_url",
+    "datasource_password",
+    "grafana_api_key",
+    "arq_encryption_key",
+    "arq_password",
+    "arq_destination_password",
+    "securejsondata",
 )
 ENV_CONTAINER_KEYS = frozenset(("env", "environment", "env_vars"))
 TOOL_KEYS = frozenset(("command", "cmd", "executable", "program"))
@@ -55,11 +74,25 @@ PLIST_XML_FORMAT = "plist-xml"
 PLIST_XML_SAFETY_MODE = "pre-scan-no-doctype-entity-no-external-resources"
 GENERIC_XML_FORMAT = "xml"
 GENERIC_XML_SAFETY_MODE = "pre-scan-no-doctype-entity-no-external-resources"
+YAML_FORMAT = "yaml"
+YAML_PARSER = "stdlib-yaml-conservative"
+YAML_MAX_FILE_BYTES = 1_048_576
+YAML_MAX_DOCUMENTS = 64
+YAML_MAX_NODES = 25_000
+YAML_MAX_DEPTH = 64
+YAML_MAX_SCALAR_LENGTH = 4_096
+YAML_MAX_ALIASES = 512
 UNSAFE_XML_DECLARATION_PATTERN = re.compile(r"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
 UNSAFE_PROCESSING_INSTRUCTION_PATTERN = re.compile(
     r"<\?(?!xml(?:\s|\?>))", re.IGNORECASE
 )
 PLIST_ROOT_PATTERN = re.compile(r"<\s*plist(?:\s|>)", re.IGNORECASE)
+YAML_TAG_PATTERN = re.compile(r"^![A-Za-z0-9_./:-]+$")
+YAML_ANCHOR_PATTERN = re.compile(r"^&[A-Za-z0-9_.-]+$")
+YAML_ALIAS_PATTERN = re.compile(r"^\*[A-Za-z0-9_.-]+$")
+YAML_SIMPLE_IMAGE_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)?(?:@[A-Za-z0-9:_-]+)?$"
+)
 
 
 class JsoncNormalizationError(ValueError):
@@ -78,6 +111,49 @@ class GenericXmlSafetyError(ValueError):
     """Raised when generic XML content uses constructs XML2 refuses to parse."""
 
 
+class YamlParseError(ValueError):
+    """Raised when conservative YAML parsing cannot safely continue."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_kind: str = "malformed-yaml",
+        line_number: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_kind = error_kind
+        self.line_number = line_number
+
+
+@dataclass(frozen=True)
+class _YamlLine:
+    indent: int
+    text: str
+    line_number: int
+
+
+@dataclass(frozen=True)
+class _YamlValue:
+    value: Any
+    yaml_tag: str | None = None
+    anchor: str | None = None
+    alias: str | None = None
+    metadata_only: bool = False
+
+
+@dataclass
+class _YamlParseState:
+    node_count: int = 0
+    alias_count: int = 0
+    metadata_by_pointer: dict[str, dict[str, Any]] | None = None
+
+    def metadata(self) -> dict[str, dict[str, Any]]:
+        if self.metadata_by_pointer is None:
+            self.metadata_by_pointer = {}
+        return self.metadata_by_pointer
+
+
 def extract_config_file_observations(
     relative_path: str,
     content: str,
@@ -89,6 +165,8 @@ def extract_config_file_observations(
         return _extract_jsonc_observations(relative_path, content)
     if suffix == ".toml":
         return _extract_toml_observations(relative_path, content)
+    if suffix in (".yaml", ".yml"):
+        return _extract_yaml_observations(relative_path, content)
     if suffix == ".plist":
         return _extract_plist_xml_observations(relative_path, content)
     if suffix == ".xml":
@@ -288,6 +366,881 @@ def _extract_toml_observations(
         parse_error_count=0,
     )
     return (document, *path_observations, *reference_observations)
+
+
+def _extract_yaml_observations(
+    relative_path: str,
+    content: str,
+) -> tuple[RawObservation, ...]:
+    try:
+        parsed, metadata_overrides, document_count = _parse_yaml_documents(
+            relative_path,
+            content,
+        )
+    except YamlParseError as error:
+        observation = _parse_error_observation(
+            relative_path,
+            format_name=YAML_FORMAT,
+            error_kind=error.error_kind,
+            message=str(error),
+            start_line=error.line_number,
+            recovered=False,
+        )
+        if error.error_kind == "duplicate-yaml-key":
+            observation.metadata["duplicate_key_policy"] = "parse-error"
+        return (observation,)
+
+    profile = _yaml_profile(relative_path, parsed, document_count=document_count)
+    _apply_yaml_profile_metadata(
+        parsed,
+        metadata_overrides,
+        profile=profile,
+        document_count=document_count,
+    )
+    path_observations, reference_observations = _structure_observations(
+        relative_path,
+        parsed,
+        format_name=YAML_FORMAT,
+        confidence="extracted",
+        content=content,
+        metadata_overrides=metadata_overrides,
+    )
+    document = _document_observation(
+        relative_path,
+        format_name=YAML_FORMAT,
+        parser=YAML_PARSER,
+        confidence="extracted",
+        top_level_type=_value_type(parsed),
+        path_count=len(path_observations),
+        record_count=None,
+        parse_error_count=0,
+        extra_metadata={
+            "profile": profile,
+            "document_count": document_count,
+            "duplicate_key_policy": "parse-error",
+        },
+    )
+    return (document, *path_observations, *reference_observations)
+
+
+def _parse_yaml_documents(
+    relative_path: str,
+    content: str,
+) -> tuple[Any, dict[str, dict[str, Any]], int]:
+    encoded_size = len(content.encode("utf-8"))
+    if encoded_size > YAML_MAX_FILE_BYTES:
+        raise YamlParseError(
+            "YAML file exceeds conservative byte limit",
+            error_kind="yaml-file-byte-limit",
+        )
+    documents = _split_yaml_documents(content)
+    if len(documents) > YAML_MAX_DOCUMENTS:
+        raise YamlParseError(
+            "YAML stream exceeds conservative document limit",
+            error_kind="yaml-document-count-limit",
+        )
+
+    parsed_documents: list[Any] = []
+    all_metadata: dict[str, dict[str, Any]] = {}
+    for document_index, document_lines in enumerate(documents):
+        state = _YamlParseState()
+        lines = _yaml_logical_lines(document_lines)
+        if not lines:
+            parsed = None
+        else:
+            parsed, next_index = _parse_yaml_block(
+                lines,
+                0,
+                lines[0].indent,
+                state,
+                pointer_segments=(),
+                depth=0,
+            )
+            if next_index != len(lines):
+                line = lines[next_index]
+                raise YamlParseError(
+                    "unsupported YAML structure after parsed document",
+                    line_number=line.line_number,
+                )
+        parsed_documents.append(parsed)
+        pointer_prefix: tuple[str, ...]
+        if len(documents) == 1:
+            pointer_prefix = ()
+        else:
+            pointer_prefix = ("documents", str(document_index))
+        for pointer, metadata in state.metadata().items():
+            combined_pointer = json_pointer(
+                (*pointer_prefix, *_pointer_segments(pointer))
+            )
+            all_metadata.setdefault(combined_pointer, {}).update(metadata)
+
+    if len(parsed_documents) == 1:
+        parsed_value = parsed_documents[0]
+    else:
+        parsed_value = {
+            "documents": {
+                str(index): value for index, value in enumerate(parsed_documents)
+            }
+        }
+    return parsed_value, all_metadata, len(parsed_documents)
+
+
+def _split_yaml_documents(content: str) -> list[tuple[tuple[int, str], ...]]:
+    documents: list[list[tuple[int, str]]] = [[]]
+    for line_number, line in enumerate(content.splitlines(), start=1):
+        stripped = line.strip()
+        if stripped == "---":
+            if documents[-1]:
+                documents.append([])
+            continue
+        if stripped == "...":
+            if documents[-1]:
+                documents.append([])
+            continue
+        documents[-1].append((line_number, line))
+    return [tuple(document) for document in documents if document] or [()]
+
+
+def _yaml_logical_lines(lines: tuple[tuple[int, str], ...]) -> tuple[_YamlLine, ...]:
+    logical_lines: list[_YamlLine] = []
+    for line_number, raw_line in lines:
+        if "\t" in raw_line[: len(raw_line) - len(raw_line.lstrip(" \t"))]:
+            raise YamlParseError(
+                "tabs are not supported for YAML indentation",
+                line_number=line_number,
+            )
+        stripped_comment = _strip_yaml_comment(raw_line).rstrip()
+        if not stripped_comment.strip():
+            continue
+        indent = len(stripped_comment) - len(stripped_comment.lstrip(" "))
+        logical_lines.append(
+            _YamlLine(
+                indent=indent,
+                text=stripped_comment.strip(),
+                line_number=line_number,
+            )
+        )
+    return tuple(logical_lines)
+
+
+def _parse_yaml_block(
+    lines: tuple[_YamlLine, ...],
+    index: int,
+    indent: int,
+    state: _YamlParseState,
+    *,
+    pointer_segments: tuple[str, ...],
+    depth: int,
+) -> tuple[Any, int]:
+    if depth > YAML_MAX_DEPTH:
+        raise YamlParseError(
+            "YAML nesting exceeds conservative depth limit",
+            error_kind="yaml-depth-limit",
+            line_number=lines[index].line_number if index < len(lines) else None,
+        )
+    if index >= len(lines):
+        return None, index
+    line = lines[index]
+    if line.indent < indent:
+        return None, index
+    if line.indent > indent:
+        raise YamlParseError(
+            "unexpected YAML indentation",
+            line_number=line.line_number,
+        )
+    if line.text.startswith("- "):
+        return _parse_yaml_sequence(
+            lines,
+            index,
+            indent,
+            state,
+            pointer_segments=pointer_segments,
+            depth=depth,
+        )
+    return _parse_yaml_mapping(
+        lines,
+        index,
+        indent,
+        state,
+        pointer_segments=pointer_segments,
+        depth=depth,
+    )
+
+
+def _parse_yaml_mapping(
+    lines: tuple[_YamlLine, ...],
+    index: int,
+    indent: int,
+    state: _YamlParseState,
+    *,
+    pointer_segments: tuple[str, ...],
+    depth: int,
+) -> tuple[dict[str, Any], int]:
+    mapping: dict[str, Any] = {}
+    seen_keys: set[str] = set()
+    while index < len(lines):
+        line = lines[index]
+        if line.indent < indent:
+            break
+        if line.indent > indent:
+            raise YamlParseError(
+                "unexpected YAML indentation",
+                line_number=line.line_number,
+            )
+        if line.text.startswith("- "):
+            break
+        key, value_text = _split_yaml_mapping_pair(line.text, line.line_number)
+        if key in seen_keys:
+            raise YamlParseError(
+                f"duplicate YAML key: {key}",
+                error_kind="duplicate-yaml-key",
+                line_number=line.line_number,
+            )
+        seen_keys.add(key)
+        child_segments = (*pointer_segments, key)
+        value, index = _yaml_value_or_nested_block(
+            lines,
+            index,
+            indent,
+            value_text,
+            state,
+            pointer_segments=child_segments,
+            depth=depth,
+        )
+        mapping[key] = value
+        state.node_count += 1
+        if state.node_count > YAML_MAX_NODES:
+            raise YamlParseError(
+                "YAML node count exceeds conservative limit",
+                error_kind="yaml-node-count-limit",
+                line_number=line.line_number,
+            )
+    return mapping, index
+
+
+def _parse_yaml_sequence(
+    lines: tuple[_YamlLine, ...],
+    index: int,
+    indent: int,
+    state: _YamlParseState,
+    *,
+    pointer_segments: tuple[str, ...],
+    depth: int,
+) -> tuple[list[Any], int]:
+    sequence: list[Any] = []
+    while index < len(lines):
+        line = lines[index]
+        if line.indent < indent:
+            break
+        if line.indent > indent:
+            raise YamlParseError(
+                "unexpected YAML indentation",
+                line_number=line.line_number,
+            )
+        if not line.text.startswith("- "):
+            break
+        item_text = line.text[2:].strip()
+        item_index = len(sequence)
+        child_segments = (*pointer_segments, str(item_index))
+        if not item_text:
+            next_index = index + 1
+            if next_index < len(lines) and lines[next_index].indent > indent:
+                value, index = _parse_yaml_block(
+                    lines,
+                    next_index,
+                    lines[next_index].indent,
+                    state,
+                    pointer_segments=child_segments,
+                    depth=depth + 1,
+                )
+            else:
+                value, index = None, next_index
+        elif _looks_like_yaml_mapping_pair(item_text):
+            key, value_text = _split_yaml_mapping_pair(item_text, line.line_number)
+            item_mapping: dict[str, Any] = {}
+            value, next_index = _yaml_value_or_nested_block(
+                lines,
+                index,
+                indent,
+                value_text,
+                state,
+                pointer_segments=(*child_segments, key),
+                depth=depth,
+            )
+            item_mapping[key] = value
+            if next_index < len(lines) and lines[next_index].indent > indent:
+                extra, next_index = _parse_yaml_block(
+                    lines,
+                    next_index,
+                    lines[next_index].indent,
+                    state,
+                    pointer_segments=child_segments,
+                    depth=depth + 1,
+                )
+                if isinstance(extra, dict):
+                    for extra_key, extra_value in extra.items():
+                        if extra_key in item_mapping:
+                            raise YamlParseError(
+                                f"duplicate YAML key: {extra_key}",
+                                error_kind="duplicate-yaml-key",
+                                line_number=line.line_number,
+                            )
+                        item_mapping[extra_key] = extra_value
+                else:
+                    raise YamlParseError(
+                        "sequence item cannot combine scalar and nested sequence",
+                        line_number=line.line_number,
+                    )
+            value, index = item_mapping, next_index
+        else:
+            parsed = _parse_yaml_scalar(item_text, line.line_number, state)
+            _record_yaml_value_metadata(
+                parsed,
+                state,
+                pointer_segments=child_segments,
+                merge_key=False,
+            )
+            value = parsed.value
+            index += 1
+        sequence.append(value)
+        state.node_count += 1
+        if state.node_count > YAML_MAX_NODES:
+            raise YamlParseError(
+                "YAML node count exceeds conservative limit",
+                error_kind="yaml-node-count-limit",
+                line_number=line.line_number,
+            )
+    return sequence, index
+
+
+def _yaml_value_or_nested_block(
+    lines: tuple[_YamlLine, ...],
+    index: int,
+    indent: int,
+    value_text: str,
+    state: _YamlParseState,
+    *,
+    pointer_segments: tuple[str, ...],
+    depth: int,
+) -> tuple[Any, int]:
+    line = lines[index]
+    parsed = _parse_yaml_scalar(value_text, line.line_number, state)
+    next_index = index + 1
+    merge_key = bool(pointer_segments and pointer_segments[-1] == "<<")
+    if parsed.metadata_only and next_index < len(lines) and lines[next_index].indent > indent:
+        value, next_index = _parse_yaml_block(
+            lines,
+            next_index,
+            lines[next_index].indent,
+            state,
+            pointer_segments=pointer_segments,
+            depth=depth + 1,
+        )
+    elif parsed.metadata_only:
+        value = None
+    else:
+        value = parsed.value
+    _record_yaml_value_metadata(
+        parsed,
+        state,
+        pointer_segments=pointer_segments,
+        merge_key=merge_key,
+    )
+    return value, next_index
+
+
+def _parse_yaml_scalar(
+    text: str,
+    line_number: int,
+    state: _YamlParseState,
+) -> _YamlValue:
+    stripped = text.strip()
+    yaml_tag: str | None = None
+    anchor: str | None = None
+    while True:
+        token, rest = _yaml_first_token(stripped)
+        if token is not None and YAML_TAG_PATTERN.match(token):
+            yaml_tag = token
+            stripped = rest
+            continue
+        if token is not None and YAML_ANCHOR_PATTERN.match(token):
+            anchor = token[1:]
+            stripped = rest
+            continue
+        break
+    if not stripped:
+        return _YamlValue(None, yaml_tag=yaml_tag, anchor=anchor, metadata_only=True)
+    if YAML_ALIAS_PATTERN.match(stripped):
+        state.alias_count += 1
+        if state.alias_count > YAML_MAX_ALIASES:
+            raise YamlParseError(
+                "YAML alias count exceeds conservative limit",
+                error_kind="yaml-alias-count-limit",
+                line_number=line_number,
+            )
+        return _YamlValue(
+            stripped[1:],
+            yaml_tag=yaml_tag,
+            anchor=anchor,
+            alias=stripped[1:],
+        )
+    if len(stripped) > YAML_MAX_SCALAR_LENGTH:
+        raise YamlParseError(
+            "YAML scalar exceeds conservative length limit",
+            error_kind="yaml-scalar-length-limit",
+            line_number=line_number,
+        )
+    if stripped.startswith("["):
+        if not stripped.endswith("]"):
+            raise YamlParseError(
+                "unterminated YAML inline sequence",
+                line_number=line_number,
+            )
+        return _YamlValue(
+            _parse_yaml_inline_sequence(stripped, line_number, state),
+            yaml_tag=yaml_tag,
+            anchor=anchor,
+        )
+    if stripped.startswith("{"):
+        if not stripped.endswith("}"):
+            raise YamlParseError(
+                "unterminated YAML inline mapping",
+                line_number=line_number,
+            )
+        return _YamlValue(
+            _parse_yaml_inline_mapping(stripped, line_number, state),
+            yaml_tag=yaml_tag,
+            anchor=anchor,
+        )
+    return _YamlValue(_parse_yaml_plain_scalar(stripped), yaml_tag=yaml_tag, anchor=anchor)
+
+
+def _record_yaml_value_metadata(
+    parsed: _YamlValue,
+    state: _YamlParseState,
+    *,
+    pointer_segments: tuple[str, ...],
+    merge_key: bool,
+) -> None:
+    if not pointer_segments:
+        return
+    metadata: dict[str, Any] = {}
+    if parsed.yaml_tag is not None:
+        metadata["yaml_tag"] = parsed.yaml_tag
+        if _is_secret_key(parsed.yaml_tag):
+            metadata["redacted"] = True
+            metadata["redaction_reason"] = "secret-prone-yaml-tag"
+    if parsed.anchor is not None:
+        metadata["anchor"] = parsed.anchor
+    if parsed.alias is not None:
+        metadata["alias"] = parsed.alias
+    if merge_key:
+        metadata["merge_key"] = True
+    if not metadata:
+        return
+    pointer = json_pointer(pointer_segments)
+    state.metadata().setdefault(pointer, {}).update(metadata)
+
+
+def _strip_yaml_comment(line: str) -> str:
+    output: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for index, character in enumerate(line):
+        if quote is not None:
+            output.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\" and quote == '"':
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in ("'", '"'):
+            quote = character
+            output.append(character)
+            continue
+        if character == "#" and (index == 0 or line[index - 1].isspace()):
+            break
+        output.append(character)
+    return "".join(output)
+
+
+def _yaml_first_token(text: str) -> tuple[str | None, str]:
+    stripped = text.strip()
+    if not stripped:
+        return None, ""
+    parts = stripped.split(None, 1)
+    token = parts[0]
+    rest = parts[1].strip() if len(parts) > 1 else ""
+    return token, rest
+
+
+def _split_yaml_mapping_pair(text: str, line_number: int) -> tuple[str, str]:
+    index = _yaml_mapping_colon_index(text)
+    if index is None:
+        raise YamlParseError("expected YAML mapping pair", line_number=line_number)
+    key_text = text[:index].strip()
+    if not key_text:
+        raise YamlParseError("YAML mapping key is empty", line_number=line_number)
+    key = _unquote_yaml_scalar(key_text)
+    if not isinstance(key, str):
+        key = str(key)
+    return key, text[index + 1 :].strip()
+
+
+def _looks_like_yaml_mapping_pair(text: str) -> bool:
+    return _yaml_mapping_colon_index(text) is not None
+
+
+def _yaml_mapping_colon_index(text: str) -> int | None:
+    quote: str | None = None
+    escaped = False
+    for index, character in enumerate(text):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\" and quote == '"':
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in ("'", '"'):
+            quote = character
+            continue
+        if character == ":":
+            next_character = text[index + 1] if index + 1 < len(text) else ""
+            if not next_character or next_character.isspace():
+                return index
+    return None
+
+
+def _parse_yaml_inline_sequence(
+    text: str,
+    line_number: int,
+    state: _YamlParseState,
+) -> list[Any]:
+    inner = text[1:-1].strip()
+    if not inner:
+        return []
+    return [
+        _parse_yaml_scalar(item, line_number, state).value
+        for item in _split_yaml_inline_items(inner, line_number)
+    ]
+
+
+def _parse_yaml_inline_mapping(
+    text: str,
+    line_number: int,
+    state: _YamlParseState,
+) -> dict[str, Any]:
+    inner = text[1:-1].strip()
+    if not inner:
+        return {}
+    result: dict[str, Any] = {}
+    for item in _split_yaml_inline_items(inner, line_number):
+        key, value_text = _split_yaml_mapping_pair(item, line_number)
+        if key in result:
+            raise YamlParseError(
+                f"duplicate YAML key: {key}",
+                error_kind="duplicate-yaml-key",
+                line_number=line_number,
+            )
+        result[key] = _parse_yaml_scalar(value_text, line_number, state).value
+    return result
+
+
+def _split_yaml_inline_items(text: str, line_number: int) -> tuple[str, ...]:
+    items: list[str] = []
+    start = 0
+    quote: str | None = None
+    escaped = False
+    depth = 0
+    for index, character in enumerate(text):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\" and quote == '"':
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in ("'", '"'):
+            quote = character
+            continue
+        if character in "[{":
+            depth += 1
+            continue
+        if character in "]}":
+            depth -= 1
+            if depth < 0:
+                raise YamlParseError(
+                    "malformed YAML inline collection",
+                    line_number=line_number,
+                )
+            continue
+        if character == "," and depth == 0:
+            item = text[start:index].strip()
+            if item:
+                items.append(item)
+            start = index + 1
+    tail = text[start:].strip()
+    if tail:
+        items.append(tail)
+    return tuple(items)
+
+
+def _parse_yaml_plain_scalar(text: str) -> Any:
+    unquoted = _unquote_yaml_scalar(text)
+    if unquoted != text:
+        return unquoted
+    normalized = text.lower()
+    if normalized in ("true", "false"):
+        return normalized == "true"
+    if normalized in ("null", "~"):
+        return None
+    if re.fullmatch(r"[-+]?[0-9]+", text):
+        try:
+            return int(text)
+        except ValueError:
+            return text
+    if re.fullmatch(r"[-+]?[0-9]+\.[0-9]+", text):
+        try:
+            return float(text)
+        except ValueError:
+            return text
+    return text
+
+
+def _unquote_yaml_scalar(text: str) -> Any:
+    stripped = text.strip()
+    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in ("'", '"'):
+        body = stripped[1:-1]
+        if stripped[0] == '"':
+            try:
+                return bytes(body, "utf-8").decode("unicode_escape")
+            except UnicodeDecodeError:
+                return body
+        return body.replace("''", "'")
+    return text
+
+
+def _yaml_profile(
+    relative_path: str,
+    value: Any,
+    *,
+    document_count: int,
+) -> str:
+    path = PurePosixPath(relative_path)
+    path_parts = tuple(_normalized_key(part) for part in path.parts)
+    name = path.name
+    normalized_name = _normalized_key(name)
+    if ".github" in path.parts and "workflows" in path.parts:
+        return "github_actions"
+    if ".circleci" in path.parts and name in ("config.yml", "config.yaml"):
+        return "circleci"
+    if normalized_name in ("docker_compose.yml", "docker_compose.yaml") or name in (
+        "docker-compose.yml",
+        "docker-compose.yaml",
+    ):
+        return "docker_compose"
+    if name == "Chart.yaml":
+        return "helm_chart"
+    if name == "values.yaml":
+        return "helm_values"
+    if name == "application.yml" or name == "application.yaml" or normalized_name.startswith("application_"):
+        return "spring_boot"
+    if "grafana" in path_parts:
+        return "grafana"
+    if "serena" in normalized_name or "serena" in path_parts:
+        return "serena"
+    if "arq" in normalized_name or "arq" in path_parts:
+        return "arq_backup"
+    documents = _yaml_documents(value, document_count=document_count)
+    if any(_is_openapi_document(document) for document in documents):
+        return "openapi"
+    if any(_is_kubernetes_document(document) for document in documents):
+        return "kubernetes"
+    if any(isinstance(document, dict) and "pipeline" in document for document in documents):
+        return "harness"
+    if any(_is_docker_compose_document(document) for document in documents):
+        return "docker_compose"
+    if any(_is_grafana_document(document) for document in documents):
+        return "grafana"
+    return "generic_yaml"
+
+
+def _yaml_documents(value: Any, *, document_count: int) -> tuple[Any, ...]:
+    if (
+        document_count > 1
+        and isinstance(value, dict)
+        and isinstance(value.get("documents"), dict)
+    ):
+        documents = value["documents"]
+        return tuple(documents[str(index)] for index in range(document_count))
+    return (value,)
+
+
+def _is_openapi_document(value: Any) -> bool:
+    return isinstance(value, dict) and (
+        "openapi" in value
+        or "swagger" in value
+        or ("paths" in value and "components" in value)
+    )
+
+
+def _is_kubernetes_document(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and "apiVersion" in value
+        and "kind" in value
+        and isinstance(value.get("metadata"), dict)
+    )
+
+
+def _is_docker_compose_document(value: Any) -> bool:
+    return isinstance(value, dict) and "services" in value and (
+        "networks" in value or "volumes" in value or "secrets" in value
+    )
+
+
+def _is_grafana_document(value: Any) -> bool:
+    return isinstance(value, dict) and (
+        "datasources" in value or "dashboards" in value or "secureJsonData" in value
+    )
+
+
+def _apply_yaml_profile_metadata(
+    value: Any,
+    metadata_overrides: dict[str, dict[str, Any]],
+    *,
+    profile: str,
+    document_count: int,
+) -> None:
+    for pointer, path_value in _yaml_pointer_values(value):
+        metadata = metadata_overrides.setdefault(pointer, {})
+        metadata["profile"] = profile
+        if document_count > 1:
+            document_index = _yaml_document_index_from_pointer(pointer)
+            if document_index is not None:
+                metadata["document_index"] = document_index
+        if _yaml_pointer_is_redacted(
+            pointer,
+            path_value=path_value,
+            root_value=value,
+            profile=profile,
+        ):
+            metadata["redacted"] = True
+            metadata.setdefault("redaction_reason", _yaml_redaction_reason(pointer, profile))
+    _apply_yaml_stable_array_metadata(value, metadata_overrides)
+
+
+def _apply_yaml_stable_array_metadata(
+    value: Any,
+    metadata_overrides: dict[str, dict[str, Any]],
+) -> None:
+    def walk(
+        current: Any,
+        segments: tuple[str, ...],
+        active_stable_keys: tuple[str, ...],
+    ) -> None:
+        if segments and active_stable_keys:
+            metadata_overrides.setdefault(json_pointer(segments), {}).setdefault(
+                "stable_member_keys",
+                list(active_stable_keys),
+            )
+        if isinstance(current, dict):
+            for key, child in current.items():
+                walk(child, (*segments, str(key)), active_stable_keys)
+            return
+        if isinstance(current, list):
+            stable_members = _stable_array_members(current)
+            if not stable_members:
+                return
+            stable_keys = tuple(sorted({member.key for member in stable_members}))
+            for member in stable_members:
+                walk(member.value, (*segments, member.segment), stable_keys)
+
+    walk(value, (), ())
+
+
+def _yaml_pointer_values(value: Any) -> tuple[tuple[str, Any], ...]:
+    result: list[tuple[str, Any]] = []
+
+    def walk(current: Any, segments: tuple[str, ...]) -> None:
+        if segments:
+            result.append((json_pointer(segments), current))
+        if isinstance(current, dict):
+            for key, child in current.items():
+                walk(child, (*segments, str(key)))
+        elif isinstance(current, list):
+            for member in _stable_array_members(current):
+                walk(member.value, (*segments, member.segment))
+
+    walk(value, ())
+    return tuple(result)
+
+
+def _yaml_document_index_from_pointer(pointer: str) -> int | None:
+    segments = _pointer_segments(pointer)
+    if len(segments) >= 2 and segments[0] == "documents" and segments[1].isdigit():
+        return int(segments[1])
+    return None
+
+
+def _yaml_pointer_is_redacted(
+    pointer: str,
+    *,
+    path_value: Any,
+    root_value: Any,
+    profile: str,
+) -> bool:
+    segments = _pointer_segments(pointer)
+    normalized_segments = tuple(_normalized_key(segment) for segment in segments)
+    if _is_secret_pointer(pointer):
+        return True
+    if any(segment in ("securejsondata", "dockerconfigjson") for segment in normalized_segments):
+        return True
+    if profile == "kubernetes" and _yaml_pointer_is_kubernetes_secret_data(pointer, root_value):
+        return True
+    if profile == "github_actions" and "secrets" in normalized_segments:
+        return True
+    if profile == "grafana" and "securejsondata" in normalized_segments:
+        return True
+    return _looks_like_secret_scalar(path_value)
+
+
+def _yaml_pointer_is_kubernetes_secret_data(pointer: str, root_value: Any) -> bool:
+    segments = _pointer_segments(pointer)
+    if "data" not in segments and "stringData" not in segments:
+        return False
+    if len(segments) >= 2 and segments[0] == "documents" and segments[1].isdigit():
+        document = root_value.get("documents", {}).get(segments[1]) if isinstance(root_value, dict) else None
+    else:
+        document = root_value
+    return isinstance(document, dict) and document.get("kind") == "Secret"
+
+
+def _yaml_redaction_reason(pointer: str, profile: str) -> str:
+    if profile == "kubernetes" and (
+        "/data/" in pointer or "/stringData/" in pointer
+    ):
+        return "secret-prone-yaml-path"
+    if _is_secret_pointer(pointer):
+        return "secret-prone-yaml-path"
+    return "secret-prone-yaml-context"
+
+
+def _looks_like_secret_scalar(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    if "-----BEGIN " in stripped and "PRIVATE KEY-----" in stripped:
+        return True
+    if len(stripped) >= 32 and re.fullmatch(r"[A-Za-z0-9_./+=:-]+", stripped):
+        markers = ("token", "secret", "password", "key")
+        return any(marker in stripped.lower() for marker in markers)
+    return False
 
 
 def _extract_plist_xml_observations(
@@ -1146,6 +2099,7 @@ def _structure_observations(
     content: str,
     source_suffix: str = "",
     line_offset: int = 0,
+    metadata_overrides: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[tuple[RawObservation, ...], tuple[RawObservation, ...]]:
     paths: list[RawObservation] = []
     references: list[RawObservation] = []
@@ -1159,6 +2113,7 @@ def _structure_observations(
         content=content,
         source_suffix=source_suffix,
         line_offset=line_offset,
+        metadata_overrides=metadata_overrides or {},
         paths=paths,
         references=references,
     )
@@ -1176,11 +2131,13 @@ def _walk_value(
     content: str,
     source_suffix: str,
     line_offset: int,
+    metadata_overrides: dict[str, dict[str, Any]],
     paths: list[RawObservation],
     references: list[RawObservation],
 ) -> None:
     if pointer_segments:
         pointer = json_pointer(pointer_segments)
+        metadata_override = metadata_overrides.get(pointer, {})
         path_observation = _path_observation(
             relative_path,
             pointer,
@@ -1191,6 +2148,7 @@ def _walk_value(
             content=content,
             source_suffix=source_suffix,
             line_offset=line_offset,
+            metadata_override=metadata_override,
         )
         paths.append(path_observation)
         references.extend(
@@ -1207,6 +2165,7 @@ def _walk_value(
                 content=content,
                 source_suffix=source_suffix,
                 line_offset=line_offset,
+                metadata_override=metadata_override,
             )
         )
     if isinstance(value, dict):
@@ -1221,6 +2180,7 @@ def _walk_value(
                 content=content,
                 source_suffix=source_suffix,
                 line_offset=line_offset,
+                metadata_overrides=metadata_overrides,
                 paths=paths,
                 references=references,
             )
@@ -1236,6 +2196,7 @@ def _walk_value(
                 content=content,
                 source_suffix=source_suffix,
                 line_offset=line_offset,
+                metadata_overrides=metadata_overrides,
                 paths=paths,
                 references=references,
             )
@@ -1252,8 +2213,10 @@ def _path_observation(
     content: str,
     source_suffix: str,
     line_offset: int,
+    metadata_override: dict[str, Any] | None = None,
 ) -> RawObservation:
-    redacted = _is_secret_pointer(pointer)
+    metadata_override = metadata_override or {}
+    redacted = bool(metadata_override.get("redacted")) or _is_secret_pointer(pointer)
     metadata = _path_metadata(
         pointer,
         value,
@@ -1261,6 +2224,12 @@ def _path_observation(
         format_name=format_name,
         redacted=redacted,
     )
+    if metadata_override:
+        metadata.update(metadata_override)
+        if metadata.get("redacted"):
+            metadata.pop("value_summary", None)
+            metadata.pop("value_summaries", None)
+            metadata.setdefault("redaction_reason", "secret-prone-key")
     line_number = _line_for_pointer(content, pointer)
     if line_number is not None:
         line_number += line_offset
@@ -1330,7 +2299,7 @@ def _path_metadata(
 
 
 def _uses_stable_array_member_paths(format_name: str) -> bool:
-    return format_name in ("toml", PLIST_XML_FORMAT)
+    return format_name in ("toml", PLIST_XML_FORMAT, YAML_FORMAT)
 
 
 class _StableArrayMember:
@@ -1383,9 +2352,18 @@ def _reference_observations_for_value(
     content: str,
     source_suffix: str,
     line_offset: int,
+    metadata_override: dict[str, Any] | None = None,
 ) -> tuple[RawObservation, ...]:
     pointer = json_pointer(pointer_segments)
-    references = _detect_references(relative_path, pointer_segments, value)
+    metadata_override = metadata_override or {}
+    if metadata_override.get("redacted"):
+        return ()
+    references = _detect_references(
+        relative_path,
+        pointer_segments,
+        value,
+        format_name=format_name,
+    )
     observations: list[RawObservation] = []
     for ordinal, reference in enumerate(references):
         line_number = _line_for_pointer(content, pointer)
@@ -1404,6 +2382,10 @@ def _reference_observations_for_value(
         if format_name == PLIST_XML_FORMAT:
             metadata["parser"] = _parser_name(format_name)
             metadata["safety_mode"] = PLIST_XML_SAFETY_MODE
+        if format_name == YAML_FORMAT:
+            for key in ("profile", "document_index", "yaml_tag", "anchor", "alias", "merge_key"):
+                if key in metadata_override:
+                    metadata[key] = metadata_override[key]
         if "summary" in reference:
             metadata["raw_value_summary"] = reference["summary"]
         if reference["redacted"]:
@@ -1433,6 +2415,8 @@ def _detect_references(
     relative_path: str,
     pointer_segments: tuple[str, ...],
     value: Any,
+    *,
+    format_name: str = "",
 ) -> tuple[dict[str, Any], ...]:
     if not pointer_segments:
         return ()
@@ -1453,6 +2437,8 @@ def _detect_references(
                 key_normalized,
                 pointer_key_normalized,
                 value,
+                pointer_segments=pointer_segments,
+                format_name=format_name,
                 redacted=redacted,
             )
         )
@@ -1469,8 +2455,21 @@ def _string_references(
     pointer_key_normalized: str,
     value: str,
     *,
+    pointer_segments: tuple[str, ...],
+    format_name: str,
     redacted: bool,
 ) -> tuple[dict[str, Any], ...]:
+    if format_name == YAML_FORMAT:
+        yaml_references = _yaml_string_references(
+            relative_path,
+            pointer_segments,
+            key_normalized,
+            pointer_key_normalized,
+            value,
+            redacted=redacted,
+        )
+        if yaml_references:
+            return yaml_references
     if _is_url(value):
         return (
             _reference(
@@ -1500,6 +2499,149 @@ def _string_references(
     ):
         return (_file_reference(relative_path, value, redacted=redacted),)
     return ()
+
+
+def _yaml_string_references(
+    relative_path: str,
+    pointer_segments: tuple[str, ...],
+    key_normalized: str,
+    pointer_key_normalized: str,
+    value: str,
+    *,
+    redacted: bool,
+) -> tuple[dict[str, Any], ...]:
+    stripped = value.strip()
+    if not stripped:
+        return ()
+    if pointer_segments[-1] == "$ref" or key_normalized in ("$ref", "ref"):
+        return (_yaml_openapi_ref(relative_path, stripped, redacted=redacted),)
+    if key_normalized == "uses":
+        return (_yaml_uses_reference(relative_path, stripped, redacted=redacted),)
+    if key_normalized == "image" and _looks_like_container_image(stripped):
+        return (
+            _reference(
+                "external",
+                external_key("docker.image", stripped),
+                "yaml-container-image",
+                stripped,
+                redacted=redacted,
+            ),
+        )
+    if key_normalized in ("context", "dockerfile", "env_file"):
+        return (_file_reference(relative_path, stripped, redacted=redacted),)
+    if key_normalized in ("import", "additional_location", "location"):
+        spring_file = _yaml_spring_file_reference_value(stripped)
+        if spring_file is not None:
+            return (_file_reference(relative_path, spring_file, redacted=redacted),)
+    if key_normalized in ("repository", "url") and _is_url(stripped):
+        return (
+            _reference(
+                "external.url",
+                external_url_key(stripped),
+                "yaml-url-field",
+                stripped,
+                redacted=redacted,
+            ),
+        )
+    if "path" in pointer_key_normalized or key_normalized in (
+        "file",
+        "files",
+        "config",
+        "config_path",
+        "include_file",
+    ):
+        return (_file_reference(relative_path, stripped, redacted=redacted),)
+    return ()
+
+
+def _yaml_openapi_ref(
+    relative_path: str,
+    value: str,
+    *,
+    redacted: bool,
+) -> dict[str, Any]:
+    if _is_url(value):
+        return _reference(
+            "external.url",
+            external_url_key(value),
+            "openapi-remote-ref",
+            value,
+            redacted=redacted,
+        )
+    if value.startswith("#/"):
+        return _reference(
+            "config.path",
+            config_path_key(relative_path, value[1:]),
+            "openapi-local-pointer-ref",
+            value,
+            redacted=redacted,
+        )
+    if "#" in value:
+        path_part, pointer_part = value.split("#", 1)
+        if path_part and not _is_dynamic_value(path_part):
+            target = _file_reference(relative_path, path_part, redacted=redacted)
+            target["reason"] = "openapi-local-file-ref"
+            if pointer_part:
+                target["summary"] = _safe_value_summary(value)
+            return target
+    return _file_reference(relative_path, value, redacted=redacted)
+
+
+def _yaml_uses_reference(
+    relative_path: str,
+    value: str,
+    *,
+    redacted: bool,
+) -> dict[str, Any]:
+    if value.startswith("./"):
+        resolved = _normalize_repo_path(value)
+        if resolved is None:
+            return _reference(
+                "unknown",
+                unknown_key("file", "repo-escaping-config-reference"),
+                "repo-escaping-file-reference",
+                value,
+                redacted=redacted,
+            )
+        return _reference(
+            "file",
+            file_key(resolved),
+            "github-actions-local-uses",
+            value,
+            redacted=redacted,
+        )
+    if value.startswith(("../", "/")):
+        return _file_reference(relative_path, value, redacted=redacted)
+    if _is_dynamic_value(value):
+        return _reference(
+            "dynamic",
+            dynamic_key("github.action", "dynamic-yaml-uses"),
+            "dynamic-yaml-uses",
+            value,
+            redacted=redacted,
+        )
+    return _reference(
+        "external",
+        external_key("github.action", value),
+        "github-actions-uses",
+        value,
+        redacted=redacted,
+    )
+
+
+def _yaml_spring_file_reference_value(value: str) -> str | None:
+    for prefix in ("optional:file:", "file:"):
+        if value.startswith(prefix):
+            return value.removeprefix(prefix)
+    return None
+
+
+def _looks_like_container_image(value: str) -> bool:
+    if _is_url(value) or value.startswith(("./", "../", "/", "$", "~")):
+        return False
+    return bool(YAML_SIMPLE_IMAGE_PATTERN.match(value)) and (
+        "/" in value or ":" in value or "@" in value
+    )
 
 
 def _tool_reference_from_command(command: str, *, redacted: bool) -> dict[str, Any]:
@@ -1624,6 +2766,7 @@ def _document_observation(
     path_count: int,
     record_count: int | None,
     parse_error_count: int,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> RawObservation:
     metadata: dict[str, Any] = {
         "format": format_name,
@@ -1637,6 +2780,8 @@ def _document_observation(
         metadata["safety_mode"] = PLIST_XML_SAFETY_MODE
     if record_count is not None:
         metadata["record_count"] = record_count
+    if extra_metadata:
+        metadata.update(extra_metadata)
     return RawObservation(
         kind="config.document",
         source_id=f"{relative_path}#config-document",
@@ -1770,6 +2915,8 @@ def _safe_error_message(
 
 
 def _parser_name(format_name: str) -> str:
+    if format_name == YAML_FORMAT:
+        return YAML_PARSER
     if format_name == "jsonc":
         return "jsonc-conservative"
     if format_name == "toml":
@@ -1792,9 +2939,17 @@ def _line_for_pointer(content: str, pointer: str) -> int | None:
     toml_pattern = re.compile(
         rf"^\s*(?:{re.escape(key)}|\"{re.escape(key)}\"|'{re.escape(key)}')\s*="
     )
+    yaml_pattern = re.compile(
+        rf"^\s*(?:{re.escape(key)}|\"{re.escape(key)}\"|'{re.escape(key)}')\s*:"
+    )
     plist_pattern = re.compile(rf"<key>\s*{re.escape(key)}\s*</key>")
     for line_number, line in enumerate(content.splitlines(), start=1):
-        if json_pattern.search(line) or toml_pattern.search(line) or plist_pattern.search(line):
+        if (
+            json_pattern.search(line)
+            or toml_pattern.search(line)
+            or yaml_pattern.search(line)
+            or plist_pattern.search(line)
+        ):
             return line_number
     return None
 

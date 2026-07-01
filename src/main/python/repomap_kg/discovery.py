@@ -186,7 +186,15 @@ def discover_observations(
             if feed_observations:
                 observations.extend(feed_observations)
                 continue
-        if file_info.language in ("json", "jsonc", "jsonl", "toml", "plist", "xml"):
+        if file_info.language in (
+            "json",
+            "jsonc",
+            "jsonl",
+            "toml",
+            "plist",
+            "xml",
+            "yaml",
+        ):
             observations.extend(
                 extract_config_file_observations_from_file(
                     repository_root,

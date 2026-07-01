@@ -34,6 +34,7 @@ class CanonicalizationFixtureTests(unittest.TestCase):
             "config_json_basic",
             "config_toml_basic",
             "config_codex_mcp_dogfood",
+            "yaml_basic",
             "xml_plist_chrome_policy_basic",
             "xml_java_spring_maven_basic",
             "html_static_basic",

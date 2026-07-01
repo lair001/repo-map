@@ -222,6 +222,49 @@ class DiscoveryUnitTests(unittest.TestCase):
         self.assertIn(".jsonl", {item.path[-6:] for item in observations})
         self.assertIn(".jsonc", {item.path[-6:] for item in observations})
 
+    def test_discover_observations_includes_yaml_config_facts(self):
+        observations = discover_observations(FIXTURE_ROOT / "yaml_basic")
+
+        payload = "\n".join(item.to_json_line() for item in observations)
+        kinds = {observation.kind for observation in observations}
+        yaml_documents = [
+            observation
+            for observation in observations
+            if observation.kind == "config.document"
+            and observation.metadata.get("format") == "yaml"
+        ]
+        yaml_references = [
+            observation
+            for observation in observations
+            if observation.kind == "config.reference"
+            and observation.metadata.get("format") == "yaml"
+        ]
+        profiles = {
+            observation.metadata.get("profile")
+            for observation in yaml_documents
+        }
+
+        self.assertIn("config.document", kinds)
+        self.assertIn("config.path", kinds)
+        self.assertIn("config.reference", kinds)
+        self.assertIn("config.parse_error", kinds)
+        self.assertIn("github_actions", profiles)
+        self.assertIn("kubernetes", profiles)
+        self.assertIn("openapi", profiles)
+        self.assertIn("docker_compose", profiles)
+        self.assertIn("generic_yaml", profiles)
+        self.assertIn(
+            "external:github.action:actions%2Fcheckout%40v4",
+            {observation.target for observation in yaml_references},
+        )
+        self.assertIn(
+            "external:docker.image:example%2Fapp%3Alatest",
+            {observation.target for observation in yaml_references},
+        )
+        self.assertNotIn("fake-actions-token", payload)
+        self.assertNotIn("fake-kubernetes-password", payload)
+        self.assertNotIn("fake-client-secret", payload)
+
     def test_discover_observations_keeps_plist_config_and_extracts_generic_xml(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

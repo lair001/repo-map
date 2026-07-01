@@ -4738,6 +4738,9 @@ def _config_document_node_metadata(metadata: Mapping[str, Any]) -> dict[str, Any
         "path_count",
         "record_count",
         "parse_error_count",
+        "profile",
+        "document_count",
+        "duplicate_key_policy",
     ):
         if key in metadata:
             summary[key] = metadata[key]
@@ -4759,6 +4762,12 @@ def _config_path_node_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
         "item_count",
         "value_summaries",
         "stable_member_key",
+        "profile",
+        "document_index",
+        "yaml_tag",
+        "anchor",
+        "alias",
+        "merge_key",
     ):
         if key in metadata:
             summary[key] = metadata[key]

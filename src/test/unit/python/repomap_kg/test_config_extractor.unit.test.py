@@ -7,6 +7,10 @@ from repomap_kg.config_extractor import (
 )
 
 
+def observations_format(observations):
+    return observations[0].metadata["format"]
+
+
 class ConfigExtractorUnitTests(unittest.TestCase):
     def test_extracts_json_paths_references_and_redacts_secret_values(self):
         observations = extract_config_file_observations(
@@ -483,6 +487,268 @@ program = "echo hello"
         self.assertIn("dynamic:file:config-reference-expanded-from-variable", {item.target for item in references})
         self.assertIn("dynamic:tool:config-command-fragment", {item.target for item in references})
         self.assertIn("dynamic:env:dynamic-config-env-name", {item.target for item in references})
+
+    def test_yaml_paths_profiles_references_and_redaction(self):
+        observations = extract_config_file_observations(
+            ".github/workflows/build.yml",
+            """
+name: Build
+on:
+  push:
+    branches:
+      - main
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      API_TOKEN: fake-yaml-secret-token
+    steps:
+      - id: checkout
+        uses: actions/checkout@v4
+      - name: Run tests
+        run: python3 tools/run_tests.py --suite unit
+      - name: Local action
+        uses: ./.github/actions/local-action
+""",
+        )
+
+        payload = json.dumps(
+            [observation.to_dict() for observation in observations],
+            sort_keys=True,
+        )
+        paths = [item for item in observations if item.kind == "config.path"]
+        references = [item for item in observations if item.kind == "config.reference"]
+        pointer_by_path = {item.metadata["pointer"]: item for item in paths}
+
+        self.assertNotIn("fake-yaml-secret-token", payload)
+        self.assertEqual(observations[0].kind, "config.document")
+        self.assertEqual(observations[0].metadata["format"], "yaml")
+        self.assertEqual(observations[0].metadata["parser"], "stdlib-yaml-conservative")
+        self.assertEqual(observations[0].metadata["profile"], "github_actions")
+        self.assertEqual(observations[0].metadata["document_count"], 1)
+        self.assertIn("/jobs/test/env/API_TOKEN", pointer_by_path)
+        self.assertTrue(pointer_by_path["/jobs/test/env/API_TOKEN"].metadata["redacted"])
+        self.assertNotIn(
+            "value_summary",
+            pointer_by_path["/jobs/test/env/API_TOKEN"].metadata,
+        )
+        self.assertIn("/jobs/test/steps/checkout/uses", pointer_by_path)
+        self.assertIn(
+            (
+                "/jobs/test/steps/checkout/uses",
+                "external:github.action:actions%2Fcheckout%40v4",
+                "external",
+            ),
+            {
+                (item.metadata["pointer"], item.target, item.metadata["reference_kind"])
+                for item in references
+            },
+        )
+        self.assertIn(
+            (
+                "/jobs/test/steps/Local action/uses",
+                "file:.github/actions/local-action",
+                "file",
+            ),
+            {
+                (item.metadata["pointer"], item.target, item.metadata["reference_kind"])
+                for item in references
+            },
+        )
+
+    def test_yaml_multidocument_profiles_refs_and_secret_redaction(self):
+        observations = extract_config_file_observations(
+            "k8s/app.yaml",
+            """
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  config_path: ./config/app.yml
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-secret
+stringData:
+  password: fake-k8s-secret-password
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  template:
+    spec:
+      serviceAccountName: app-service
+      containers:
+        - name: app
+          image: example/app:1.0
+          envFrom:
+            - secretRef:
+                name: app-secret
+""",
+        )
+
+        payload = json.dumps(
+            [observation.to_dict() for observation in observations],
+            sort_keys=True,
+        )
+        paths = [item for item in observations if item.kind == "config.path"]
+        references = [item for item in observations if item.kind == "config.reference"]
+        pointer_by_path = {item.metadata["pointer"]: item for item in paths}
+
+        self.assertNotIn("fake-k8s-secret-password", payload)
+        self.assertEqual(observations[0].metadata["profile"], "kubernetes")
+        self.assertEqual(observations[0].metadata["document_count"], 3)
+        self.assertIn("/documents/0/kind", pointer_by_path)
+        self.assertIn("/documents/1/stringData/password", pointer_by_path)
+        self.assertIn(
+            "/documents/2/spec/template/spec/containers/app/image",
+            pointer_by_path,
+        )
+        self.assertEqual(
+            pointer_by_path["/documents/1/stringData/password"].metadata[
+                "redaction_reason"
+            ],
+            "secret-prone-yaml-path",
+        )
+        self.assertEqual(
+            pointer_by_path[
+                "/documents/2/spec/template/spec/containers/app/image"
+            ].metadata["stable_member_keys"],
+            ["name"],
+        )
+        self.assertIn(
+            (
+                "/documents/0/data/config_path",
+                "file:k8s/config/app.yml",
+                "file",
+            ),
+            {
+                (item.metadata["pointer"], item.target, item.metadata["reference_kind"])
+                for item in references
+            },
+        )
+        self.assertIn(
+            "external:docker.image:example%2Fapp%3A1.0",
+            {item.target for item in references},
+        )
+
+    def test_yaml_custom_tags_anchors_aliases_merge_and_duplicate_keys_are_safe(self):
+        tagged = extract_config_file_observations(
+            "custom-tags.yaml",
+            """
+defaults: &defaults
+  image: example/base:1.0
+service:
+  <<: *defaults
+  token_ref: !vault fake-vault-secret
+  include_file: !include ./values-extra.yml
+""",
+        )
+        duplicate = extract_config_file_observations(
+            "duplicate-keys.yaml",
+            "service: one\nservice: two\n",
+        )
+
+        payload = json.dumps(
+            [observation.to_dict() for observation in tagged],
+            sort_keys=True,
+        )
+        paths = [item for item in tagged if item.kind == "config.path"]
+        references = [item for item in tagged if item.kind == "config.reference"]
+        pointer_by_path = {item.metadata["pointer"]: item for item in paths}
+
+        self.assertNotIn("fake-vault-secret", payload)
+        self.assertEqual(observations_format(tagged), "yaml")
+        self.assertEqual(pointer_by_path["/defaults"].metadata["anchor"], "defaults")
+        self.assertTrue(pointer_by_path["/service/<<"].metadata["merge_key"])
+        self.assertEqual(pointer_by_path["/service/<<"].metadata["alias"], "defaults")
+        self.assertEqual(
+            pointer_by_path["/service/token_ref"].metadata["yaml_tag"],
+            "!vault",
+        )
+        self.assertTrue(pointer_by_path["/service/token_ref"].metadata["redacted"])
+        self.assertIn(
+            (
+                "/service/include_file",
+                "file:values-extra.yml",
+                "file",
+            ),
+            {
+                (item.metadata["pointer"], item.target, item.metadata["reference_kind"])
+                for item in references
+            },
+        )
+        self.assertEqual([item.kind for item in duplicate], ["config.parse_error"])
+        self.assertEqual(duplicate[0].metadata["format"], "yaml")
+        self.assertEqual(duplicate[0].metadata["error_kind"], "duplicate-yaml-key")
+        self.assertEqual(
+            duplicate[0].metadata["duplicate_key_policy"],
+            "parse-error",
+        )
+
+    def test_yaml_profile_detection_matrix_and_openapi_refs(self):
+        cases = {
+            "Chart.yaml": ("helm_chart", "dependencies:\n  - name: redis\n    repository: https://charts.example.invalid\n"),
+            "values.yaml": ("helm_values", "image:\n  repository: example/app\n"),
+            "application.yml": ("spring_boot", "spring:\n  config:\n    import: optional:file:./extra.yml\n  datasource:\n    password: fake-spring-secret\n"),
+            "openapi.yaml": ("openapi", "openapi: 3.0.0\ninfo:\n  title: API\npaths:\n  /pets:\n    get:\n      responses:\n        '200':\n          $ref: '#/components/responses/Pets'\ncomponents: {}\n"),
+            "docker-compose.yml": ("docker_compose", "services:\n  app:\n    image: example/app:latest\n    build:\n      context: ./app\n    env_file: .env\n"),
+            ".circleci/config.yml": ("circleci", "version: 2.1\norbs:\n  ruby: circleci/ruby@2.1\njobs:\n  build:\n    docker:\n      - image: cimg/ruby:3.3\n"),
+            "grafana/provisioning/datasources.yaml": ("grafana", "apiVersion: 1\ndatasources:\n  - name: main\n    secureJsonData:\n      password: fake-grafana-secret\n"),
+            "harness-pipeline.yaml": ("harness", "pipeline:\n  identifier: build\n  projectIdentifier: demo\n  stages: []\n"),
+            "serena.yaml": ("serena", "project: repo-map\nserver:\n  token: fake-serena-token\n"),
+            "arq-backup-dump.yaml": ("arq_backup", "arq:\n  destination: example-backup\n  arq_encryption_key: fake-arq-key\n"),
+            "generic.yaml": ("generic_yaml", "name: generic\n"),
+        }
+
+        for path, (profile, content) in cases.items():
+            with self.subTest(path=path):
+                observations = extract_config_file_observations(path, content)
+                payload = json.dumps(
+                    [observation.to_dict() for observation in observations],
+                    sort_keys=True,
+                )
+                references = [
+                    item for item in observations if item.kind == "config.reference"
+                ]
+
+                self.assertEqual(observations[0].metadata["profile"], profile)
+                self.assertNotIn("fake-spring-secret", payload)
+                self.assertNotIn("fake-grafana-secret", payload)
+                self.assertNotIn("fake-serena-token", payload)
+                self.assertNotIn("fake-arq-key", payload)
+                if path == "openapi.yaml":
+                    self.assertIn(
+                        "config.path:file%3Aopenapi.yaml:%2Fcomponents%2Fresponses%2FPets",
+                        {item.target for item in references},
+                    )
+                if path == "docker-compose.yml":
+                    self.assertIn(
+                        "external:docker.image:example%2Fapp%3Alatest",
+                        {item.target for item in references},
+                    )
+                    self.assertIn("file:app", {item.target for item in references})
+                    self.assertIn("file:.env", {item.target for item in references})
+
+    def test_yaml_malformed_and_limit_errors_are_raw_only(self):
+        malformed = extract_config_file_observations("bad.yaml", "name: [unterminated\n")
+        too_large_scalar = extract_config_file_observations(
+            "long.yaml",
+            "description: " + ("x" * 5000) + "\n",
+        )
+
+        self.assertEqual([item.kind for item in malformed], ["config.parse_error"])
+        self.assertEqual(malformed[0].metadata["format"], "yaml")
+        self.assertEqual(malformed[0].metadata["error_kind"], "malformed-yaml")
+        self.assertEqual([item.kind for item in too_large_scalar], ["config.parse_error"])
+        self.assertEqual(
+            too_large_scalar[0].metadata["error_kind"],
+            "yaml-scalar-length-limit",
+        )
 
     def test_plist_document_paths_references_and_redaction(self):
         observations = extract_config_file_observations(
