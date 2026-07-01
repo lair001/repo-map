@@ -70,6 +70,7 @@ LANGUAGE_BY_EXTENSION = {
     ".jsonl": "jsonl",
     ".js": "javascript",
     ".jsx": "javascript",
+    ".markdown": "markdown",
     ".md": "markdown",
     ".mjs": "javascript",
     ".mts": "javascript",

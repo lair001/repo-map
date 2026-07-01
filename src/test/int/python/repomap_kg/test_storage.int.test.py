@@ -471,6 +471,85 @@ WHERE edges.kind = 'shell.command';
         )
         self.assertEqual(stored_path, "README.md")
 
+    def test_bulk_import_cli_loads_mixed_corpus_through_storage(self):
+        require_postgres_binaries()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shutil.copytree(bulk_fixture_root() / "mixed_corpus", root / "mixed_corpus")
+            corpus = root / "mixed_corpus"
+            corpus_root = str(corpus.resolve())
+            input_body = (corpus / "mail" / "single-message.eml").read_text(
+                encoding="utf-8"
+            )
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                exit_code, stdout, stderr = run_repo_map_in_process(
+                    "bulk",
+                    "import",
+                    "--config",
+                    str(corpus / "bulk.toml"),
+                    "--repository-name",
+                    "fixture-bulk",
+                    "--root-path",
+                    corpus_root,
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                    "--json",
+                )
+                kinds = {
+                    record.kind
+                    for record in query_canonical_node_records(
+                        postgres.psql_args,
+                        root_path=corpus_root,
+                        psql_command=postgres.psql_command,
+                    )
+                }
+                raw_payload = postgres.psql_scalar(
+                    """
+SELECT COALESCE(jsonb_agg(payload_json ORDER BY ordinal)::text, '[]')
+FROM raw_observations;
+"""
+                )
+                manifest_count = postgres.psql_scalar(
+                    """
+SELECT count(*)::text
+FROM raw_observations
+WHERE payload_json->'metadata' ? 'bulk_run_id';
+"""
+                )
+                manifest_dir_exists = (corpus / ".repomap" / "bulk-runs").is_dir()
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["source_id"], "fixture-mixed-corpus")
+        self.assertEqual(payload["repository_id"], 1)
+        self.assertTrue(payload["no_provider_api"])
+        self.assertTrue(manifest_dir_exists)
+        self.assertIn("email.message", kinds)
+        self.assertIn("config.document", kinds)
+        self.assertIn("html.document", kinds)
+        self.assertIn("js.file", kinds)
+        self.assertIn("python.module", kinds)
+        self.assertIn("doc.page", kinds)
+        self.assertNotEqual(manifest_count, "0")
+        self.assertIn("bulk_relative_path", raw_payload)
+        self.assertNotIn(str(corpus), raw_payload)
+        self.assertNotIn("mixed-corpus-secret-value", raw_payload)
+        self.assertIn("mixed-corpus-secret-value", input_body)
+
     def test_storage_load_files_dual_writes_canonical_shell_collapse_fixture(self):
         require_postgres_binaries()
         raw_jsonl = canonicalization_fixture(
@@ -7912,6 +7991,10 @@ def copy_warc_fixture_root(parent: Path) -> Path:
 
 def source_ingestion_fixture_root() -> Path:
     return Path(__file__).parents[3] / "fixtures" / "source_ingestion"
+
+
+def bulk_fixture_root() -> Path:
+    return Path(__file__).parents[3] / "fixtures" / "bulk"
 
 
 def fixed_source_clock() -> datetime:

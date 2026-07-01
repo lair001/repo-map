@@ -6,6 +6,13 @@ import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
+from repomap_kg.bulk_ingestion import (
+    BulkPolicyError,
+    bulk_observations_from_plan,
+    build_bulk_plan,
+    import_bulk_source,
+    load_bulk_source_config,
+)
 from repomap_kg.source_ingestion import (
     FeedFetchResponse,
     SourceAcquisitionError,
@@ -26,6 +33,118 @@ from repomap_kg.storage import LoadSummary
 
 
 class SourceIngestionIntegrationTests(unittest.TestCase):
+    def test_bulk_fixture_policy_plan_and_observations(self):
+        config = load_bulk_source_config(bulk_fixture_root() / "mixed_corpus" / "bulk.toml")
+        manifest = build_bulk_plan(config, repository_root=bulk_fixture_root() / "mixed_corpus")
+        observations = bulk_observations_from_plan(
+            config,
+            manifest,
+            repository_root=bulk_fixture_root() / "mixed_corpus",
+        )
+
+        self.assertEqual(config.source_id, "fixture-mixed-corpus")
+        self.assertEqual(manifest.corpus_kind, "mixed_corpus")
+        self.assertEqual(
+            [item.relative_path for item in manifest.included_files],
+            [
+                "config/settings.yaml",
+                "docs/readme.md",
+                "mail/single-message.eml",
+                "src/example.py",
+                "web/app.js",
+                "web/index.html",
+            ],
+        )
+        self.assertTrue(
+            any(
+                item.relative_path == "vendor/ignored.rb"
+                and item.reason == "excluded_directory"
+                for item in manifest.skipped_files
+            )
+        )
+        kinds = {observation.kind for observation in observations}
+        self.assertIn("email.message", kinds)
+        self.assertIn("config.document", kinds)
+        self.assertIn("html.document", kinds)
+        self.assertIn("js.file", kinds)
+        self.assertIn("python.module", kinds)
+        self.assertIn("markdown.document", kinds)
+        payload = json.dumps([item.to_dict() for item in observations], sort_keys=True)
+        self.assertIn('"bulk_run_id"', payload)
+        self.assertIn('"bulk_relative_path": "mail/single-message.eml"', payload)
+        self.assertIn('"bulk_sensitivity": "private"', payload)
+        self.assertIn('"no_provider_api": true', json.dumps(manifest.to_jsonable(), sort_keys=True))
+        self.assertNotIn(str(bulk_fixture_root()), payload)
+        self.assertNotIn("mixed-corpus-secret-value", payload)
+
+    def test_bulk_email_export_fixture_routes_eml_and_mbox(self):
+        config = load_bulk_source_config(bulk_fixture_root() / "email_export" / "bulk.toml")
+        manifest = build_bulk_plan(config, repository_root=bulk_fixture_root() / "email_export")
+        observations = bulk_observations_from_plan(
+            config,
+            manifest,
+            repository_root=bulk_fixture_root() / "email_export",
+        )
+
+        routes = {item.relative_path: item.route for item in manifest.included_files}
+        self.assertEqual(routes["messages/single-message.eml"], "eml")
+        self.assertEqual(routes["messages/thread-reply.eml"], "eml")
+        self.assertEqual(routes["archives/sample.mbox"], "mbox")
+        skipped = {item.relative_path: item.reason for item in manifest.skipped_files}
+        self.assertEqual(skipped[".hidden/hidden.eml"], "hidden_excluded")
+        self.assertEqual(skipped["node_modules/ignored.js"], "excluded_directory")
+        self.assertEqual(skipped["archive/export.zip"], "archive_deferred")
+        self.assertEqual(skipped["unsupported/ignored.pdf"], "unsupported_extension")
+        kinds = {observation.kind for observation in observations}
+        self.assertIn("email.message", kinds)
+        self.assertIn("email.mailbox", kinds)
+        payload = json.dumps([item.to_dict() for item in observations], sort_keys=True)
+        self.assertIn('"corpus_kind": "email_export"', payload)
+        self.assertIn('"bulk_extractor_route": "mbox"', payload)
+        self.assertNotIn("fake-mailbox-secret-value", payload)
+
+    def test_bulk_blocked_policy_fails_closed(self):
+        with self.assertRaises(BulkPolicyError):
+            load_bulk_source_config(bulk_fixture_root() / "blocked_policy" / "bulk.toml")
+
+    def test_bulk_import_uses_existing_loader_and_owned_manifests(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shutil.copytree(bulk_fixture_root() / "mixed_corpus", root / "mixed_corpus")
+            captured = {}
+
+            def loader(_psql_args, observations, **kwargs):
+                captured["observations"] = tuple(observations)
+                captured["kwargs"] = dict(kwargs)
+                return LoadSummary(repository_id=42, run_id=43, files=6)
+
+            summary = import_bulk_source(
+                root / "mixed_corpus" / "bulk.toml",
+                repository_name="fixture",
+                root_path=root / "mixed_corpus",
+                psql_args=("--no-network-placeholder",),
+                psql_command="psql",
+                loader=loader,
+            )
+
+            source_text = (root / "mixed_corpus" / "mail" / "single-message.eml").read_text(
+                encoding="utf-8"
+            )
+            self.assertTrue(summary.output_path.name)
+            self.assertTrue((summary.output_path / "manifest.json").is_file())
+            self.assertTrue((summary.output_path / "included-files.jsonl").is_file())
+            self.assertTrue((summary.output_path / "skipped-files.jsonl").is_file())
+
+        self.assertEqual(summary.source_id, "fixture-mixed-corpus")
+        self.assertEqual(summary.load_summary.repository_id, 42)
+        self.assertGreater(len(captured["observations"]), 6)
+        self.assertEqual(captured["kwargs"]["repository_name"], "fixture")
+        self.assertIn("mixed-corpus-secret-value", source_text)
+        payload = json.dumps(summary.to_jsonable(), sort_keys=True)
+        self.assertIn('"no_source_mutation": true', payload)
+        self.assertIn('"no_external_fetch": true', payload)
+        self.assertNotIn(str(root), payload)
+
     def test_feed_source_fixture_policy_matrix(self):
         allowed = load_feed_source_config(source_fixture("allowed-rss.toml"))
         secret = load_feed_source_config(source_fixture("secret-bearing.toml"))
@@ -892,6 +1011,10 @@ def int_warc_record(
 
 def source_ingestion_fixture_root() -> Path:
     return Path(__file__).parents[3] / "fixtures" / "source_ingestion"
+
+
+def bulk_fixture_root() -> Path:
+    return Path(__file__).parents[3] / "fixtures" / "bulk"
 
 
 if __name__ == "__main__":

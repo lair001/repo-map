@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from repomap_kg import __version__
@@ -769,6 +770,150 @@ class CliUnitTests(unittest.TestCase):
                         "fixture",
                         "--url",
                         "https://example.invalid/archive.warc",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertIn("unrecognized arguments: --url", stderr.getvalue())
+
+    def test_bulk_plan_prints_json_manifest_from_config_only(self):
+        stdout = io.StringIO()
+        expected = SimpleNamespace(
+            to_jsonable=lambda: {
+                "source_id": "bulk-fixture",
+                "corpus_kind": "mixed_corpus",
+                "file_count_included": 2,
+                "file_count_skipped": 1,
+                "no_provider_api": True,
+                "no_external_fetch": True,
+            }
+        )
+
+        with patch(
+            "repomap_kg.cli.build_bulk_plan_from_config",
+            return_value=expected,
+        ) as build_plan:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "bulk",
+                        "plan",
+                        "--config",
+                        "/tmp/bulk.toml",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["source_id"], "bulk-fixture")
+        self.assertEqual(payload["file_count_included"], 2)
+        self.assertTrue(payload["no_provider_api"])
+        build_plan.assert_called_once_with("/tmp/bulk.toml")
+
+    def test_bulk_import_prints_json_summary_and_uses_storage_options(self):
+        stdout = io.StringIO()
+        expected = SimpleNamespace(
+            to_jsonable=lambda: {
+                "source_id": "bulk-fixture",
+                "corpus_kind": "mixed_corpus",
+                "observations": 12,
+                "repository_id": 7,
+                "run_id": 11,
+                "no_provider_api": True,
+            }
+        )
+
+        with patch(
+            "repomap_kg.cli.import_bulk_source",
+            return_value=expected,
+        ) as import_bulk:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "bulk",
+                        "import",
+                        "--config",
+                        "/tmp/bulk.toml",
+                        "--repository-name",
+                        "fixture",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--pg-host",
+                        "/tmp/socket",
+                        "--pg-port",
+                        "5432",
+                        "--pg-user",
+                        "repo_map_test",
+                        "--pg-database",
+                        "postgres",
+                        "--psql-command",
+                        "/bin/psql",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["repository_id"], 7)
+        self.assertEqual(payload["observations"], 12)
+        import_bulk.assert_called_once()
+        self.assertEqual(import_bulk.call_args.kwargs["config_path"], "/tmp/bulk.toml")
+        self.assertEqual(import_bulk.call_args.kwargs["repository_name"], "fixture")
+        self.assertEqual(import_bulk.call_args.kwargs["root_path"], "/tmp/fixture")
+        self.assertEqual(import_bulk.call_args.kwargs["psql_command"], "/bin/psql")
+        self.assertEqual(
+            import_bulk.call_args.kwargs["psql_args"],
+            [
+                "-h",
+                "/tmp/socket",
+                "-p",
+                "5432",
+                "-U",
+                "repo_map_test",
+                "-d",
+                "postgres",
+            ],
+        )
+
+    def test_bulk_plan_reports_policy_errors(self):
+        from repomap_kg.bulk_ingestion import BulkPolicyError
+
+        stderr = io.StringIO()
+        with patch(
+            "repomap_kg.cli.build_bulk_plan_from_config",
+            side_effect=BulkPolicyError("source policy status blocked"),
+        ):
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "bulk",
+                        "plan",
+                        "--config",
+                        "/tmp/bulk.toml",
+                        "--json",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("source policy status blocked", stderr.getvalue())
+
+    def test_bulk_import_rejects_arbitrary_root_argument_substitution(self):
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            with self.assertRaises(SystemExit):
+                main(
+                    [
+                        "bulk",
+                        "import",
+                        "--config",
+                        "/tmp/bulk.toml",
+                        "--repository-name",
+                        "fixture",
+                        "--url",
+                        "https://example.invalid/export",
                         "--root-path",
                         "/tmp/fixture",
                     ]

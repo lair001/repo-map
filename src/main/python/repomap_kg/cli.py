@@ -7,6 +7,11 @@ import json
 import sys
 
 from repomap_kg import __version__
+from repomap_kg.bulk_ingestion import (
+    BulkPolicyError,
+    build_bulk_plan_from_config,
+    import_bulk_source,
+)
 from repomap_kg.discovery import discover_observations
 from repomap_kg.entrypoints import (
     entrypoint_records_from_file_records,
@@ -302,6 +307,44 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit local WARC import summary as JSON",
+    )
+
+    bulk = subparsers.add_parser(
+        "bulk",
+        help="plan and import explicitly configured local corpora",
+    )
+    bulk_subcommands = bulk.add_subparsers(dest="bulk_command")
+    bulk_plan = bulk_subcommands.add_parser(
+        "plan",
+        help="plan one explicitly configured local bulk corpus import",
+    )
+    bulk_plan.add_argument(
+        "--config",
+        required=True,
+        help="path to a local bulk corpus TOML config",
+    )
+    bulk_plan.add_argument(
+        "--json",
+        action="store_true",
+        help="emit bulk plan manifest as JSON",
+    )
+    bulk_import = bulk_subcommands.add_parser(
+        "import",
+        help="import one explicitly configured local bulk corpus",
+    )
+    bulk_import.add_argument(
+        "--config",
+        required=True,
+        help="path to a local bulk corpus TOML config",
+    )
+    bulk_import.add_argument("--repository-name", required=True)
+    add_storage_root_argument(bulk_import)
+    bulk_import.add_argument("--git-commit")
+    add_storage_connection_arguments(bulk_import)
+    bulk_import.add_argument(
+        "--json",
+        action="store_true",
+        help="emit bulk import summary as JSON",
     )
 
     storage = subparsers.add_parser(
@@ -993,6 +1036,48 @@ def main(argv: list[str] | None = None) -> int:
                 f"{summary.load_summary.run_id} "
                 f"({summary.observations} observations, "
                 f"{summary.routed_payloads} routed payloads)"
+            )
+        return 0
+
+    if args.command == "bulk" and args.bulk_command == "plan":
+        try:
+            manifest = build_bulk_plan_from_config(args.config)
+        except BulkPolicyError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(manifest.to_jsonable(), sort_keys=True))
+        else:
+            print(
+                "planned bulk source "
+                f"{manifest.source_id} "
+                f"({manifest.file_count_included} included, "
+                f"{manifest.file_count_skipped} skipped)"
+            )
+        return 0
+
+    if args.command == "bulk" and args.bulk_command == "import":
+        try:
+            summary = import_bulk_source(
+                config_path=args.config,
+                repository_name=args.repository_name,
+                root_path=args.root_path,
+                psql_args=psql_args_from_args(args),
+                git_commit=args.git_commit,
+                psql_command=args.psql_command,
+            )
+        except (BulkPolicyError, StorageSchemaError) as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(summary.to_jsonable(), sort_keys=True))
+        else:
+            print(
+                "imported bulk source "
+                f"{summary.source_id} into repository "
+                f"{summary.load_summary.repository_id} run "
+                f"{summary.load_summary.run_id} "
+                f"({summary.observations} observations)"
             )
         return 0
 
