@@ -129,6 +129,53 @@ TFJSON_PROFILE_RAW_OBSERVATION_KINDS = frozenset(
 )
 
 
+JS5_FRAMEWORK_RAW_OBSERVATION_KINDS = frozenset(
+    {
+        "js.framework_profile",
+        "js.runtime_profile",
+        "js.package_context",
+        "js.route_handler",
+        "js.middleware",
+        "js.controller",
+        "js.provider",
+        "js.module_binding",
+        "js.test_config",
+        "js.dom_selector",
+        "js.dom_event",
+        "js.ajax_reference",
+        "js.server_entrypoint",
+        "js.client_entrypoint",
+        "js.framework_reference",
+        "node.entrypoint",
+        "node.export",
+        "node.require",
+        "express.app",
+        "express.router",
+        "express.route",
+        "express.middleware",
+        "express.error_handler",
+        "nest.module",
+        "nest.controller",
+        "nest.provider",
+        "nest.route",
+        "nest.decorator",
+        "next.route",
+        "next.page",
+        "next.api_route",
+        "next.app_route",
+        "next.component",
+        "jest.suite",
+        "jest.test",
+        "jest.expectation",
+        "jest.mock",
+        "jquery.selector",
+        "jquery.event",
+        "jquery.ajax",
+        "jquery.plugin_reference",
+    }
+)
+
+
 FILE_METADATA_KEYS = (
     "language",
     "role",
@@ -504,6 +551,9 @@ def canonicalize_observations(
             evidence.append(_evidence_from_observation(observation, ordinal))
             continue
         if observation.kind in TFJSON_PROFILE_RAW_OBSERVATION_KINDS:
+            evidence.append(_evidence_from_observation(observation, ordinal))
+            continue
+        if observation.kind in JS5_FRAMEWORK_RAW_OBSERVATION_KINDS:
             evidence.append(_evidence_from_observation(observation, ordinal))
             continue
         if observation.kind in ("html.document", "html.element", "html.heading"):

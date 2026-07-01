@@ -4,6 +4,260 @@ from repomap_kg.javascript import extract_javascript_file_observations
 
 
 class JavaScriptExtractorUnitTests(unittest.TestCase):
+    def test_js5_detects_node_entrypoints_exports_requires_and_env_redaction(self):
+        content = (
+            'const http = require("node:http");\n'
+            'const express = require("express");\n'
+            "module.exports = createServer;\n"
+            "exports.health = health;\n"
+            "const secret = process.env.SECRET_TOKEN;\n"
+            "const publicPort = import.meta.env.PUBLIC_PORT;\n"
+        )
+
+        observations = extract_javascript_file_observations("src/server.ts", content)
+        payload = "\n".join(item.to_json_line() for item in observations)
+        kinds = {item.kind for item in observations}
+        requires = [item for item in observations if item.kind == "node.require"]
+        exports = [item for item in observations if item.kind == "node.export"]
+        entrypoint = next(item for item in observations if item.kind == "node.entrypoint")
+        env_refs = [
+            item
+            for item in observations
+            if item.kind == "js.framework_reference"
+            and item.metadata.get("reference_kind") == "environment"
+        ]
+
+        self.assertEqual(observations[0].metadata["profile"], "node")
+        self.assertIn("node.require", kinds)
+        self.assertIn("node.export", kinds)
+        self.assertEqual(entrypoint.metadata["entrypoint_reason"], "entrypoint-path")
+        self.assertIn("express", {item.metadata["specifier"] for item in requires})
+        self.assertIn("module.exports", {item.metadata["export_kind"] for item in exports})
+        self.assertIn("exports.name", {item.metadata["export_kind"] for item in exports})
+        self.assertTrue(any(item.metadata.get("redacted") for item in env_refs))
+        self.assertTrue(any(item.metadata.get("env_name") == "PUBLIC_PORT" for item in env_refs))
+        self.assertNotIn("SECRET_TOKEN", payload)
+
+    def test_js5_detects_express_routes_middleware_and_error_handlers(self):
+        content = (
+            'const express = require("express");\n'
+            "const app = express();\n"
+            "const router = express.Router();\n"
+            'app.use("/api", router);\n'
+            'app.get("/health", authMiddleware, healthHandler);\n'
+            'router.post("/users", validateUser, createUser);\n'
+            "app.get(routeName, dynamicHandler);\n"
+            "app.use((err, req, res, next) => next(err));\n"
+        )
+
+        observations = extract_javascript_file_observations("src/app.js", content)
+        routes = [item for item in observations if item.kind == "express.route"]
+        route_keys = {
+            (item.metadata["route_method"], item.metadata.get("route_pattern"))
+            for item in routes
+        }
+        dynamic_route = next(
+            item
+            for item in routes
+            if item.metadata["route_method"] == "GET" and item.metadata["dynamic"]
+        )
+        health_route = next(
+            item
+            for item in routes
+            if item.metadata.get("route_pattern") == "/health"
+        )
+
+        self.assertIn("express.app", {item.kind for item in observations})
+        self.assertIn("express.router", {item.kind for item in observations})
+        self.assertIn("express.middleware", {item.kind for item in observations})
+        self.assertIn("express.error_handler", {item.kind for item in observations})
+        self.assertIn("js.route", {item.kind for item in observations})
+        self.assertIn(("GET", "/health"), route_keys)
+        self.assertIn(("POST", "/users"), route_keys)
+        self.assertIn(("USE", "/api"), route_keys)
+        self.assertEqual(health_route.metadata["middleware_count"], 1)
+        self.assertEqual(health_route.metadata["handler_name"], "healthHandler")
+        self.assertEqual(dynamic_route.metadata["dynamic_reason"], "dynamic-route-path")
+
+    def test_js5_detects_nest_modules_controllers_providers_and_routes(self):
+        content = (
+            "@Module({ imports: [UsersModule], controllers: [AppController], providers: [AppService] })\n"
+            "export class AppModule {\n"
+            "}\n"
+            '@Controller("users")\n'
+            "export class UsersController {\n"
+            '  @Get(":id")\n'
+            "  getUser(@Param('id') id: string) {}\n"
+            "}\n"
+            "@Injectable()\n"
+            "export class AppService {}\n"
+        )
+
+        observations = extract_javascript_file_observations(
+            "src/app.controller.ts", content
+        )
+        kinds = {item.kind for item in observations}
+        module = next(item for item in observations if item.kind == "nest.module")
+        controller = next(item for item in observations if item.kind == "nest.controller")
+        route = next(item for item in observations if item.kind == "nest.route")
+
+        self.assertEqual(observations[0].metadata["profile"], "nestjs")
+        self.assertIn("nest.decorator", kinds)
+        self.assertIn("nest.provider", kinds)
+        self.assertEqual(module.metadata["module_name"], "AppModule")
+        self.assertEqual(module.metadata["controllers"], ["AppController"])
+        self.assertEqual(module.metadata["providers"], ["AppService"])
+        self.assertEqual(controller.metadata["controller_prefix"], "users")
+        self.assertEqual(route.metadata["route_method"], "GET")
+        self.assertEqual(route.metadata["route_pattern"], ":id")
+        self.assertEqual(route.metadata["controller_name"], "UsersController")
+
+    def test_js5_detects_next_pages_and_app_router_conventions(self):
+        page = extract_javascript_file_observations(
+            "pages/users/[id].tsx",
+            "import Link from 'next/link';\nexport default function UserPage() { return <Link href=\"/\" />; }\n",
+        )
+        api = extract_javascript_file_observations(
+            "pages/api/users.ts",
+            "export default function handler(req, res) { res.json({ ok: true }); }\n",
+        )
+        app_route = extract_javascript_file_observations(
+            "app/api/health/route.ts",
+            "import { NextResponse } from 'next/server';\nexport async function GET() { return NextResponse.json({ ok: true }); }\nexport async function POST() {}\n",
+        )
+        app_page = extract_javascript_file_observations(
+            "app/users/[id]/page.tsx",
+            "import { useRouter } from 'next/navigation';\nexport default function Page() { return null; }\n",
+        )
+
+        page_route = next(item for item in page if item.kind == "next.page")
+        api_route = next(item for item in api if item.kind == "next.api_route")
+        route_file = next(item for item in app_route if item.kind == "next.app_route")
+        http_methods = {
+            item.metadata["http_method"]
+            for item in app_route
+            if item.kind == "next.route"
+        }
+        framework_refs = [
+            item
+            for item in page + app_page
+            if item.kind == "js.framework_reference"
+        ]
+
+        self.assertEqual(page[0].metadata["profile"], "next")
+        self.assertEqual(page_route.metadata["route_pattern"], "/users/[id]")
+        self.assertEqual(api_route.metadata["route_pattern"], "/api/users")
+        self.assertEqual(route_file.metadata["route_file_kind"], "route")
+        self.assertEqual(route_file.metadata["route_pattern"], "/api/health")
+        self.assertEqual(http_methods, {"GET", "POST"})
+        self.assertTrue(
+            any(item.metadata.get("specifier") == "next/link" for item in framework_refs)
+        )
+        self.assertTrue(
+            any(
+                item.metadata.get("specifier") == "next/navigation"
+                for item in framework_refs
+            )
+        )
+
+    def test_js5_improves_jest_raw_observations_for_mocks_spies_and_matchers(self):
+        content = (
+            "import { describe, expect, jest, test } from '@jest/globals';\n"
+            "describe('math helpers', () => {\n"
+            "  beforeEach(() => jest.fn());\n"
+            "  test('adds numbers', () => {\n"
+            "    jest.mock('./math');\n"
+            "    jest.spyOn(console, 'log');\n"
+            "    expect(1 + 1).toBe(2);\n"
+            "    expect([1, 2]).toContain(2);\n"
+            "  });\n"
+            "});\n"
+        )
+
+        observations = extract_javascript_file_observations(
+            "src/math.test.ts", content
+        )
+        kinds = {item.kind for item in observations}
+        matchers = {
+            matcher
+            for item in observations
+            if item.kind == "jest.expectation"
+            for matcher in item.metadata["matchers"]
+        }
+        mock_kinds = {
+            item.metadata["mock_kind"]
+            for item in observations
+            if item.kind == "jest.mock"
+        }
+
+        self.assertIn("js.test_suite", kinds)
+        self.assertIn("js.test_case", kinds)
+        self.assertIn("jest.suite", kinds)
+        self.assertIn("jest.test", kinds)
+        self.assertIn("jest.expectation", kinds)
+        self.assertIn("mock", mock_kinds)
+        self.assertIn("spyOn", mock_kinds)
+        self.assertIn("toBe", matchers)
+        self.assertIn("toContain", matchers)
+
+    def test_js5_detects_jquery_selectors_events_ajax_and_plugins(self):
+        content = (
+            "$('.save-button').on('click', save);\n"
+            "$('#signup').submit(handleSubmit);\n"
+            "$(document).ready(init);\n"
+            '$.ajax({ url: "https://example.invalid/api?token=fake-jquery-token", method: "POST" });\n'
+            '$.get("/local/data.json");\n'
+            "$.fn.flashMessage = function () { return this; };\n"
+        )
+
+        observations = extract_javascript_file_observations(
+            "public/jquery-widget.js", content
+        )
+        payload = "\n".join(item.to_json_line() for item in observations)
+        selectors = [item for item in observations if item.kind == "jquery.selector"]
+        events = [item for item in observations if item.kind == "jquery.event"]
+        ajax = [item for item in observations if item.kind == "jquery.ajax"]
+        plugins = [
+            item for item in observations if item.kind == "jquery.plugin_reference"
+        ]
+
+        self.assertEqual(observations[0].metadata["profile"], "jquery")
+        self.assertIn(".save-button", {item.metadata["selector"] for item in selectors})
+        self.assertIn("click", {item.metadata["event_name"] for item in events})
+        self.assertIn("submit", {item.metadata["event_name"] for item in events})
+        self.assertTrue(any(item.metadata["ajax_method"] == "ajax" for item in ajax))
+        self.assertTrue(any(item.metadata["ajax_method"] == "get" for item in ajax))
+        self.assertEqual(plugins[0].metadata["plugin_name"], "flashMessage")
+        self.assertIn("js.dom_selector", {item.kind for item in observations})
+        self.assertIn("js.dom_event", {item.kind for item in observations})
+        self.assertIn("js.ajax_reference", {item.kind for item in observations})
+        self.assertNotIn("fake-jquery-token", payload)
+
+    def test_js5_limits_long_jquery_selectors(self):
+        long_selector = "." + ("a" * 200)
+        content = f'$("{long_selector}").click(handle);\n'
+
+        observations = extract_javascript_file_observations(
+            "public/jquery-widget.js", content
+        )
+        payload = "\n".join(item.to_json_line() for item in observations)
+
+        self.assertNotIn(long_selector, payload)
+        self.assertFalse(
+            any(
+                item.kind == "jquery.selector"
+                and item.metadata.get("selector") == long_selector
+                for item in observations
+            )
+        )
+        self.assertTrue(
+            any(
+                item.kind == "js.parse_error"
+                and item.metadata.get("error_kind") == "framework-selector-limit"
+                for item in observations
+            )
+        )
+
     def test_extracts_imports_exports_functions_classes_and_references(self):
         content = (
             'import React, { useEffect } from "react";\n'

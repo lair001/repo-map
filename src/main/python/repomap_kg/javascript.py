@@ -47,12 +47,26 @@ LOCAL_RESOLUTION_EXTENSIONS = (
     ".html",
 )
 REFERENCE_SCHEMES = frozenset(("http", "https", "mailto"))
-ROUTE_METHODS = frozenset(("get", "post", "put", "patch", "delete", "options", "head"))
+ROUTE_METHODS = frozenset(
+    ("get", "post", "put", "patch", "delete", "options", "head", "all")
+)
 JEST_TEST_CALLS = frozenset(("it", "test"))
 JEST_HOOK_CALLS = frozenset(("beforeEach", "afterEach", "beforeAll", "afterAll"))
 REACT_HOOKS = frozenset(
     ("useState", "useEffect", "useMemo", "useCallback", "useReducer")
 )
+FRAMEWORK_SPECIFIER_PREFIXES = (
+    "express",
+    "@nestjs/",
+    "next",
+    "next/",
+    "@jest/",
+    "jest",
+    "jquery",
+)
+MAX_FRAMEWORK_OBSERVATIONS_PER_KIND = 100
+MAX_SELECTOR_LENGTH = 120
+MAX_URL_SUMMARY_LENGTH = 120
 
 SECRET_MARKERS = (
     "token",
@@ -152,6 +166,46 @@ ANGULAR_TEMPLATE_RE = re.compile(
 ENV_RE = re.compile(
     r"""\b(?:process\.env|import\.meta\.env)\.([A-Za-z_$][\w$]*)"""
 )
+MODULE_EXPORTS_RE = re.compile(r"""\bmodule\.exports\s*=""")
+NAMED_EXPORTS_RE = re.compile(r"""\bexports\.(?P<name>[A-Za-z_$][\w$]*)\s*=""")
+EXPRESS_APP_RE = re.compile(
+    r"""\b(?:const|let|var)\s+(?P<name>[A-Za-z_$][\w$]*)\s*=\s*express\s*\("""
+)
+EXPRESS_ROUTER_RE = re.compile(
+    r"""\b(?:const|let|var)\s+(?P<name>[A-Za-z_$][\w$]*)\s*=\s*express\.Router\s*\("""
+)
+EXPRESS_ROUTE_RE = re.compile(
+    r"""\b(?P<receiver>[A-Za-z_$][\w$]*)\.(?P<method>get|post|put|patch|delete|options|head|all|use)\s*\((?P<args>.*)"""
+)
+NEST_DECORATOR_RE = re.compile(
+    r"""@(?P<name>Module|Controller|Injectable|Get|Post|Put|Patch|Delete|All|Param|Body|Query|UseGuards|UseInterceptors|UsePipes)\s*(?:\((?P<args>.*)\))?"""
+)
+NEST_DECORATOR_LINE_RE = re.compile(
+    r"""^\s*@(?P<name>Module|Controller|Injectable|Get|Post|Put|Patch|Delete|All|Param|Body|Query|UseGuards|UseInterceptors|UsePipes)\s*(?:\((?P<args>.*)\))?"""
+)
+NEST_HTTP_DECORATORS = frozenset(("Get", "Post", "Put", "Patch", "Delete", "All"))
+NEXT_HTTP_EXPORT_RE = re.compile(
+    r"""^\s*export\s+(?:async\s+)?function\s+(?P<method>GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s*\("""
+)
+JEST_MOCK_RE = re.compile(r"""\bjest\.(?P<kind>mock|fn|spyOn)\s*\(""")
+JEST_MATCHER_RE = re.compile(r"""\bexpect\s*\([^)]*\)\s*\.\s*(?P<matcher>[A-Za-z_$][\w$]*)\b""")
+JQUERY_SELECTOR_RE = re.compile(
+    r"""(?:\$|jQuery)\s*\(\s*(?P<quote>["'])(?P<selector>.*?)(?P=quote)\s*\)"""
+)
+JQUERY_EVENT_RE = re.compile(
+    r"""(?:\$\([^)]*\)|jQuery\([^)]*\))\.(?P<event>on|click|submit|change|ready)\s*\((?P<args>.*)"""
+)
+JQUERY_AJAX_OBJECT_RE = re.compile(
+    r"""\$\.ajax\s*\(\s*\{(?P<body>.*?)\}\s*\)"""
+)
+JQUERY_AJAX_CALL_RE = re.compile(
+    r"""\$\.(?P<method>get|post)\s*\(\s*(?P<quote>["'])(?P<url>.*?)(?P=quote)"""
+)
+JQUERY_LOAD_RE = re.compile(
+    r"""\.load\s*\(\s*(?P<quote>["'])(?P<url>.*?)(?P=quote)"""
+)
+JQUERY_PLUGIN_RE = re.compile(r"""\$\.fn\.(?P<name>[A-Za-z_$][\w$]*)\s*=""")
+STRING_LITERAL_RE = re.compile(r"""(?P<quote>["'])(?P<value>.*?)(?P=quote)""")
 
 
 def extract_javascript_file_observations(
@@ -169,6 +223,28 @@ def extract_javascript_file_observations(
     file_canonical_key = js_file_key(relative_path)
     module_canonical_key = js_module_key(relative_path)
     module_system = _detect_module_system(content)
+    next_route = _next_route_metadata(relative_path, js_format)
+    framework_counts: dict[str, int] = {}
+    framework_overflow_kinds: set[str] = set()
+
+    def add_framework_observation(observation: RawObservation) -> None:
+        count = framework_counts.get(observation.kind, 0)
+        if count >= MAX_FRAMEWORK_OBSERVATIONS_PER_KIND:
+            if observation.kind not in framework_overflow_kinds:
+                framework_overflow_kinds.add(observation.kind)
+                observations.append(
+                    _parse_error(
+                        relative_path,
+                        js_format,
+                        profile,
+                        "framework-observation-limit",
+                        "framework observation kind exceeded static scanner limit",
+                        observation.start_line or 1,
+                    )
+                )
+            return
+        framework_counts[observation.kind] = count + 1
+        observations.append(observation)
 
     observations.append(
         _observation(
@@ -214,11 +290,44 @@ def extract_javascript_file_observations(
         return tuple(observations)
 
     class_stack: list[tuple[str, str, int]] = []
+    nest_controller_prefixes: dict[str, str | None] = {}
+    pending_nest_decorators: list[dict[str, Any]] = []
     pending_angular_component = False
     suite_count = 0
     current_suite_key: str | None = None
     case_count_by_owner: dict[str, int] = {}
     route_count = 0
+
+    if _is_node_entrypoint(relative_path, content):
+        add_framework_observation(
+            _framework_observation(
+                "node.entrypoint",
+                relative_path,
+                js_format,
+                profile,
+                1,
+                PurePosixPath(relative_path).name,
+                module_canonical_key,
+                metadata={
+                    "entrypoint_reason": "entrypoint-path",
+                    "module_system": module_system,
+                },
+            )
+        )
+
+    if next_route is not None:
+        add_framework_observation(
+            _framework_observation(
+                next_route["kind"],
+                relative_path,
+                js_format,
+                "next",
+                1,
+                next_route["route_pattern"],
+                module_canonical_key,
+                metadata=next_route,
+            )
+        )
 
     for line_number, raw_line in enumerate(content.splitlines(), start=1):
         line = _strip_line_comment(raw_line)
@@ -240,6 +349,7 @@ def extract_javascript_file_observations(
             )
 
         for env_name in ENV_RE.findall(stripped):
+            redacted = _is_secret_prone(env_name)
             observations.append(
                 _diagnostic_observation(
                     relative_path,
@@ -248,7 +358,24 @@ def extract_javascript_file_observations(
                     line_number,
                     "env-reference",
                     env_name,
-                    redacted=_is_secret_prone(env_name),
+                    redacted=redacted,
+                )
+            )
+            add_framework_observation(
+                _framework_observation(
+                    "js.framework_reference",
+                    relative_path,
+                    js_format,
+                    profile,
+                    line_number,
+                    "environment",
+                    module_canonical_key,
+                    metadata={
+                        "reference_kind": "environment",
+                        "env_name": None if redacted else env_name,
+                        "redacted": redacted,
+                        "redaction_reason": "secret-prone-env-name" if redacted else None,
+                    },
                 )
             )
 
@@ -271,9 +398,20 @@ def extract_javascript_file_observations(
                     repository_paths,
                 )
             )
+            framework_reference = _framework_specifier_observation(
+                relative_path,
+                js_format,
+                profile,
+                line_number,
+                specifier,
+                module_canonical_key,
+            )
+            if framework_reference is not None:
+                add_framework_observation(framework_reference)
         else:
             side_effect_match = SIDE_EFFECT_IMPORT_RE.match(stripped)
             if side_effect_match and not stripped.startswith("import("):
+                specifier = side_effect_match.group("specifier")
                 observations.extend(
                     _import_observations(
                         relative_path,
@@ -281,11 +419,21 @@ def extract_javascript_file_observations(
                         profile,
                         line_number,
                         "side_effect_import",
-                        side_effect_match.group("specifier"),
+                        specifier,
                         module_canonical_key,
                         repository_paths,
                     )
                 )
+                framework_reference = _framework_specifier_observation(
+                    relative_path,
+                    js_format,
+                    profile,
+                    line_number,
+                    specifier,
+                    module_canonical_key,
+                )
+                if framework_reference is not None:
+                    add_framework_observation(framework_reference)
 
         export_from_match = EXPORT_FROM_RE.match(stripped)
         if export_from_match:
@@ -302,6 +450,16 @@ def extract_javascript_file_observations(
                     repository_paths,
                 )
             )
+            framework_reference = _framework_specifier_observation(
+                relative_path,
+                js_format,
+                profile,
+                line_number,
+                specifier,
+                module_canonical_key,
+            )
+            if framework_reference is not None:
+                add_framework_observation(framework_reference)
         else:
             export_decl_match = EXPORT_DECL_RE.match(stripped)
             if export_decl_match:
@@ -337,6 +495,70 @@ def extract_javascript_file_observations(
                     repository_paths,
                 )
             )
+            target, reason = _specifier_target(relative_path, specifier, repository_paths)
+            add_framework_observation(
+                _framework_observation(
+                    "node.require",
+                    relative_path,
+                    js_format,
+                    profile,
+                    line_number,
+                    specifier,
+                    module_canonical_key,
+                    target=target,
+                    metadata={
+                        "specifier": _safe_summary(_sanitize_url(specifier)),
+                        "target_key": target,
+                        "resolution_reason": reason,
+                        "module_system": "commonjs",
+                        "not_loaded": True,
+                    },
+                )
+            )
+            framework_reference = _framework_specifier_observation(
+                relative_path,
+                js_format,
+                profile,
+                line_number,
+                specifier,
+                module_canonical_key,
+            )
+            if framework_reference is not None:
+                add_framework_observation(framework_reference)
+
+        if MODULE_EXPORTS_RE.search(stripped):
+            add_framework_observation(
+                _framework_observation(
+                    "node.export",
+                    relative_path,
+                    js_format,
+                    profile,
+                    line_number,
+                    "module.exports",
+                    module_canonical_key,
+                    metadata={
+                        "export_kind": "module.exports",
+                        "module_system": "commonjs",
+                    },
+                )
+            )
+        for match in NAMED_EXPORTS_RE.finditer(stripped):
+            add_framework_observation(
+                _framework_observation(
+                    "node.export",
+                    relative_path,
+                    js_format,
+                    profile,
+                    line_number,
+                    match.group("name"),
+                    module_canonical_key,
+                    metadata={
+                        "export_kind": "exports.name",
+                        "exported_name": match.group("name"),
+                        "module_system": "commonjs",
+                    },
+                )
+            )
 
         for match in DYNAMIC_IMPORT_LITERAL_RE.finditer(stripped):
             specifier = match.group("specifier")
@@ -365,6 +587,185 @@ def extract_javascript_file_observations(
                 repository_paths,
             )
         )
+
+        for framework_observation in _jquery_observations(
+            relative_path,
+            js_format,
+            profile,
+            line_number,
+            stripped,
+            module_canonical_key,
+            repository_paths,
+        ):
+            if framework_observation.kind == "js.parse_error":
+                observations.append(framework_observation)
+            else:
+                add_framework_observation(framework_observation)
+
+        express_app_match = EXPRESS_APP_RE.search(stripped)
+        if express_app_match:
+            add_framework_observation(
+                _framework_observation(
+                    "express.app",
+                    relative_path,
+                    js_format,
+                    profile,
+                    line_number,
+                    express_app_match.group("name"),
+                    module_canonical_key,
+                    metadata={"app_name": express_app_match.group("name")},
+                )
+            )
+        express_router_match = EXPRESS_ROUTER_RE.search(stripped)
+        if express_router_match:
+            add_framework_observation(
+                _framework_observation(
+                    "express.router",
+                    relative_path,
+                    js_format,
+                    profile,
+                    line_number,
+                    express_router_match.group("name"),
+                    module_canonical_key,
+                    metadata={"router_name": express_router_match.group("name")},
+                )
+            )
+
+        express_route = _express_route_metadata(stripped)
+        if express_route is not None:
+            add_framework_observation(
+                _framework_observation(
+                    "express.route",
+                    relative_path,
+                    js_format,
+                    profile,
+                    line_number,
+                    express_route["route_name"],
+                    module_canonical_key,
+                    metadata=express_route,
+                )
+            )
+            if express_route["route_method"] == "USE":
+                add_framework_observation(
+                    _framework_observation(
+                        "express.middleware",
+                        relative_path,
+                        js_format,
+                        profile,
+                        line_number,
+                        express_route["route_name"],
+                        module_canonical_key,
+                        metadata=express_route,
+                    )
+                )
+            if express_route.get("error_handler"):
+                add_framework_observation(
+                    _framework_observation(
+                        "express.error_handler",
+                        relative_path,
+                        js_format,
+                        profile,
+                        line_number,
+                        express_route["route_name"],
+                        module_canonical_key,
+                        metadata=express_route,
+                    )
+                )
+            if not express_route["dynamic"] and express_route.get("route_pattern"):
+                route_count += 1
+                pointer = (
+                    f"/routes/{express_route['route_method'].lower()}:"
+                    f"{express_route['route_pattern']}"
+                )
+                observations.append(
+                    _definition_observation(
+                        "js.route",
+                        relative_path,
+                        js_format,
+                        profile,
+                        line_number,
+                        f"{express_route['route_method']} {express_route['route_pattern']}",
+                        js_route_key(relative_path, pointer),
+                        source_key=module_canonical_key,
+                        metadata={
+                            "route_method": express_route["route_method"],
+                            "route_pattern": express_route["route_pattern"],
+                            "route_pointer": pointer,
+                            "identity_strength": "structural",
+                            "route_ordinal": route_count,
+                        },
+                    )
+                )
+
+        for decorator_match in NEST_DECORATOR_RE.finditer(stripped):
+            add_framework_observation(
+                _framework_observation(
+                    "nest.decorator",
+                    relative_path,
+                    js_format,
+                    "nestjs",
+                    line_number,
+                    decorator_match.group("name"),
+                    module_canonical_key,
+                    metadata={
+                        "decorator_name": decorator_match.group("name"),
+                        "decorator_args_summary": _safe_summary(
+                            decorator_match.group("args")
+                        ),
+                    },
+                )
+            )
+        nest_line_decorator = NEST_DECORATOR_LINE_RE.match(stripped)
+        if nest_line_decorator:
+            pending_nest_decorators.append(
+                {
+                    "name": nest_line_decorator.group("name"),
+                    "args": nest_line_decorator.group("args") or "",
+                    "line_number": line_number,
+                }
+            )
+
+        if next_route is not None and next_route["route_file_kind"] == "route":
+            next_export_match = NEXT_HTTP_EXPORT_RE.match(stripped)
+            if next_export_match:
+                http_method = next_export_match.group("method")
+                add_framework_observation(
+                    _framework_observation(
+                        "next.route",
+                        relative_path,
+                        js_format,
+                        "next",
+                        line_number,
+                        f"{http_method} {next_route['route_pattern']}",
+                        module_canonical_key,
+                        metadata={
+                            **next_route,
+                            "http_method": http_method,
+                            "route_method": http_method,
+                        },
+                    )
+                )
+                route_count += 1
+                pointer = f"/routes/{http_method.lower()}:{next_route['route_pattern']}"
+                observations.append(
+                    _definition_observation(
+                        "js.route",
+                        relative_path,
+                        js_format,
+                        "next",
+                        line_number,
+                        f"{http_method} {next_route['route_pattern']}",
+                        js_route_key(relative_path, pointer),
+                        source_key=module_canonical_key,
+                        metadata={
+                            "route_method": http_method,
+                            "route_pattern": next_route["route_pattern"],
+                            "route_pointer": pointer,
+                            "identity_strength": "structural",
+                            "route_ordinal": route_count,
+                        },
+                    )
+                )
 
         class_match = CLASS_RE.match(stripped)
         if class_match:
@@ -399,7 +800,29 @@ def extract_javascript_file_observations(
                         module_canonical_key,
                     )
                 )
-            class_stack.append((class_name, class_key, _brace_delta(stripped)))
+            nest_metadata = _nest_class_metadata(class_name, pending_nest_decorators)
+            if nest_metadata is not None:
+                nest_kind = nest_metadata.pop("kind")
+                add_framework_observation(
+                    _framework_observation(
+                        nest_kind,
+                        relative_path,
+                        js_format,
+                        "nestjs",
+                        line_number,
+                        class_name,
+                        module_canonical_key,
+                        metadata=nest_metadata,
+                    )
+                )
+                if nest_kind == "nest.controller":
+                    nest_controller_prefixes[class_name] = nest_metadata.get(
+                        "controller_prefix"
+                    )
+            pending_nest_decorators.clear()
+            class_depth = _brace_delta(stripped)
+            if class_depth > 0:
+                class_stack.append((class_name, class_key, class_depth))
             pending_angular_component = False
             continue
 
@@ -426,6 +849,52 @@ def extract_javascript_file_observations(
                         },
                     )
                 )
+                nest_route = _nest_route_metadata(
+                    current_class[0],
+                    method_name,
+                    nest_controller_prefixes.get(current_class[0]),
+                    pending_nest_decorators,
+                )
+                if nest_route is not None:
+                    add_framework_observation(
+                        _framework_observation(
+                            "nest.route",
+                            relative_path,
+                            js_format,
+                            "nestjs",
+                            line_number,
+                            f"{nest_route['route_method']} {nest_route['route_pattern']}",
+                            module_canonical_key,
+                            metadata=nest_route,
+                        )
+                    )
+                    if not nest_route["dynamic"] and nest_route.get("route_pattern"):
+                        route_count += 1
+                        pointer = (
+                            f"/routes/{nest_route['route_method'].lower()}:"
+                            f"{nest_route['controller_prefix']}/"
+                            f"{nest_route['route_pattern']}"
+                        )
+                        observations.append(
+                            _definition_observation(
+                                "js.route",
+                                relative_path,
+                                js_format,
+                                "nestjs",
+                                line_number,
+                                f"{nest_route['route_method']} {nest_route['route_pattern']}",
+                                js_route_key(relative_path, pointer),
+                                source_key=module_canonical_key,
+                                metadata={
+                                    "route_method": nest_route["route_method"],
+                                    "route_pattern": nest_route["route_pattern"],
+                                    "route_pointer": pointer,
+                                    "identity_strength": "structural",
+                                    "route_ordinal": route_count,
+                                },
+                            )
+                        )
+                pending_nest_decorators.clear()
 
         observations.extend(
             _function_and_variable_observations(
@@ -471,6 +940,22 @@ def extract_javascript_file_observations(
                     },
                 )
             )
+            add_framework_observation(
+                _framework_observation(
+                    "jest.suite",
+                    relative_path,
+                    js_format,
+                    "jest",
+                    line_number,
+                    f"describe[{suite_count}]",
+                    module_canonical_key,
+                    metadata={
+                        "test_framework": "jest",
+                        "test_name_summary": _safe_summary(suite_match.group("name")),
+                        "suite_key": suite_key,
+                    },
+                )
+            )
 
         case_match = JEST_CASE_RE.search(stripped)
         if case_match and _is_jest_profile(profile, relative_path, content):
@@ -496,7 +981,28 @@ def extract_javascript_file_observations(
                     },
                 )
             )
+            add_framework_observation(
+                _framework_observation(
+                    "jest.test",
+                    relative_path,
+                    js_format,
+                    "jest",
+                    line_number,
+                    f"{case_match.group('call')}[{count}]",
+                    module_canonical_key,
+                    metadata={
+                        "test_framework": "jest",
+                        "test_call": case_match.group("call"),
+                        "test_name_summary": _safe_summary(case_match.group("name")),
+                        "suite_key": owner_key,
+                        "test_key": test_key,
+                    },
+                )
+            )
         if "expect(" in stripped and _is_jest_profile(profile, relative_path, content):
+            matchers = tuple(
+                dict.fromkeys(match.group("matcher") for match in JEST_MATCHER_RE.finditer(stripped))
+            )
             observations.append(
                 _observation(
                     kind="js.test_expectation",
@@ -514,6 +1020,40 @@ def extract_javascript_file_observations(
                     },
                 )
             )
+            add_framework_observation(
+                _framework_observation(
+                    "jest.expectation",
+                    relative_path,
+                    js_format,
+                    "jest",
+                    line_number,
+                    "expect",
+                    module_canonical_key,
+                    metadata={
+                        "test_framework": "jest",
+                        "expectation_count": stripped.count("expect("),
+                        "matchers": list(matchers),
+                        "source_key": current_suite_key or module_canonical_key,
+                    },
+                )
+            )
+        if _is_jest_profile(profile, relative_path, content):
+            for mock_match in JEST_MOCK_RE.finditer(stripped):
+                add_framework_observation(
+                    _framework_observation(
+                        "jest.mock",
+                        relative_path,
+                        js_format,
+                        "jest",
+                        line_number,
+                        mock_match.group("kind"),
+                        module_canonical_key,
+                        metadata={
+                            "test_framework": "jest",
+                            "mock_kind": mock_match.group("kind"),
+                        },
+                    )
+                )
 
         for hook in REACT_HOOKS:
             if re.search(rf"\b{hook}\s*\(", stripped):
@@ -584,6 +1124,10 @@ def _detect_profile(relative_path: str, content: str, js_format: str) -> str:
     path = PurePosixPath(relative_path)
     lower_path = relative_path.lower()
     lower_content = content.lower()
+    if _next_route_metadata(relative_path, js_format) is not None or re.search(
+        r"""from\s+["']next(?:/[^"']*)?["']""", content
+    ):
+        return "next"
     if (
         "__tests__" in path.parts
         or ".test." in path.name
@@ -592,6 +1136,14 @@ def _detect_profile(relative_path: str, content: str, js_format: str) -> str:
         or re.search(r"\bdescribe\s*\(", content)
     ):
         return "jest"
+    if "@nestjs/" in content or NEST_DECORATOR_RE.search(content):
+        return "nestjs"
+    if _has_jquery_marker(content):
+        return "jquery"
+    if _is_node_entrypoint(relative_path, content):
+        return "node"
+    if _has_express_marker(content):
+        return "express"
     if "report" in lower_path or "coverage" in path.parts:
         return "test_report_asset"
     if ".repomap/source-artifacts/" in lower_path or "_files/" in lower_path:
@@ -621,6 +1173,514 @@ def _detect_module_system(content: str) -> str:
     if has_commonjs:
         return "commonjs"
     return "script"
+
+
+def _framework_observation(
+    kind: str,
+    relative_path: str,
+    js_format: str,
+    profile: str,
+    line_number: int,
+    name: str,
+    source_key: str,
+    *,
+    metadata: dict[str, Any],
+    target: str | None = None,
+) -> RawObservation:
+    payload = {
+        "format": js_format,
+        "profile": profile,
+        "profiles": [profile],
+        "parser": PARSER,
+        "source_key": source_key,
+        "raw_profile_observation": True,
+    }
+    payload.update(metadata)
+    return _observation(
+        kind=kind,
+        relative_path=relative_path,
+        source_id=(
+            f"{relative_path}#{kind}:{line_number}:"
+            f"{_source_id_fragment(name)}"
+        ),
+        start_line=line_number,
+        name=_safe_summary(name),
+        target=target,
+        metadata=payload,
+    )
+
+
+def _framework_specifier_observation(
+    relative_path: str,
+    js_format: str,
+    profile: str,
+    line_number: int,
+    specifier: str,
+    source_key: str,
+) -> RawObservation | None:
+    if not _is_framework_specifier(specifier):
+        return None
+    return _framework_observation(
+        "js.framework_reference",
+        relative_path,
+        js_format,
+        profile,
+        line_number,
+        specifier,
+        source_key,
+        metadata={
+            "reference_kind": "framework-package",
+            "specifier": _safe_summary(_sanitize_url(specifier)),
+            "package_name": _package_name(specifier),
+            "not_loaded": True,
+            "not_fetched": True,
+        },
+    )
+
+
+def _is_framework_specifier(specifier: str) -> bool:
+    return specifier == "express" or specifier == "jquery" or any(
+        specifier.startswith(prefix) for prefix in FRAMEWORK_SPECIFIER_PREFIXES
+    )
+
+
+def _has_express_marker(content: str) -> bool:
+    return bool(
+        re.search(r"""require\s*\(\s*["']express["']\s*\)""", content)
+        or re.search(r"""from\s+["']express["']""", content)
+        or "express()" in content
+        or "express.Router" in content
+    )
+
+
+def _has_jquery_marker(content: str) -> bool:
+    return bool(
+        "jQuery(" in content
+        or "$.ajax" in content
+        or "$.get" in content
+        or "$.post" in content
+        or "$.fn." in content
+        or re.search(r"""\$\([^)]*["'][^"']+["'][^)]*\)\.(?:on|click|submit|change|ready)""", content)
+    )
+
+
+def _is_node_entrypoint(relative_path: str, content: str) -> bool:
+    path = PurePosixPath(relative_path)
+    stem = path.stem.lower()
+    if stem not in ("server", "app", "index", "main"):
+        return False
+    if path.suffix.lower() not in JS_EXTENSIONS:
+        return False
+    return bool(
+        re.search(r"""require\s*\(\s*["']node:""", content)
+        or re.search(r"""from\s+["']node:""", content)
+        or "process.env." in content
+        or "import.meta.env." in content
+        or "module.exports" in content
+        or "exports." in content
+    )
+
+
+def _next_route_metadata(relative_path: str, js_format: str) -> dict[str, Any] | None:
+    path = PurePosixPath(relative_path)
+    suffix = path.suffix.lower()
+    if suffix not in JS_EXTENSIONS:
+        return None
+    parts = path.parts
+    if not parts:
+        return None
+    if parts[0] == "pages" and len(parts) >= 2:
+        route_parts = list(parts[1:])
+        route_parts[-1] = _strip_js_suffix(route_parts[-1])
+        route_pattern = _route_pattern_from_segments(route_parts)
+        if len(route_parts) >= 2 and route_parts[0] == "api":
+            return {
+                "kind": "next.api_route",
+                "framework": "next",
+                "route_file_kind": "api",
+                "route_pattern": route_pattern,
+                "router": "pages",
+            }
+        if route_parts[-1].startswith("_"):
+            return None
+        return {
+            "kind": "next.page",
+            "framework": "next",
+            "route_file_kind": "page",
+            "route_pattern": route_pattern,
+            "router": "pages",
+        }
+    if parts[0] == "app" and len(parts) >= 2:
+        filename = _strip_js_suffix(parts[-1])
+        if filename not in ("page", "layout", "route", "loading", "error"):
+            return None
+        route_parts = list(parts[1:-1])
+        route_pattern = _route_pattern_from_segments(route_parts)
+        if filename == "route":
+            kind = "next.app_route"
+        elif filename == "page":
+            kind = "next.page"
+        else:
+            kind = "next.component"
+        return {
+            "kind": kind,
+            "framework": "next",
+            "route_file_kind": filename,
+            "route_pattern": route_pattern,
+            "router": "app",
+        }
+    return None
+
+
+def _strip_js_suffix(name: str) -> str:
+    for suffix in sorted(JS_EXTENSIONS, key=len, reverse=True):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def _route_pattern_from_segments(segments: list[str]) -> str:
+    clean_segments = [segment for segment in segments if segment and segment != "index"]
+    if not clean_segments:
+        return "/"
+    return "/" + "/".join(clean_segments)
+
+
+def _express_route_metadata(line: str) -> dict[str, Any] | None:
+    match = EXPRESS_ROUTE_RE.search(line)
+    if not match:
+        return None
+    receiver = match.group("receiver")
+    method = match.group("method").upper()
+    args = _split_js_args(match.group("args"))
+    route_pattern: str | None = None
+    handler_args = args
+    if args:
+        first_literal = _whole_string_literal(args[0])
+        if first_literal is not None:
+            route_pattern = first_literal
+            handler_args = args[1:]
+    dynamic = route_pattern is None
+    identifiers = [_simple_identifier(arg) for arg in handler_args]
+    identifiers = [identifier for identifier in identifiers if identifier is not None]
+    handler_name = identifiers[-1] if identifiers else None
+    middleware_count = max(0, len(identifiers) - (1 if handler_name else 0))
+    error_handler = method == "USE" and any(
+        _looks_like_express_error_handler(arg) for arg in handler_args
+    )
+    route_name = f"{method} {route_pattern or '<dynamic>'}"
+    return {
+        "receiver_name": receiver,
+        "route_method": method,
+        "route_pattern": route_pattern,
+        "route_name": route_name,
+        "handler_name": handler_name,
+        "middleware_count": middleware_count,
+        "dynamic": dynamic,
+        "dynamic_reason": "dynamic-route-path" if dynamic else None,
+        "error_handler": error_handler,
+        "framework": "express",
+    }
+
+
+def _split_js_args(raw_args: str) -> list[str]:
+    args: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    escaped = False
+    depth = 0
+    for char in raw_args:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            current.append(char)
+            escaped = True
+            continue
+        if quote is not None:
+            current.append(char)
+            if char == quote:
+                quote = None
+            continue
+        if char in ("'", '"', "`"):
+            quote = char
+            current.append(char)
+            continue
+        if char in "([{":
+            depth += 1
+            current.append(char)
+            continue
+        if char in ")]}":
+            if depth <= 0:
+                break
+            depth -= 1
+            current.append(char)
+            continue
+        if char == "," and depth == 0:
+            value = "".join(current).strip()
+            if value:
+                args.append(value)
+            current = []
+            continue
+        current.append(char)
+    value = "".join(current).strip().rstrip(";")
+    if value:
+        args.append(value)
+    return args
+
+
+def _whole_string_literal(value: str) -> str | None:
+    stripped = value.strip()
+    if len(stripped) < 2 or stripped[0] not in ("'", '"') or stripped[-1] != stripped[0]:
+        return None
+    return stripped[1:-1]
+
+
+def _first_string_literal(value: str | None) -> str | None:
+    if not value:
+        return None
+    match = STRING_LITERAL_RE.search(value)
+    if not match:
+        return None
+    return match.group("value")
+
+
+def _simple_identifier(value: str) -> str | None:
+    stripped = value.strip()
+    if re.fullmatch(r"[A-Za-z_$][\w$]*", stripped):
+        return stripped
+    return None
+
+
+def _looks_like_express_error_handler(value: str) -> bool:
+    compact = re.sub(r"\s+", " ", value.strip())
+    return bool(
+        re.search(r"\(\s*err\s*,\s*req\s*,\s*res\s*,\s*next\s*\)", compact)
+        or re.search(r"function\s*\(\s*err\s*,\s*req\s*,\s*res\s*,\s*next\s*\)", compact)
+    )
+
+
+def _nest_class_metadata(
+    class_name: str, decorators: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    for decorator in decorators:
+        name = decorator["name"]
+        args = decorator.get("args", "")
+        if name == "Module":
+            return {
+                "kind": "nest.module",
+                "module_name": class_name,
+                "imports": _extract_nest_array_names(args, "imports"),
+                "controllers": _extract_nest_array_names(args, "controllers"),
+                "providers": _extract_nest_array_names(args, "providers"),
+            }
+        if name == "Controller":
+            return {
+                "kind": "nest.controller",
+                "controller_name": class_name,
+                "controller_prefix": _first_string_literal(args),
+                "dynamic": _first_string_literal(args) is None and bool(args.strip()),
+            }
+        if name == "Injectable":
+            return {"kind": "nest.provider", "provider_name": class_name}
+    return None
+
+
+def _extract_nest_array_names(args: str, key: str) -> list[str]:
+    match = re.search(rf"\b{re.escape(key)}\s*:\s*\[(?P<body>[^\]]*)\]", args)
+    if not match:
+        return []
+    names: list[str] = []
+    for part in match.group("body").split(","):
+        name = part.strip()
+        if re.fullmatch(r"[A-Za-z_$][\w$]*", name):
+            names.append(name)
+    return names
+
+
+def _nest_route_metadata(
+    controller_name: str,
+    method_name: str,
+    controller_prefix: str | None,
+    decorators: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    for decorator in decorators:
+        name = decorator["name"]
+        if name not in NEST_HTTP_DECORATORS:
+            continue
+        route_pattern = _first_string_literal(decorator.get("args", "")) or ""
+        return {
+            "controller_name": controller_name,
+            "method_name": method_name,
+            "controller_prefix": controller_prefix,
+            "route_method": name.upper() if name != "All" else "ALL",
+            "route_pattern": route_pattern,
+            "dynamic": route_pattern == "" and bool(decorator.get("args", "").strip()),
+            "framework": "nestjs",
+        }
+    return None
+
+
+def _jquery_observations(
+    relative_path: str,
+    js_format: str,
+    profile: str,
+    line_number: int,
+    line: str,
+    source_key: str,
+    repository_paths: frozenset[str] | None,
+) -> tuple[RawObservation, ...]:
+    observations: list[RawObservation] = []
+    for match in JQUERY_SELECTOR_RE.finditer(line):
+        selector = match.group("selector")
+        if len(selector) > MAX_SELECTOR_LENGTH or _is_secret_prone(selector):
+            observations.append(
+                _parse_error(
+                    relative_path,
+                    js_format,
+                    profile,
+                    "framework-selector-limit",
+                    "jQuery selector exceeded static scanner limit or redaction policy",
+                    line_number,
+                )
+            )
+            continue
+        metadata = {"selector": selector, "selector_length": len(selector)}
+        observations.append(
+            _framework_observation(
+                "jquery.selector",
+                relative_path,
+                js_format,
+                "jquery",
+                line_number,
+                selector,
+                source_key,
+                metadata=metadata,
+            )
+        )
+        observations.append(
+            _framework_observation(
+                "js.dom_selector",
+                relative_path,
+                js_format,
+                "jquery",
+                line_number,
+                selector,
+                source_key,
+                metadata={**metadata, "framework": "jquery"},
+            )
+        )
+    for match in JQUERY_EVENT_RE.finditer(line):
+        event_method = match.group("event")
+        event_name = _first_string_literal(match.group("args")) if event_method == "on" else event_method
+        if not event_name:
+            event_name = event_method
+        metadata = {"event_name": event_name, "event_method": event_method}
+        observations.append(
+            _framework_observation(
+                "jquery.event",
+                relative_path,
+                js_format,
+                "jquery",
+                line_number,
+                event_name,
+                source_key,
+                metadata=metadata,
+            )
+        )
+        observations.append(
+            _framework_observation(
+                "js.dom_event",
+                relative_path,
+                js_format,
+                "jquery",
+                line_number,
+                event_name,
+                source_key,
+                metadata={**metadata, "framework": "jquery"},
+            )
+        )
+    for ajax_method, raw_url in _jquery_ajax_calls(line):
+        target, reason = _specifier_target(relative_path, raw_url, repository_paths)
+        sanitized_url = _sanitize_url(raw_url)
+        url_summary = _safe_summary(sanitized_url, max_length=MAX_URL_SUMMARY_LENGTH)
+        metadata = {
+            "ajax_method": ajax_method,
+            "url_summary": url_summary,
+            "target_key": target,
+            "resolution_reason": reason,
+            "not_fetched": True,
+        }
+        observations.append(
+            _framework_observation(
+                "jquery.ajax",
+                relative_path,
+                js_format,
+                "jquery",
+                line_number,
+                ajax_method,
+                source_key,
+                target=target,
+                metadata=metadata,
+            )
+        )
+        observations.append(
+            _framework_observation(
+                "js.ajax_reference",
+                relative_path,
+                js_format,
+                "jquery",
+                line_number,
+                ajax_method,
+                source_key,
+                target=target,
+                metadata={**metadata, "framework": "jquery"},
+            )
+        )
+    for match in JQUERY_PLUGIN_RE.finditer(line):
+        plugin_name = match.group("name")
+        observations.append(
+            _framework_observation(
+                "jquery.plugin_reference",
+                relative_path,
+                js_format,
+                "jquery",
+                line_number,
+                plugin_name,
+                source_key,
+                metadata={"plugin_name": plugin_name, "not_executed": True},
+            )
+        )
+    return tuple(observations)
+
+
+def _jquery_ajax_calls(line: str) -> tuple[tuple[str, str], ...]:
+    calls: list[tuple[str, str]] = []
+    for match in JQUERY_AJAX_OBJECT_RE.finditer(line):
+        url = _object_literal_string_value(match.group("body"), "url")
+        if url is not None:
+            calls.append(("ajax", url))
+    for match in JQUERY_AJAX_CALL_RE.finditer(line):
+        calls.append((match.group("method"), match.group("url")))
+    for match in JQUERY_LOAD_RE.finditer(line):
+        calls.append(("load", match.group("url")))
+    return tuple(calls)
+
+
+def _object_literal_string_value(body: str, key: str) -> str | None:
+    match = re.search(
+        rf"\b{re.escape(key)}\s*:\s*(?P<quote>['\"])(?P<value>.*?)(?P=quote)",
+        body,
+    )
+    if not match:
+        return None
+    return match.group("value")
+
+
+def _source_id_fragment(value: str) -> str:
+    fragment = re.sub(r"[^A-Za-z0-9_.:-]+", "-", value)
+    return fragment[:80] or "item"
 
 
 def _observation(

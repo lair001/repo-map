@@ -1575,6 +1575,142 @@ FROM canonical_edges;
         self.assertNotIn("placeholder", readback_payload)
         self.assertNotIn("Bearer ${apiToken}", readback_payload)
 
+    def test_storage_loads_js5_framework_observations_as_raw_evidence(self):
+        require_postgres_binaries()
+        fixture_root = discovery_fixture("js5_frameworks")
+
+        discover_exit_code, discover_stdout, discover_stderr = (
+            run_repo_map_in_process(
+                "discover",
+                str(fixture_root),
+                "--jsonl",
+            )
+        )
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as jsonl_file:
+            jsonl_file.write(discover_stdout)
+            jsonl_file.flush()
+
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                storage_args = (
+                    "--root-path",
+                    str(fixture_root),
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                )
+                load_exit_code, _load_stdout, load_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "load-files",
+                        jsonl_file.name,
+                        "--repository-name",
+                        "js5-fixture",
+                        *storage_args,
+                        "--json",
+                    )
+                )
+                raw_kinds_json = postgres.psql_scalar(
+                    """
+SELECT COALESCE(jsonb_agg(payload_json->>'kind' ORDER BY ordinal)::text, '[]')
+FROM raw_observations;
+"""
+                )
+                raw_payload = postgres.psql_scalar(
+                    """
+SELECT COALESCE(jsonb_agg(payload_json ORDER BY ordinal)::text, '[]')
+FROM raw_observations;
+"""
+                )
+                canonical_nodes = query_canonical_node_records(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    psql_command=postgres.psql_command,
+                )
+                canonical_edges = query_canonical_edge_records(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    psql_command=postgres.psql_command,
+                )
+                js_summary = query_js_summary(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    psql_command=postgres.psql_command,
+                )
+
+        self.assertEqual(discover_exit_code, 0, discover_stderr)
+        discovered = [
+            json.loads(line)
+            for line in discover_stdout.splitlines()
+            if line.strip()
+        ]
+        discovered_kinds = {record["kind"] for record in discovered}
+        expected_framework_kinds = {
+            "node.entrypoint",
+            "node.require",
+            "node.export",
+            "express.app",
+            "express.router",
+            "express.route",
+            "express.middleware",
+            "express.error_handler",
+            "nest.module",
+            "nest.controller",
+            "nest.provider",
+            "nest.route",
+            "next.page",
+            "next.api_route",
+            "next.app_route",
+            "next.route",
+            "jest.suite",
+            "jest.test",
+            "jest.expectation",
+            "jest.mock",
+            "jquery.selector",
+            "jquery.event",
+            "jquery.ajax",
+            "jquery.plugin_reference",
+            "js.framework_reference",
+        }
+        self.assertTrue(expected_framework_kinds.issubset(discovered_kinds))
+        self.assertNotIn("fake-js5-jquery-token", discover_stdout)
+        self.assertNotIn("SECRET_TOKEN", discover_stdout)
+
+        self.assertEqual(load_exit_code, 0, load_stderr)
+        raw_kinds = set(json.loads(raw_kinds_json))
+        self.assertTrue(expected_framework_kinds.issubset(raw_kinds))
+        self.assertNotIn("fake-js5-jquery-token", raw_payload)
+        self.assertNotIn("SECRET_TOKEN", raw_payload)
+        canonical_kinds = {node.kind for node in canonical_nodes}
+        self.assertIn("js.file", canonical_kinds)
+        self.assertIn("js.route", canonical_kinds)
+        self.assertFalse(
+            any(
+                node.kind.startswith(
+                    ("express.", "nest.", "next.", "jest.", "jquery.", "node.")
+                )
+                for node in canonical_nodes
+            )
+        )
+        self.assertEqual(
+            {edge.edge_kind for edge in canonical_edges} - {"defines", "references"},
+            set(),
+        )
+        self.assertGreaterEqual(js_summary.js_files, 8)
+        self.assertGreaterEqual(js_summary.routes, 1)
+        self.assertGreaterEqual(js_summary.test_cases, 1)
+
     def test_storage_loads_eml_discovery_into_canonical_readback(self):
         require_postgres_binaries()
         fixture_root = discovery_fixture("mail_basic")

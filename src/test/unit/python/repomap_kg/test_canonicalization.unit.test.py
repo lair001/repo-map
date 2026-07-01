@@ -1263,6 +1263,79 @@ class CanonicalizationUnitTests(unittest.TestCase):
         self.assertEqual(payload["edges"][0]["edge_key"], edge_key)
         self.assertEqual(payload["evidence"][1]["raw_kind"], "js.parse_error")
 
+    def test_js5_framework_profile_observations_are_evidence_only(self):
+        framework_kinds = (
+            "js.framework_profile",
+            "js.runtime_profile",
+            "js.package_context",
+            "js.route_handler",
+            "js.middleware",
+            "js.controller",
+            "js.provider",
+            "js.module_binding",
+            "js.test_config",
+            "js.dom_selector",
+            "js.dom_event",
+            "js.ajax_reference",
+            "js.server_entrypoint",
+            "js.client_entrypoint",
+            "js.framework_reference",
+            "node.entrypoint",
+            "node.export",
+            "node.require",
+            "express.app",
+            "express.router",
+            "express.route",
+            "express.middleware",
+            "express.error_handler",
+            "nest.module",
+            "nest.controller",
+            "nest.provider",
+            "nest.route",
+            "nest.decorator",
+            "next.route",
+            "next.page",
+            "next.api_route",
+            "next.app_route",
+            "next.component",
+            "jest.suite",
+            "jest.test",
+            "jest.expectation",
+            "jest.mock",
+            "jquery.selector",
+            "jquery.event",
+            "jquery.ajax",
+            "jquery.plugin_reference",
+        )
+        observations = [
+            RawObservation(
+                kind=kind,
+                source_id=f"src/app.js#{kind}:1",
+                path="src/app.js",
+                start_line=1,
+                end_line=1,
+                name=kind,
+                confidence="extracted",
+                extractor="repo-js",
+                extractor_version="0.1.0",
+                metadata={
+                    "profile": kind.split(".", 1)[0],
+                    "source_key": js_module_key("src/app.js"),
+                },
+            )
+            for kind in framework_kinds
+        ]
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["diagnostics"], [])
+        self.assertEqual(payload["summary"]["raw_observations"], len(framework_kinds))
+        self.assertEqual(payload["summary"]["evidence"], len(framework_kinds))
+        self.assertEqual(payload["summary"]["nodes"], 0)
+        self.assertEqual(payload["summary"]["edges"], 0)
+
     def test_shell_command_creates_executes_edge_and_inferred_nodes(self):
         observation = RawObservation(
             kind="shell.command",
