@@ -1,4 +1,4 @@
-"""GitHub documented REST API fixture/mock acquisition skeleton."""
+"""GitHub documented REST API acquisition for fixture and public REST modes."""
 
 from __future__ import annotations
 
@@ -6,6 +6,9 @@ import hashlib
 import json
 import re
 import tomllib
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -22,10 +25,13 @@ from repomap_kg.storage import LoadSummary, load_file_observations
 
 EXTRACTOR = "github-api-fixture-ingestion"
 EXTRACTOR_VERSION = "0.1.0"
+DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com"
+DEFAULT_GITHUB_USER_AGENT = f"repomap-kg/{__version__}"
 ALLOWED_SOURCE_TYPES = frozenset({"api.rest"})
 ALLOWED_GITHUB_API_SOURCE_CLASSES = frozenset({"api.github.repository"})
 ALLOWED_POLICY_STATUSES = frozenset({"allowed", "allowed_with_limits"})
 ALLOWED_REPOSITORY_VISIBILITIES = frozenset({"public", "private", "internal"})
+ALLOWED_ACQUISITION_TRANSPORTS = frozenset({"fixture", "github_public_rest"})
 ALLOWED_CREDENTIAL_MODES = frozenset(
     {"none_public_readonly", "pat_readonly_ref", "github_app_installation_ref"}
 )
@@ -94,6 +100,14 @@ SENSITIVE_URL_MARKERS = (
     "sig=",
     "X-Amz-Signature=",
 )
+RATE_LIMIT_HEADERS = (
+    "x-ratelimit-limit",
+    "x-ratelimit-remaining",
+    "x-ratelimit-used",
+    "x-ratelimit-reset",
+    "x-ratelimit-resource",
+)
+BODY_FIELDS = frozenset({"body"})
 
 
 class GitHubApiPolicyError(ValueError):
@@ -110,7 +124,7 @@ class GitHubEndpointConfig:
     max_page_size: int
     pagination: str
     downstream_route: str
-    fixture_response_path: str
+    fixture_response_path: str | None
     data_class: str
 
     def plan_payload(self) -> dict[str, Any]:
@@ -130,6 +144,11 @@ class GitHubEndpointConfig:
 @dataclass(frozen=True)
 class GitHubApiSourceConfig:
     config_path: Path
+    acquisition_transport: str
+    base_url: str
+    timeout_seconds: int
+    follow_redirects: bool
+    user_agent: str
     source_id: str
     source_type: str
     api_source_class: str
@@ -196,6 +215,7 @@ class GitHubApiPlanManifest:
     owner: str
     repository: str
     repository_visibility: str
+    transport: str
     credential_mode: str
     api_run_id: str
     api_manifest_id: str
@@ -211,6 +231,7 @@ class GitHubApiPlanManifest:
     redaction_profile: str
     sensitivity: str
     manifest_sha256: str = ""
+    network_capable: bool = False
     no_network: bool = True
     no_mutation: bool = True
     no_credentials_resolved: bool = True
@@ -234,6 +255,7 @@ class GitHubApiPlanManifest:
             "owner": self.owner,
             "repository": self.repository,
             "repository_visibility": self.repository_visibility,
+            "transport": self.transport,
             "credential_mode": self.credential_mode,
             "request_count": self.request_count,
             "requests": [request.to_jsonable() for request in self.requests],
@@ -250,6 +272,7 @@ class GitHubApiPlanManifest:
             "redaction_profile": self.redaction_profile,
             "sensitivity": self.sensitivity,
             "manifest_sha256": self.manifest_sha256,
+            "network_capable": self.network_capable,
             "no_network": self.no_network,
             "no_mutation": self.no_mutation,
             "no_credentials_resolved": self.no_credentials_resolved,
@@ -263,6 +286,8 @@ class GitHubTransportResponse:
     status_code: int
     body: bytes
     response_type: str = "application/json"
+    headers: Mapping[str, str] = field(default_factory=dict)
+    rate_limit: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -276,10 +301,12 @@ class GitHubResponseRecord:
     response_byte_count: int
     response_sha256: str
     artifact_path: str
+    transport: str
     redacted: bool
     redaction_profile: str
     retention_policy: str
     downstream_route: str
+    rate_limit: Mapping[str, str] = field(default_factory=dict)
 
     def to_jsonable(self) -> dict[str, Any]:
         return {
@@ -292,10 +319,12 @@ class GitHubResponseRecord:
             "response_byte_count": self.response_byte_count,
             "response_sha256": self.response_sha256,
             "artifact_path": self.artifact_path,
+            "transport": self.transport,
             "redacted": self.redacted,
             "redaction_profile": self.redaction_profile,
             "retention_policy": self.retention_policy,
             "downstream_route": self.downstream_route,
+            "rate_limit": dict(self.rate_limit),
         }
 
 
@@ -310,6 +339,7 @@ class GitHubApiAcquireSummary:
     owner: str
     repository: str
     repository_visibility: str
+    transport: str
     credential_mode: str
     api_run_id: str
     api_manifest_id: str
@@ -325,6 +355,7 @@ class GitHubApiAcquireSummary:
     no_mutation: bool = True
     no_credentials_resolved: bool = True
     no_scheduler: bool = True
+    network_capable: bool = False
     fixture_transport_only: bool = True
 
     def to_jsonable(self) -> dict[str, Any]:
@@ -338,6 +369,7 @@ class GitHubApiAcquireSummary:
             "owner": self.owner,
             "repository": self.repository,
             "repository_visibility": self.repository_visibility,
+            "transport": self.transport,
             "credential_mode": self.credential_mode,
             "api_run_id": self.api_run_id,
             "api_manifest_id": self.api_manifest_id,
@@ -355,6 +387,7 @@ class GitHubApiAcquireSummary:
             "no_mutation": self.no_mutation,
             "no_credentials_resolved": self.no_credentials_resolved,
             "no_scheduler": self.no_scheduler,
+            "network_capable": self.network_capable,
             "fixture_transport_only": self.fixture_transport_only,
         }
 
@@ -374,6 +407,59 @@ class FixtureGitHubApiTransport:
             status_code=200,
             body=body,
             response_type=endpoint.response_type,
+        )
+
+
+class PublicGitHubRestTransport:
+    """Unauthenticated public GitHub REST transport for planned GET requests."""
+
+    def __init__(self, *, opener: Any | None = None) -> None:
+        self.opener = opener or urllib.request.build_opener(_NoRedirectHandler())
+
+    def fetch(
+        self,
+        config: GitHubApiSourceConfig,
+        request: GitHubRequestPlan,
+    ) -> GitHubTransportResponse:
+        if config.acquisition_transport != "github_public_rest":
+            raise GitHubApiPolicyError("PublicGitHubRestTransport requires github_public_rest")
+        if request.method != "GET":
+            raise GitHubApiPolicyError("GitHub REST transport only allows GET")
+        url = github_public_rest_url(config, request)
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": config.user_agent,
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        validate_no_auth_headers(headers)
+        http_request = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            response = self.opener.open(
+                http_request,
+                timeout=config.timeout_seconds,
+            )
+        except urllib.error.HTTPError as error:
+            headers_map = header_mapping(error.headers)
+            body = error.read(config.max_bytes_per_run + 1)
+            return GitHubTransportResponse(
+                status_code=error.code,
+                body=body,
+                response_type=content_type_from_headers(headers_map),
+                headers=headers_map,
+                rate_limit=rate_limit_headers(headers_map),
+            )
+        except urllib.error.URLError as error:
+            raise GitHubApiPolicyError(
+                f"GitHub REST acquisition failed: {error.reason}"
+            ) from error
+        headers_map = header_mapping(getattr(response, "headers", {}))
+        body = response.read(config.max_bytes_per_run + 1)
+        return GitHubTransportResponse(
+            status_code=int(getattr(response, "status", response.getcode())),
+            body=body,
+            response_type=content_type_from_headers(headers_map),
+            headers=headers_map,
+            rate_limit=rate_limit_headers(headers_map),
         )
 
 
@@ -417,10 +503,22 @@ def load_github_api_source_config(path: Path | str) -> GitHubApiSourceConfig:
         mutation_allowed=mutation_allowed,
         credential_mode=credential_mode,
     )
+    (
+        acquisition_transport,
+        base_url,
+        timeout_seconds,
+        follow_redirects,
+        user_agent,
+    ) = acquisition_config_from_payload(
+        payload,
+        credential_mode=credential_mode,
+        repository_visibility=repository_visibility,
+    )
     credentials_ref = credentials_ref_from_payload(
         payload,
         credential_mode=credential_mode,
         repository_visibility=repository_visibility,
+        acquisition_transport=acquisition_transport,
     )
 
     consent_ref = required_string(consent, "consent_ref")
@@ -476,11 +574,17 @@ def load_github_api_source_config(path: Path | str) -> GitHubApiSourceConfig:
             owner=owner,
             repository=repository,
             authorized_data_classes=authorized_data_classes,
+            acquisition_transport=acquisition_transport,
         )
         for endpoint in endpoints
     )
     return GitHubApiSourceConfig(
         config_path=config_path,
+        acquisition_transport=acquisition_transport,
+        base_url=base_url,
+        timeout_seconds=timeout_seconds,
+        follow_redirects=follow_redirects,
+        user_agent=user_agent,
         source_id=source_id,
         source_type=source_type,
         api_source_class=api_source_class,
@@ -533,6 +637,7 @@ def build_github_api_plan(config: GitHubApiSourceConfig) -> GitHubApiPlanManifes
                     "source_id": config.source_id,
                     "owner": config.owner,
                     "repository": config.repository,
+                    "transport": config.acquisition_transport,
                     "endpoint": endpoint.plan_payload(),
                 }
             )[:24],
@@ -551,6 +656,7 @@ def build_github_api_plan(config: GitHubApiSourceConfig) -> GitHubApiPlanManifes
         owner=config.owner,
         repository=config.repository,
         repository_visibility=config.repository_visibility,
+        transport=config.acquisition_transport,
         credential_mode=config.credential_mode,
         api_run_id=run_id,
         api_manifest_id=manifest_id,
@@ -565,6 +671,9 @@ def build_github_api_plan(config: GitHubApiSourceConfig) -> GitHubApiPlanManifes
         retention_policy=config.retention_policy,
         redaction_profile=config.redaction_profile,
         sensitivity=config.sensitivity,
+        network_capable=config.acquisition_transport == "github_public_rest",
+        no_network=config.acquisition_transport == "fixture",
+        fixture_transport_only=config.acquisition_transport == "fixture",
     )
     return replace(manifest, manifest_sha256=manifest_digest(manifest))
 
@@ -578,20 +687,17 @@ def acquire_github_api_source(
     git_commit: str | None = None,
     psql_command: str = "psql",
     loader: Callable[..., LoadSummary] = load_file_observations,
-    transport: FixtureGitHubApiTransport | None = None,
+    transport: Any | None = None,
 ) -> GitHubApiAcquireSummary:
     config = load_github_api_source_config(config_path)
     repo_root = Path(root_path).resolve()
     manifest = build_github_api_plan(config)
-    fixture_transport = transport or FixtureGitHubApiTransport()
+    selected_transport = transport or github_transport_for_config(config)
     fetched: list[tuple[GitHubRequestPlan, GitHubTransportResponse, Any]] = []
     total_bytes = 0
     for request in manifest.requests:
-        response = fixture_transport.fetch(config, request)
-        if response.status_code < 200 or response.status_code >= 300:
-            raise GitHubApiPolicyError(
-                f"endpoint {request.endpoint_name} returned status {response.status_code}"
-            )
+        response = selected_transport.fetch(config, request)
+        validate_transport_response(config, request, response)
         total_bytes += len(response.body)
         if total_bytes > config.max_bytes_per_run:
             raise GitHubApiPolicyError("response bytes exceed max_bytes_per_run")
@@ -633,6 +739,7 @@ def acquire_github_api_source(
         owner=config.owner,
         repository=config.repository,
         repository_visibility=config.repository_visibility,
+        transport=config.acquisition_transport,
         credential_mode=config.credential_mode,
         api_run_id=manifest.api_run_id,
         api_manifest_id=manifest.api_manifest_id,
@@ -644,6 +751,9 @@ def acquire_github_api_source(
         manifest=manifest,
         response_records=tuple(records),
         load_summary=load_summary,
+        no_network=config.acquisition_transport == "fixture",
+        network_capable=config.acquisition_transport == "github_public_rest",
+        fixture_transport_only=config.acquisition_transport == "fixture",
     )
 
 
@@ -684,10 +794,12 @@ def write_github_api_run_files(
                 response_byte_count=len(response.body),
                 response_sha256=sha256_bytes(response.body),
                 artifact_path=relative_artifact,
+                transport=config.acquisition_transport,
                 redacted=True,
                 redaction_profile=config.redaction_profile,
                 retention_policy=config.retention_policy,
                 downstream_route=request.downstream_route,
+                rate_limit=dict(response.rate_limit),
             )
         )
     write_json(output_path / "plan.json", manifest.to_jsonable())
@@ -917,6 +1029,7 @@ def annotate_github_observation(
             "owner": config.owner,
             "repository": config.repository,
             "repository_visibility": config.repository_visibility,
+            "transport": config.acquisition_transport,
             "api_run_id": manifest.api_run_id,
             "api_manifest_id": manifest.api_manifest_id,
             "endpoint_name": record.endpoint_name,
@@ -944,6 +1057,7 @@ def github_base_metadata(
         "owner": config.owner,
         "repository": config.repository,
         "repository_visibility": config.repository_visibility,
+        "transport": config.acquisition_transport,
         "credential_mode": config.credential_mode,
         "api_run_id": manifest.api_run_id,
         "api_manifest_id": manifest.api_manifest_id,
@@ -951,11 +1065,12 @@ def github_base_metadata(
         "api_retention_policy": config.retention_policy,
         "api_sensitivity": config.sensitivity,
         "redaction_profile": config.redaction_profile,
-        "no_network": True,
+        "network_capable": config.acquisition_transport == "github_public_rest",
+        "no_network": config.acquisition_transport == "fixture",
         "no_mutation": True,
         "no_credentials_resolved": True,
         "no_scheduler": True,
-        "fixture_transport_only": True,
+        "fixture_transport_only": config.acquisition_transport == "fixture",
     }
 
 
@@ -1007,13 +1122,52 @@ def validate_source_identity(
         )
 
 
+def acquisition_config_from_payload(
+    payload: Mapping[str, Any],
+    *,
+    credential_mode: str,
+    repository_visibility: str,
+) -> tuple[str, str, int, bool, str]:
+    acquisition = payload.get("acquisition")
+    if acquisition is None:
+        return ("fixture", DEFAULT_GITHUB_API_BASE_URL, 10, False, DEFAULT_GITHUB_USER_AGENT)
+    if not isinstance(acquisition, Mapping):
+        raise GitHubApiPolicyError("acquisition table is required when present")
+    transport = str(acquisition.get("transport") or "fixture")
+    if transport not in ALLOWED_ACQUISITION_TRANSPORTS:
+        raise GitHubApiPolicyError(f"unsupported acquisition.transport: {transport}")
+    base_url = str(acquisition.get("base_url") or DEFAULT_GITHUB_API_BASE_URL).rstrip("/")
+    timeout_seconds = optional_positive_int(acquisition, "timeout_seconds", default=10)
+    follow_redirects = optional_bool(acquisition, "follow_redirects", default=False)
+    user_agent = str(acquisition.get("user_agent") or DEFAULT_GITHUB_USER_AGENT)
+    if not user_agent or "\n" in user_agent or "\r" in user_agent:
+        raise GitHubApiPolicyError("acquisition.user_agent must be a safe header value")
+    if transport == "github_public_rest":
+        if repository_visibility != "public":
+            raise GitHubApiPolicyError("github_public_rest requires a public repository")
+        if credential_mode != "none_public_readonly":
+            raise GitHubApiPolicyError(
+                "github_public_rest requires credential_mode none_public_readonly"
+            )
+        if base_url != DEFAULT_GITHUB_API_BASE_URL:
+            raise GitHubApiPolicyError("acquisition.base_url must be https://api.github.com")
+        if follow_redirects:
+            raise GitHubApiPolicyError("github_public_rest must not follow redirects")
+    return (transport, base_url, timeout_seconds, follow_redirects, user_agent)
+
+
 def credentials_ref_from_payload(
     payload: Mapping[str, Any],
     *,
     credential_mode: str,
     repository_visibility: str,
+    acquisition_transport: str,
 ) -> str | None:
     credentials = payload.get("credentials")
+    if acquisition_transport == "github_public_rest" and credentials is not None:
+        raise GitHubApiPolicyError(
+            "credentials table is not allowed for github_public_rest"
+        )
     if credential_mode == "none_public_readonly":
         if repository_visibility != "public":
             raise GitHubApiPolicyError("public unauthenticated mode requires public repo")
@@ -1101,6 +1255,7 @@ def parse_github_endpoint(
     owner: str,
     repository: str,
     authorized_data_classes: tuple[str, ...],
+    acquisition_transport: str,
 ) -> GitHubEndpointConfig:
     name = required_string(payload, "name")
     method = required_string(payload, "method").upper()
@@ -1110,7 +1265,7 @@ def parse_github_endpoint(
     max_page_size = required_positive_int(payload, "max_page_size")
     pagination = required_string(payload, "pagination")
     downstream_route = required_string(payload, "downstream_route")
-    fixture_response_path = required_string(payload, "fixture_response_path")
+    fixture_response_path = optional_string(payload, "fixture_response_path")
     if method != "GET":
         raise GitHubApiPolicyError("GITHUB_API1 only allows GET endpoints")
     if not path.startswith("/") or "://" in path:
@@ -1124,12 +1279,21 @@ def parse_github_endpoint(
     if owner in path or repository in path:
         raise GitHubApiPolicyError("endpoint path must use owner/repo placeholders")
     if pagination != "none":
-        raise GitHubApiPolicyError("GITHUB_API1 only supports pagination = none")
+        raise GitHubApiPolicyError(
+            "GitHub API acquisition only supports pagination = none in this phase"
+        )
     if downstream_route != "config":
-        raise GitHubApiPolicyError("GITHUB_API1 only supports downstream_route = config")
+        raise GitHubApiPolicyError(
+            "GitHub API acquisition only supports downstream_route = config"
+        )
     if response_type != "application/json":
-        raise GitHubApiPolicyError("GITHUB_API1 only supports JSON responses")
-    validate_fixture_response_path(fixture_response_path)
+        raise GitHubApiPolicyError("GitHub API acquisition only supports JSON responses")
+    if acquisition_transport == "fixture":
+        if fixture_response_path is None:
+            raise GitHubApiPolicyError("fixture_response_path is required for fixture transport")
+        validate_fixture_response_path(fixture_response_path)
+    elif fixture_response_path is not None:
+        validate_fixture_response_path(fixture_response_path)
     data_class = ALLOWED_ENDPOINT_PATHS[path]
     if data_class not in authorized_data_classes:
         raise GitHubApiPolicyError(f"endpoint data class is not authorized: {data_class}")
@@ -1164,6 +1328,8 @@ def resolve_fixture_response_path(
     config: GitHubApiSourceConfig,
     endpoint: GitHubEndpointConfig,
 ) -> Path:
+    if endpoint.fixture_response_path is None:
+        raise GitHubApiPolicyError("fixture_response_path is required for fixture transport")
     config_dir = config.config_path.parent
     response_path = (config_dir / endpoint.fixture_response_path).resolve()
     ensure_contained(response_path, config_dir, "fixture_response_path")
@@ -1174,6 +1340,54 @@ def resolve_fixture_response_path(
     return response_path
 
 
+def github_public_rest_url(
+    config: GitHubApiSourceConfig,
+    request: GitHubRequestPlan,
+) -> str:
+    if config.base_url != DEFAULT_GITHUB_API_BASE_URL:
+        raise GitHubApiPolicyError("acquisition.base_url must be https://api.github.com")
+    if not request.path.startswith("/") or "://" in request.path:
+        raise GitHubApiPolicyError("endpoint path must be a relative API path")
+    owner = urllib.parse.quote(config.owner, safe="")
+    repository = urllib.parse.quote(config.repository, safe="")
+    path = request.path.replace("{owner}", owner).replace("{repo}", repository)
+    parsed = urllib.parse.urlsplit(f"{config.base_url}{path}")
+    if parsed.scheme != "https" or parsed.netloc != "api.github.com":
+        raise GitHubApiPolicyError("GitHub REST URL must stay under api.github.com")
+    if parsed.query or parsed.fragment:
+        raise GitHubApiPolicyError("GitHub REST URL must not include raw query data")
+    repo_prefix = f"/repos/{owner}/{repository}"
+    if not parsed.path.startswith(repo_prefix):
+        raise GitHubApiPolicyError("GitHub REST URL must stay under owner/repository")
+    return urllib.parse.urlunsplit(parsed)
+
+
+def validate_no_auth_headers(headers: Mapping[str, str]) -> None:
+    for key in headers:
+        if key.lower() in {"authorization", "cookie", "set-cookie"}:
+            raise GitHubApiPolicyError("GitHub REST transport must not send auth headers")
+
+
+def header_mapping(headers: Any) -> dict[str, str]:
+    if hasattr(headers, "items"):
+        items = headers.items()
+    else:
+        items = headers or ()
+    return {str(key).lower(): str(value) for key, value in items}
+
+
+def content_type_from_headers(headers: Mapping[str, str]) -> str:
+    return headers.get("content-type", "application/octet-stream").split(";", 1)[0]
+
+
+def rate_limit_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    return {
+        name: headers[name]
+        for name in RATE_LIMIT_HEADERS
+        if name in headers
+    }
+
+
 def endpoint_by_name(
     config: GitHubApiSourceConfig,
     endpoint_name: str,
@@ -1182,6 +1396,43 @@ def endpoint_by_name(
         if endpoint.name == endpoint_name:
             return endpoint
     raise GitHubApiPolicyError(f"unknown endpoint: {endpoint_name}")
+
+
+def github_transport_for_config(config: GitHubApiSourceConfig) -> Any:
+    if config.acquisition_transport == "fixture":
+        return FixtureGitHubApiTransport()
+    if config.acquisition_transport == "github_public_rest":
+        return PublicGitHubRestTransport()
+    raise GitHubApiPolicyError(
+        f"unsupported acquisition.transport: {config.acquisition_transport}"
+    )
+
+
+def validate_transport_response(
+    config: GitHubApiSourceConfig,
+    request: GitHubRequestPlan,
+    response: GitHubTransportResponse,
+) -> None:
+    if 300 <= response.status_code < 400:
+        raise GitHubApiPolicyError(
+            f"endpoint {request.endpoint_name} returned redirect status "
+            f"{response.status_code}; redirects are not followed"
+        )
+    if response.rate_limit.get("x-ratelimit-remaining") == "0":
+        raise GitHubApiPolicyError(
+            f"endpoint {request.endpoint_name} hit GitHub API rate limit"
+        )
+    if response.status_code < 200 or response.status_code >= 300:
+        raise GitHubApiPolicyError(
+            f"endpoint {request.endpoint_name} returned HTTP status "
+            f"{response.status_code}"
+        )
+    if "json" not in response.response_type.lower():
+        raise GitHubApiPolicyError(
+            f"endpoint {request.endpoint_name} did not return a JSON response"
+        )
+    if len(response.body) > config.max_bytes_per_run:
+        raise GitHubApiPolicyError("response bytes exceed max_bytes_per_run")
 
 
 def parse_json_response(body: bytes, endpoint_name: str) -> Any:
@@ -1205,6 +1456,14 @@ def count_response_items(payload: Any) -> int:
 
 
 def redact_github_value(value: Any, *, key: str | None = None) -> Any:
+    if key is not None and key.lower() in BODY_FIELDS:
+        body = "" if value is None else str(value)
+        return {
+            "body_present": bool(body),
+            "body_length": len(body),
+            "body_sha256": sha256_text(body) if body else "",
+            "body_redacted": True,
+        }
     if key is not None and is_secret_key(key):
         return {
             "redacted": True,
@@ -1263,6 +1522,7 @@ def deterministic_github_api_run_id(
             "source_id": config.source_id,
             "owner": config.owner,
             "repository": config.repository,
+            "transport": config.acquisition_transport,
             "policy_status": config.policy_status,
             "credential_mode": config.credential_mode,
             "endpoints": [request.to_jsonable() for request in requests],
@@ -1314,8 +1574,29 @@ def required_string(payload: Mapping[str, Any], key: str) -> str:
     return value
 
 
+def optional_string(payload: Mapping[str, Any], key: str) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise GitHubApiPolicyError(f"{key} must be a non-empty string")
+    return value
+
+
 def required_positive_int(payload: Mapping[str, Any], key: str) -> int:
     value = payload.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise GitHubApiPolicyError(f"{key} must be a positive integer")
+    return value
+
+
+def optional_positive_int(
+    payload: Mapping[str, Any],
+    key: str,
+    *,
+    default: int,
+) -> int:
+    value = payload.get(key, default)
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise GitHubApiPolicyError(f"{key} must be a positive integer")
     return value
@@ -1330,6 +1611,13 @@ def required_nonnegative_int(payload: Mapping[str, Any], key: str) -> int:
 
 def required_bool(payload: Mapping[str, Any], key: str) -> bool:
     value = payload.get(key)
+    if not isinstance(value, bool):
+        raise GitHubApiPolicyError(f"{key} must be a boolean")
+    return value
+
+
+def optional_bool(payload: Mapping[str, Any], key: str, *, default: bool) -> bool:
+    value = payload.get(key, default)
     if not isinstance(value, bool):
         raise GitHubApiPolicyError(f"{key} must be a boolean")
     return value
@@ -1377,3 +1665,8 @@ def write_jsonl(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for record in records:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None

@@ -23,6 +23,7 @@ from repomap_kg.bulk_ingestion import (
 from repomap_kg.github_api_ingestion import (
     FixtureGitHubApiTransport,
     GitHubApiPolicyError,
+    PublicGitHubRestTransport,
     acquire_github_api_source,
     build_github_api_plan_from_config,
     load_github_api_source_config,
@@ -225,6 +226,50 @@ class SourceIngestionIntegrationTests(unittest.TestCase):
         self.assertNotIn("fixture-secret-value", artifact_text)
         self.assertNotIn("fixture-github-token", artifact_text)
         self.assertNotIn("fixture-private-key", artifact_text)
+
+    def test_github_api_public_rest_transport_uses_fixed_api_base_and_safe_headers(self):
+        config_path = (
+            github_api_fixture_root()
+            / "public_real_transport_config"
+            / "github-source.toml"
+        )
+        config = load_github_api_source_config(config_path)
+        manifest = build_github_api_plan_from_config(config_path)
+        opener = IntFakeGitHubOpener(
+            status=200,
+            headers={
+                "content-type": "application/json; charset=utf-8",
+                "x-ratelimit-limit": "60",
+                "x-ratelimit-remaining": "59",
+                "x-ratelimit-used": "1",
+                "x-ratelimit-reset": "1782921600",
+            },
+            body=b'{"full_name":"fixture-owner/fixture-repo"}',
+        )
+
+        response = PublicGitHubRestTransport(opener=opener).fetch(
+            config,
+            manifest.requests[0],
+        )
+
+        self.assertEqual(config.acquisition_transport, "github_public_rest")
+        self.assertEqual(manifest.transport, "github_public_rest")
+        self.assertTrue(manifest.network_capable)
+        self.assertFalse(manifest.fixture_transport_only)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.response_type, "application/json")
+        self.assertEqual(response.rate_limit["x-ratelimit-remaining"], "59")
+        self.assertEqual(
+            opener.requests[0].full_url,
+            "https://api.github.com/repos/fixture-owner/fixture-repo",
+        )
+        headers = {
+            key.lower(): value
+            for key, value in opener.requests[0].header_items()
+        }
+        self.assertIn("user-agent", headers)
+        self.assertNotIn("authorization", headers)
+        self.assertNotIn("cookie", headers)
 
     def test_bulk_fixture_policy_plan_and_observations(self):
         config = load_bulk_source_config(bulk_fixture_root() / "mixed_corpus" / "bulk.toml")
@@ -1217,6 +1262,35 @@ def api_fixture_root() -> Path:
 
 def github_api_fixture_root() -> Path:
     return Path(__file__).parents[3] / "fixtures" / "github_api"
+
+
+class IntFakeGitHubOpener:
+    def __init__(self, *, status: int, headers: dict[str, str], body: bytes):
+        self.status = status
+        self.headers = headers
+        self.body = body
+        self.requests = []
+
+    def open(self, request, timeout):
+        self.requests.append(request)
+        return IntFakeGitHubResponse(
+            status=self.status,
+            headers=self.headers,
+            body=self.body,
+        )
+
+
+class IntFakeGitHubResponse:
+    def __init__(self, *, status: int, headers: dict[str, str], body: bytes):
+        self.status = status
+        self.headers = headers
+        self.body = body
+
+    def getcode(self):
+        return self.status
+
+    def read(self, _size):
+        return self.body
 
 
 if __name__ == "__main__":

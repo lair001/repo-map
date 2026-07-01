@@ -15,6 +15,10 @@ from repomap_test_support.postgres_harness import (
 )
 
 from repomap_kg.cli import main
+from repomap_kg.github_api_ingestion import (
+    GitHubTransportResponse,
+    acquire_github_api_source,
+)
 from repomap_kg.observations import RawObservation
 from repomap_kg.source_ingestion import (
     FeedFetchResponse,
@@ -958,6 +962,154 @@ WHERE payload_json->'metadata' ? 'api_run_id';
         self.assertNotIn("fixture-secret-value", api_summary_stdout)
         self.assertNotIn("fixture-github-token", api_summary_stdout)
         self.assertNotIn("fixture-private-key", api_summary_stdout)
+
+    def test_github_public_rest_plan_cli_and_mocked_acquire_load_storage(self):
+        require_postgres_binaries()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shutil.copytree(
+                github_api_fixture_root() / "public_real_transport_config",
+                root / "public_real_transport_config",
+            )
+            config_path = root / "public_real_transport_config" / "github-source.toml"
+            root_path = str(root.resolve())
+            plan_exit_code, plan_stdout, plan_stderr = run_repo_map_in_process(
+                "github",
+                "plan",
+                "--config",
+                str(config_path),
+                "--json",
+            )
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                summary = acquire_github_api_source(
+                    config_path,
+                    repository_name="fixture-github-real",
+                    root_path=root,
+                    psql_args=postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                    transport=MockedGitHubRestTransport(
+                        [
+                            GitHubTransportResponse(
+                                status_code=200,
+                                body=json.dumps(
+                                    {
+                                        "id": 1001,
+                                        "name": "fixture-repo",
+                                        "full_name": "fixture-owner/fixture-repo",
+                                        "private": False,
+                                        "clone_url": "https://fixture-token@example.invalid/repo.git",
+                                    },
+                                    sort_keys=True,
+                                ).encode("utf-8"),
+                                response_type="application/json",
+                                rate_limit={
+                                    "x-ratelimit-limit": "60",
+                                    "x-ratelimit-remaining": "59",
+                                },
+                            ),
+                            GitHubTransportResponse(
+                                status_code=200,
+                                body=json.dumps(
+                                    [
+                                        {
+                                            "number": 1,
+                                            "title": "Fixture issue",
+                                            "body": "public issue body should not be stored",
+                                            "token": "fixture-token",
+                                        }
+                                    ],
+                                    sort_keys=True,
+                                ).encode("utf-8"),
+                                response_type="application/json",
+                                rate_limit={
+                                    "x-ratelimit-limit": "60",
+                                    "x-ratelimit-remaining": "58",
+                                },
+                            ),
+                        ]
+                    ),
+                )
+                kinds = {
+                    record.kind
+                    for record in query_canonical_node_records(
+                        postgres.psql_args,
+                        root_path=root_path,
+                        psql_command=postgres.psql_command,
+                    )
+                }
+                raw_payload = postgres.psql_scalar(
+                    """
+SELECT COALESCE(jsonb_agg(payload_json ORDER BY ordinal)::text, '[]')
+FROM raw_observations;
+"""
+                )
+                api_canonical_count = postgres.psql_scalar(
+                    """
+SELECT count(*)::text
+FROM canonical_nodes
+WHERE kind LIKE 'api.%';
+"""
+                )
+                github_canonical_count = postgres.psql_scalar(
+                    """
+SELECT count(*)::text
+FROM canonical_nodes
+WHERE kind LIKE 'github.%';
+"""
+                )
+                api_summary = query_api_summary(
+                    postgres.psql_args,
+                    root_path=root_path,
+                    psql_command=postgres.psql_command,
+                )
+                manifest_text = next(
+                    (root / ".repomap" / "api-runs").glob(
+                        "github-public-real-fixture/*/manifest.json"
+                    )
+                ).read_text(encoding="utf-8")
+
+        self.assertEqual(plan_exit_code, 0, plan_stderr)
+        plan_payload = json.loads(plan_stdout)
+        self.assertEqual(plan_payload["transport"], "github_public_rest")
+        self.assertTrue(plan_payload["network_capable"])
+        self.assertFalse(plan_payload["fixture_transport_only"])
+        self.assertEqual(plan_payload["request_count"], 2)
+        self.assertNotIn(str(root), plan_stdout)
+        self.assertEqual(summary.source_id, "github-public-real-fixture")
+        self.assertEqual(summary.transport, "github_public_rest")
+        self.assertFalse(summary.fixture_transport_only)
+        self.assertFalse(summary.no_network)
+        self.assertEqual(summary.requests, 2)
+        self.assertEqual(summary.responses, 2)
+        self.assertIn("file", kinds)
+        self.assertIn("config.document", kinds)
+        self.assertEqual(api_canonical_count, "0")
+        self.assertEqual(github_canonical_count, "0")
+        self.assertIn('"transport": "github_public_rest"', raw_payload)
+        self.assertIn("api.response", raw_payload)
+        self.assertIn("github.repository", raw_payload)
+        self.assertIn("github.issue", raw_payload)
+        self.assertIn("body_sha256", raw_payload)
+        self.assertNotIn("public issue body should not be stored", raw_payload)
+        self.assertNotIn("fixture-token", raw_payload)
+        self.assertNotIn(str(root), raw_payload)
+        self.assertIn('"transport": "github_public_rest"', manifest_text)
+        self.assertIn('"x-ratelimit-remaining": "58"', manifest_text)
+        self.assertNotIn("fixture-token", manifest_text)
+        self.assertEqual(api_summary.api_runs, 1)
+        self.assertEqual(api_summary.source_ids, ("github-public-real-fixture",))
+        self.assertEqual(api_summary.requests, 2)
+        self.assertEqual(api_summary.responses, 2)
+        self.assertFalse(api_summary.no_network)
+        self.assertTrue(api_summary.no_mutation)
+        self.assertTrue(api_summary.no_credentials_resolved)
+        self.assertTrue(api_summary.no_scheduler)
 
     def test_storage_load_files_dual_writes_canonical_shell_collapse_fixture(self):
         require_postgres_binaries()
@@ -8424,6 +8576,16 @@ def run_repo_map_in_process(*args):
     with redirect_stdout(stdout), redirect_stderr(stderr):
         exit_code = main(list(args))
     return exit_code, stdout.getvalue(), stderr.getvalue()
+
+
+class MockedGitHubRestTransport:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.requests = []
+
+    def fetch(self, config, request):
+        self.requests.append((config, request))
+        return self.responses.pop(0)
 
 
 if __name__ == "__main__":
