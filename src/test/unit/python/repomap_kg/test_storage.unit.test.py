@@ -26,6 +26,7 @@ from repomap_kg.storage import (
     JSFrameworkSummaryRecord,
     NeighborhoodRecord,
     NodeRecord,
+    OpenAPISummaryRecord,
     RubySummaryRecord,
     StorageSummaryRecord,
     StorageSchemaError,
@@ -36,6 +37,7 @@ from repomap_kg.storage import (
     build_ingested_source_query_sql,
     build_js_summary_query_sql,
     build_js_framework_summary_query_sql,
+    build_openapi_summary_query_sql,
     build_ruby_summary_query_sql,
     build_source_feed_item_query_sql,
     build_source_reference_query_sql,
@@ -67,6 +69,7 @@ from repomap_kg.storage import (
     format_node_table,
     format_js_summary_table,
     format_js_framework_summary_table,
+    format_openapi_summary_table,
     format_ruby_summary_table,
     format_storage_summary_table,
     file_rows_from_observations,
@@ -81,6 +84,7 @@ from repomap_kg.storage import (
     query_node_records,
     query_js_summary,
     query_js_framework_summary,
+    query_openapi_summary,
     query_ruby_summary,
     query_storage_summary,
     query_host_mutator_records,
@@ -108,6 +112,7 @@ from repomap_kg.storage import (
     api_summary_from_storage_payload,
     js_summary_from_storage_payload,
     js_framework_summary_from_storage_payload,
+    openapi_summary_from_storage_payload,
     ruby_summary_from_storage_payload,
     email_summary_from_storage_payload,
     format_canonical_edge_table,
@@ -126,6 +131,7 @@ from repomap_kg.storage import (
     bulk_summary_to_jsonable,
     js_summary_to_jsonable,
     js_framework_summary_to_jsonable,
+    openapi_summary_to_jsonable,
     ruby_summary_to_jsonable,
     email_summary_to_jsonable,
     query_source_feed_item_records,
@@ -2443,6 +2449,149 @@ SELECT 1;
         self.assertTrue(summary.safety["no_execution"])
         self.assertTrue(summary.safety["no_new_canonical_namespaces"])
 
+    def test_query_openapi_summary_returns_safe_counts(self):
+        completed = SimpleNamespace(
+            stdout=(
+                '{"root_path":"/tmp/fixture",'
+                '"repository_name":"fixture",'
+                '"openapi_observations":64,'
+                '"openapi_documents":3,'
+                '"spec_families":{"openapi3":2,"swagger2":1},'
+                '"openapi":{"info":3,"servers":2,"paths":12,"operations":24,'
+                '"parameters":18,"request_bodies":6,"responses":40,'
+                '"schemas":15,"components":20,"security_schemes":2,'
+                '"tags":5,"examples":4},'
+                '"methods":{"GET":10,"POST":5,"PUT":2,"PATCH":1,'
+                '"DELETE":2,"OPTIONS":1,"HEAD":1,"TRACE":0},'
+                '"references":{"internal_refs":12,"local_file_refs":2,'
+                '"remote_refs_not_fetched":3,"external_docs_not_fetched":1,'
+                '"refs_not_fetched":4},'
+                '"redactions":{"credentialed_urls":1,'
+                '"openapi_ref_summaries":2,"text_summaries":3,'
+                '"example_summaries":4,"secret_prone_fields":5},'
+                '"diagnostics":{"parse_errors":1,"unsupported_specs":1,'
+                '"limit_overflows":2,"local_ref_errors":1,'
+                '"malformed_specs":1},'
+                '"generic_config":{"config_documents":3,"config_paths":120,'
+                '"config_references":18,"config_parse_errors":1},'
+                '"safety":{"no_fetch":true,"no_api_calls":true,'
+                '"no_tool_execution":true,"raw_profile_only":true,'
+                '"no_new_canonical_namespaces":true}}\n'
+            )
+        )
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+            summary = query_openapi_summary(
+                ["-d", "postgres"],
+                root_path="/tmp/fixture",
+                psql_command="/bin/psql",
+            )
+
+        self.assertEqual(summary.repository_name, "fixture")
+        self.assertEqual(summary.openapi_observations, 64)
+        self.assertEqual(summary.openapi_documents, 3)
+        self.assertEqual(summary.spec_families["openapi3"], 2)
+        self.assertEqual(summary.openapi["operations"], 24)
+        self.assertEqual(summary.methods["GET"], 10)
+        self.assertEqual(summary.references["remote_refs_not_fetched"], 3)
+        self.assertEqual(summary.redactions["secret_prone_fields"], 5)
+        self.assertEqual(summary.diagnostics["limit_overflows"], 2)
+        self.assertEqual(summary.generic_config["config_paths"], 120)
+        self.assertTrue(summary.safety["no_fetch"])
+        self.assertTrue(summary.safety["no_new_canonical_namespaces"])
+        self.assertIn("-qAt", run.call_args.args[0])
+        self.assertIn("openapi.document", run.call_args.kwargs["input"])
+        self.assertIn("openapi.reference", run.call_args.kwargs["input"])
+        self.assertIn("config.document", run.call_args.kwargs["input"])
+
+    def test_query_openapi_summary_rejects_malformed_json(self):
+        completed = SimpleNamespace(stdout='{"root_path": "/tmp/fixture"}\n')
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(StorageSchemaError, "openapi summary"):
+                query_openapi_summary(["-d", "postgres"], root_path="/tmp/fixture")
+
+    def test_openapi_summary_empty_payload_keeps_safety_markers(self):
+        summary = openapi_summary_from_storage_payload(
+            {
+                "root_path": "/tmp/empty",
+                "repository_name": None,
+                "openapi_observations": 0,
+                "openapi_documents": 0,
+                "spec_families": {"openapi3": 0, "swagger2": 0},
+                "openapi": {
+                    "info": 0,
+                    "servers": 0,
+                    "paths": 0,
+                    "operations": 0,
+                    "parameters": 0,
+                    "request_bodies": 0,
+                    "responses": 0,
+                    "schemas": 0,
+                    "components": 0,
+                    "security_schemes": 0,
+                    "tags": 0,
+                    "examples": 0,
+                },
+                "methods": {
+                    "GET": 0,
+                    "POST": 0,
+                    "PUT": 0,
+                    "PATCH": 0,
+                    "DELETE": 0,
+                    "OPTIONS": 0,
+                    "HEAD": 0,
+                    "TRACE": 0,
+                },
+                "references": {
+                    "internal_refs": 0,
+                    "local_file_refs": 0,
+                    "remote_refs_not_fetched": 0,
+                    "external_docs_not_fetched": 0,
+                    "refs_not_fetched": 0,
+                },
+                "redactions": {
+                    "credentialed_urls": 0,
+                    "openapi_ref_summaries": 0,
+                    "text_summaries": 0,
+                    "example_summaries": 0,
+                    "secret_prone_fields": 0,
+                },
+                "diagnostics": {
+                    "parse_errors": 0,
+                    "unsupported_specs": 0,
+                    "limit_overflows": 0,
+                    "local_ref_errors": 0,
+                    "malformed_specs": 0,
+                },
+                "generic_config": {
+                    "config_documents": 0,
+                    "config_paths": 0,
+                    "config_references": 0,
+                    "config_parse_errors": 0,
+                },
+                "safety": {
+                    "no_fetch": True,
+                    "no_api_calls": True,
+                    "no_tool_execution": True,
+                    "raw_profile_only": True,
+                    "no_new_canonical_namespaces": True,
+                },
+            }
+        )
+
+        self.assertEqual(summary.repository_name, None)
+        self.assertEqual(summary.openapi_documents, 0)
+        self.assertEqual(summary.spec_families["swagger2"], 0)
+        self.assertEqual(summary.openapi["responses"], 0)
+        self.assertEqual(summary.generic_config["config_references"], 0)
+        self.assertTrue(summary.safety["no_fetch"])
+        self.assertTrue(summary.safety["no_new_canonical_namespaces"])
+        self.assertEqual(
+            openapi_summary_to_jsonable(summary)["safety"]["no_api_calls"],
+            True,
+        )
+
     def test_query_js_summary_rejects_malformed_json(self):
         completed = SimpleNamespace(stdout='{"root_path": "/tmp/fixture"}\n')
 
@@ -3701,6 +3850,85 @@ SELECT 1;
         self.assertIn("ajax_references=2", table)
         self.assertIn("diagnostics", table)
         self.assertIn("no_new_canonical_namespaces=true", table)
+
+    def test_format_openapi_summary_table_uses_contract_columns(self):
+        table = format_openapi_summary_table(
+            OpenAPISummaryRecord(
+                root_path="/tmp/fixture",
+                repository_name="fixture",
+                openapi_observations=64,
+                openapi_documents=3,
+                spec_families={"openapi3": 2, "swagger2": 1},
+                openapi={
+                    "info": 3,
+                    "servers": 2,
+                    "paths": 12,
+                    "operations": 24,
+                    "parameters": 18,
+                    "request_bodies": 6,
+                    "responses": 40,
+                    "schemas": 15,
+                    "components": 20,
+                    "security_schemes": 2,
+                    "tags": 5,
+                    "examples": 4,
+                },
+                methods={
+                    "GET": 10,
+                    "POST": 5,
+                    "PUT": 2,
+                    "PATCH": 1,
+                    "DELETE": 2,
+                    "OPTIONS": 1,
+                    "HEAD": 1,
+                    "TRACE": 0,
+                },
+                references={
+                    "internal_refs": 12,
+                    "local_file_refs": 2,
+                    "remote_refs_not_fetched": 3,
+                    "external_docs_not_fetched": 1,
+                    "refs_not_fetched": 4,
+                },
+                redactions={
+                    "credentialed_urls": 1,
+                    "openapi_ref_summaries": 2,
+                    "text_summaries": 3,
+                    "example_summaries": 4,
+                    "secret_prone_fields": 5,
+                },
+                diagnostics={
+                    "parse_errors": 1,
+                    "unsupported_specs": 1,
+                    "limit_overflows": 2,
+                    "local_ref_errors": 1,
+                    "malformed_specs": 1,
+                },
+                generic_config={
+                    "config_documents": 3,
+                    "config_paths": 120,
+                    "config_references": 18,
+                    "config_parse_errors": 1,
+                },
+                safety={
+                    "no_fetch": True,
+                    "no_api_calls": True,
+                    "no_tool_execution": True,
+                    "raw_profile_only": True,
+                    "no_new_canonical_namespaces": True,
+                },
+            )
+        )
+
+        self.assertIn("openapi_documents", table)
+        self.assertIn("spec_families", table)
+        self.assertIn("openapi3=2", table)
+        self.assertIn("operations=24", table)
+        self.assertIn("GET=10", table)
+        self.assertIn("remote_refs_not_fetched=3", table)
+        self.assertIn("secret_prone_fields=5", table)
+        self.assertIn("config_paths=120", table)
+        self.assertIn("no_fetch=true", table)
 
     def test_format_email_summary_table_uses_privacy_and_readback_columns(self):
         table = format_email_summary_table(

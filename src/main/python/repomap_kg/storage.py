@@ -536,6 +536,25 @@ class JSFrameworkSummaryRecord:
 
 
 @dataclass(frozen=True)
+class OpenAPISummaryRecord:
+    root_path: str
+    repository_name: str | None
+    openapi_observations: int
+    openapi_documents: int
+    spec_families: dict[str, int]
+    openapi: dict[str, int]
+    methods: dict[str, int]
+    references: dict[str, int]
+    redactions: dict[str, int]
+    diagnostics: dict[str, int]
+    generic_config: dict[str, int]
+    safety: dict[str, bool]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class EmailSummaryRecord:
     root_path: str
     repository_name: str | None
@@ -1326,6 +1345,21 @@ def query_js_framework_summary(
     )
     return js_framework_summary_from_storage_payload(
         parse_psql_json(result.stdout, "js framework summary")
+    )
+
+
+def query_openapi_summary(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    psql_command: str = "psql",
+) -> OpenAPISummaryRecord:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_openapi_summary_query_sql(root_path),
+    )
+    return openapi_summary_from_storage_payload(
+        parse_psql_json(result.stdout, "openapi summary")
     )
 
 
@@ -2844,6 +2878,141 @@ def build_js_framework_summary_query_sql(root_path: str) -> str:
         "'safety', json_build_object("
         "'no_execution', true, "
         "'no_fetch', true, "
+        "'raw_profile_only', true, "
+        "'no_new_canonical_namespaces', true)"
+        ")::text;"
+    )
+
+
+def build_openapi_summary_query_sql(root_path: str) -> str:
+    quoted_root = sql_literal(root_path)
+    return (
+        "WITH repo AS ("
+        "SELECT id, name, root_path FROM repositories "
+        f"WHERE repositories.root_path = {quoted_root}"
+        "), "
+        "raw AS ("
+        "SELECT raw_observations.* FROM raw_observations "
+        "JOIN repo ON repo.id = raw_observations.repository_id"
+        "), "
+        "openapi_raw AS ("
+        "SELECT * FROM raw WHERE kind LIKE 'openapi.%'"
+        "), "
+        "canonical_config AS ("
+        "SELECT canonical_nodes.* FROM canonical_nodes "
+        "JOIN repo ON repo.id = canonical_nodes.repository_id "
+        "WHERE canonical_nodes.graph_key_version = 1 "
+        "AND canonical_nodes.kind IN ('config.document', 'config.path')"
+        ") "
+        "SELECT json_build_object("
+        f"'root_path', {quoted_root}, "
+        "'repository_name', (SELECT name FROM repo), "
+        "'openapi_observations', (SELECT COUNT(*) FROM openapi_raw), "
+        "'openapi_documents', (SELECT COUNT(*) FROM openapi_raw "
+        "WHERE kind = 'openapi.document'), "
+        "'spec_families', json_build_object("
+        "'openapi3', (SELECT COUNT(*) FROM openapi_raw "
+        "WHERE kind = 'openapi.document' "
+        "AND payload_json->'metadata'->>'spec_family' = 'openapi3'), "
+        "'swagger2', (SELECT COUNT(*) FROM openapi_raw "
+        "WHERE kind = 'openapi.document' "
+        "AND payload_json->'metadata'->>'spec_family' = 'swagger2')), "
+        "'openapi', json_build_object("
+        "'info', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.info'), "
+        "'servers', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.server'), "
+        "'paths', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.path'), "
+        "'operations', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.operation'), "
+        "'parameters', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.parameter'), "
+        "'request_bodies', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.request_body'), "
+        "'responses', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.response'), "
+        "'schemas', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.schema'), "
+        "'components', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.component'), "
+        "'security_schemes', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.security_scheme'), "
+        "'tags', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.tag'), "
+        "'examples', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.example')), "
+        "'methods', json_build_object("
+        "'GET', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.operation' "
+        "AND UPPER(COALESCE(payload_json->'metadata'->>'method', '')) = 'GET'), "
+        "'POST', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.operation' "
+        "AND UPPER(COALESCE(payload_json->'metadata'->>'method', '')) = 'POST'), "
+        "'PUT', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.operation' "
+        "AND UPPER(COALESCE(payload_json->'metadata'->>'method', '')) = 'PUT'), "
+        "'PATCH', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.operation' "
+        "AND UPPER(COALESCE(payload_json->'metadata'->>'method', '')) = 'PATCH'), "
+        "'DELETE', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.operation' "
+        "AND UPPER(COALESCE(payload_json->'metadata'->>'method', '')) = 'DELETE'), "
+        "'OPTIONS', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.operation' "
+        "AND UPPER(COALESCE(payload_json->'metadata'->>'method', '')) = 'OPTIONS'), "
+        "'HEAD', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.operation' "
+        "AND UPPER(COALESCE(payload_json->'metadata'->>'method', '')) = 'HEAD'), "
+        "'TRACE', (SELECT COUNT(*) FROM openapi_raw WHERE kind = 'openapi.operation' "
+        "AND UPPER(COALESCE(payload_json->'metadata'->>'method', '')) = 'TRACE')), "
+        "'references', json_build_object("
+        "'internal_refs', (SELECT COUNT(*) FROM openapi_raw "
+        "WHERE kind = 'openapi.reference' "
+        "AND payload_json->'metadata'->>'reference_scope' = 'internal'), "
+        "'local_file_refs', (SELECT COUNT(*) FROM openapi_raw "
+        "WHERE kind = 'openapi.reference' "
+        "AND payload_json->'metadata'->>'reference_scope' = 'local_file'), "
+        "'remote_refs_not_fetched', (SELECT COUNT(*) FROM openapi_raw "
+        "WHERE kind = 'openapi.reference' "
+        "AND payload_json->'metadata'->>'reference_scope' = 'remote' "
+        "AND COALESCE((payload_json->'metadata'->>'not_fetched')::boolean, false)), "
+        "'external_docs_not_fetched', (SELECT COUNT(*) FROM openapi_raw "
+        "WHERE kind = 'openapi.reference' "
+        "AND payload_json->'metadata'->>'reference_scope' = 'external_docs' "
+        "AND COALESCE((payload_json->'metadata'->>'not_fetched')::boolean, false)), "
+        "'refs_not_fetched', (SELECT COUNT(*) FROM openapi_raw "
+        "WHERE kind = 'openapi.reference' "
+        "AND COALESCE((payload_json->'metadata'->>'not_fetched')::boolean, false))), "
+        "'redactions', json_build_object("
+        "'credentialed_urls', (SELECT COUNT(*) FROM openapi_raw "
+        "WHERE payload_json->'metadata'->>'redaction_reason' = 'credentialed-url'), "
+        "'openapi_ref_summaries', (SELECT COUNT(*) FROM openapi_raw "
+        "WHERE kind = 'openapi.redaction' "
+        "AND payload_json->'metadata'->>'redaction_reason' = 'openapi-ref-summary-only'), "
+        "'text_summaries', (SELECT COUNT(*) FROM openapi_raw "
+        "WHERE kind = 'openapi.redaction' "
+        "AND payload_json->'metadata'->>'redaction_reason' = 'openapi-text-summary-only'), "
+        "'example_summaries', (SELECT COUNT(*) FROM openapi_raw "
+        "WHERE kind = 'openapi.redaction' "
+        "AND payload_json->'metadata'->>'redaction_reason' = 'openapi-example-summary-only'), "
+        "'secret_prone_fields', (SELECT COUNT(*) FROM openapi_raw "
+        "WHERE kind = 'openapi.redaction' "
+        "AND payload_json->'metadata'->>'redaction_reason' = 'secret-prone-openapi-field')), "
+        "'diagnostics', json_build_object("
+        "'parse_errors', (SELECT COUNT(*) FROM openapi_raw "
+        "WHERE kind = 'openapi.parse_error'), "
+        "'unsupported_specs', (SELECT COUNT(*) FROM openapi_raw "
+        "WHERE kind = 'openapi.parse_error' "
+        "AND payload_json->'metadata'->>'error_kind' IN ("
+        "'unsupported-openapi-document', 'unsupported-openapi-version')), "
+        "'limit_overflows', (SELECT COUNT(*) FROM openapi_raw "
+        "WHERE kind = 'openapi.parse_error' "
+        "AND payload_json->'metadata'->>'error_kind' IN ("
+        "'openapi-path-limit', 'openapi-operation-limit', "
+        "'openapi-schema-limit', 'openapi-parameter-limit', "
+        "'openapi-response-limit', 'openapi-reference-limit')), "
+        "'local_ref_errors', (SELECT COUNT(*) FROM openapi_raw "
+        "WHERE kind = 'openapi.parse_error' "
+        "AND payload_json->'metadata'->>'error_kind' = 'openapi-local-ref-outside-root'), "
+        "'malformed_specs', (SELECT COUNT(*) FROM raw "
+        "WHERE kind IN ('config.parse_error', 'openapi.parse_error') "
+        "AND payload_json->'metadata'->>'error_kind' IN ("
+        "'malformed-openapi-json', 'malformed-openapi-yaml'))), "
+        "'generic_config', json_build_object("
+        "'config_documents', (SELECT COUNT(*) FROM canonical_config "
+        "WHERE kind = 'config.document'), "
+        "'config_paths', (SELECT COUNT(*) FROM canonical_config "
+        "WHERE kind = 'config.path'), "
+        "'config_references', (SELECT COUNT(*) FROM raw "
+        "WHERE kind = 'config.reference'), "
+        "'config_parse_errors', (SELECT COUNT(*) FROM raw "
+        "WHERE kind = 'config.parse_error')), "
+        "'safety', json_build_object("
+        "'no_fetch', true, "
+        "'no_api_calls', true, "
+        "'no_tool_execution', true, "
         "'raw_profile_only', true, "
         "'no_new_canonical_namespaces', true)"
         ")::text;"
@@ -5148,6 +5317,129 @@ def js_framework_summary_from_storage_payload(
     )
 
 
+def openapi_summary_from_storage_payload(payload: Any) -> OpenAPISummaryRecord:
+    label = "openapi summary"
+    if not isinstance(payload, dict):
+        raise StorageSchemaError(f"psql returned a malformed {label}")
+    return OpenAPISummaryRecord(
+        root_path=payload_text(payload, "root_path", label=label),
+        repository_name=payload_optional_text(
+            payload,
+            "repository_name",
+            label=label,
+        ),
+        openapi_observations=payload_int(
+            payload,
+            "openapi_observations",
+            label=label,
+        ),
+        openapi_documents=payload_int(
+            payload,
+            "openapi_documents",
+            label=label,
+        ),
+        spec_families=payload_required_count_map(
+            payload,
+            "spec_families",
+            ("openapi3", "swagger2"),
+            label=label,
+        ),
+        openapi=payload_required_count_map(
+            payload,
+            "openapi",
+            (
+                "info",
+                "servers",
+                "paths",
+                "operations",
+                "parameters",
+                "request_bodies",
+                "responses",
+                "schemas",
+                "components",
+                "security_schemes",
+                "tags",
+                "examples",
+            ),
+            label=label,
+        ),
+        methods=payload_required_count_map(
+            payload,
+            "methods",
+            (
+                "GET",
+                "POST",
+                "PUT",
+                "PATCH",
+                "DELETE",
+                "OPTIONS",
+                "HEAD",
+                "TRACE",
+            ),
+            label=label,
+        ),
+        references=payload_required_count_map(
+            payload,
+            "references",
+            (
+                "internal_refs",
+                "local_file_refs",
+                "remote_refs_not_fetched",
+                "external_docs_not_fetched",
+                "refs_not_fetched",
+            ),
+            label=label,
+        ),
+        redactions=payload_required_count_map(
+            payload,
+            "redactions",
+            (
+                "credentialed_urls",
+                "openapi_ref_summaries",
+                "text_summaries",
+                "example_summaries",
+                "secret_prone_fields",
+            ),
+            label=label,
+        ),
+        diagnostics=payload_required_count_map(
+            payload,
+            "diagnostics",
+            (
+                "parse_errors",
+                "unsupported_specs",
+                "limit_overflows",
+                "local_ref_errors",
+                "malformed_specs",
+            ),
+            label=label,
+        ),
+        generic_config=payload_required_count_map(
+            payload,
+            "generic_config",
+            (
+                "config_documents",
+                "config_paths",
+                "config_references",
+                "config_parse_errors",
+            ),
+            label=label,
+        ),
+        safety=payload_required_bool_map(
+            payload,
+            "safety",
+            (
+                "no_fetch",
+                "no_api_calls",
+                "no_tool_execution",
+                "raw_profile_only",
+                "no_new_canonical_namespaces",
+            ),
+            label=label,
+        ),
+    )
+
+
 def email_summary_from_storage_payload(payload: Any) -> EmailSummaryRecord:
     if not isinstance(payload, dict):
         raise StorageSchemaError("psql returned a malformed email summary")
@@ -5583,6 +5875,10 @@ def js_summary_to_jsonable(record: JSSummaryRecord) -> dict[str, Any]:
 def js_framework_summary_to_jsonable(
     record: JSFrameworkSummaryRecord,
 ) -> dict[str, Any]:
+    return record.to_dict()
+
+
+def openapi_summary_to_jsonable(record: OpenAPISummaryRecord) -> dict[str, Any]:
     return record.to_dict()
 
 
@@ -6084,6 +6380,45 @@ def format_js_framework_summary_table(record: JSFrameworkSummaryRecord) -> str:
         "jquery",
         "generic_js",
         "diagnostics",
+        "safety",
+    )
+    rendered_row = {key: render_table_value(row[key]) for key in columns}
+    widths = {key: max(len(key), len(rendered_row[key])) for key in columns}
+    return "\n".join(
+        [
+            format_table_row(dict(zip(columns, columns, strict=True)), columns, widths),
+            format_table_row(rendered_row, columns, widths),
+        ]
+    )
+
+
+def format_openapi_summary_table(record: OpenAPISummaryRecord) -> str:
+    row = {
+        "root_path": record.root_path,
+        "repository_name": record.repository_name,
+        "openapi_observations": record.openapi_observations,
+        "openapi_documents": record.openapi_documents,
+        "spec_families": format_count_summary(record.spec_families),
+        "openapi": format_count_summary(record.openapi),
+        "methods": format_count_summary(record.methods),
+        "references": format_count_summary(record.references),
+        "redactions": format_count_summary(record.redactions),
+        "diagnostics": format_count_summary(record.diagnostics),
+        "generic_config": format_count_summary(record.generic_config),
+        "safety": format_bool_summary(record.safety),
+    }
+    columns = (
+        "root_path",
+        "repository_name",
+        "openapi_observations",
+        "openapi_documents",
+        "spec_families",
+        "openapi",
+        "methods",
+        "references",
+        "redactions",
+        "diagnostics",
+        "generic_config",
         "safety",
     )
     rendered_row = {key: render_table_value(row[key]) for key in columns}
