@@ -29,6 +29,7 @@ from repomap_kg.python_extractor import (
     PythonModuleIndex,
     extract_python_file_observations,
 )
+from repomap_kg.ruby import extract_ruby_file_observations
 from repomap_kg.shell import extract_shell_observations
 
 
@@ -67,7 +68,9 @@ LANGUAGE_BY_EXTENSION = {
     ".ott": "odf",
     ".plist": "plist",
     ".py": "python",
+    ".rake": "ruby",
     ".rb": "ruby",
+    ".gemspec": "ruby",
     ".sh": "shell",
     ".sql": "sql",
     ".latex": "latex",
@@ -80,6 +83,7 @@ LANGUAGE_BY_EXTENSION = {
     ".yml": "yaml",
     ".zsh": "shell",
 }
+RUBY_FILENAMES = frozenset({"Gemfile", "Rakefile", "Vagrantfile"})
 CONFIG_FILENAMES = frozenset(
     {
         ".gitignore",
@@ -174,6 +178,14 @@ def discover_observations(
                     module_index=module_index,
                 )
             )
+        if file_info.language == "ruby":
+            observations.extend(
+                extract_ruby_file_observations_from_file(
+                    repository_root,
+                    file_info.path,
+                    repository_paths=repository_paths,
+                )
+            )
         if file_info.language == "nix":
             observations.extend(
                 extract_nix_file_observations_from_file(repository_root, file_info.path)
@@ -266,6 +278,23 @@ def extract_nix_file_observations_from_file(
         relative_path,
         content,
         flake_ref=repository_root.name,
+    )
+
+
+def extract_ruby_file_observations_from_file(
+    repository_root: Path,
+    relative_path: str,
+    *,
+    repository_paths: frozenset[str] | None = None,
+) -> tuple[RawObservation, ...]:
+    try:
+        content = (repository_root / relative_path).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return ()
+    return extract_ruby_file_observations(
+        relative_path,
+        content,
+        repository_paths=repository_paths,
     )
 
 
@@ -434,6 +463,8 @@ def classify_path(
 
 
 def detect_language(path: Path) -> str:
+    if path.name in RUBY_FILENAMES:
+        return "ruby"
     language = LANGUAGE_BY_EXTENSION.get(path.suffix)
     if language is not None:
         return language

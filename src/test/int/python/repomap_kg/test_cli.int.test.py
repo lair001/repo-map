@@ -864,6 +864,65 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertIn("unknown:file:repo-escaping-css-reference", reference_targets)
         self.assertIn("dynamic:file:css-url-dynamic", reference_targets)
 
+    def test_discover_command_emits_ruby_static_observations_from_fixture(self):
+        fixture = REPO_ROOT / "src" / "test" / "fixtures" / "discovery" / "ruby_basic"
+
+        exit_code, stdout, stderr = self.run_module_entrypoint(
+            "discover", str(fixture), "--jsonl"
+        )
+
+        self.assertEqual(exit_code, 0, stderr)
+        observations = [
+            json.loads(line)
+            for line in stdout.splitlines()
+            if line.strip()
+        ]
+        kinds = {observation["kind"] for observation in observations}
+        profiles = {
+            observation["metadata"].get("profile")
+            for observation in observations
+            if observation["kind"] == "ruby.file"
+        }
+        targets = {
+            observation.get("target")
+            for observation in observations
+            if observation["kind"] == "ruby.reference"
+        }
+
+        self.assertTrue(
+            {
+                "ruby.file",
+                "ruby.module",
+                "ruby.class",
+                "ruby.method",
+                "ruby.singleton_method",
+                "ruby.constant",
+                "ruby.require",
+                "ruby.route",
+                "ruby.test_case",
+                "ruby.test_method",
+                "ruby.gem_dependency",
+                "ruby.vagrant_config",
+                "ruby.parse_error",
+            }.issubset(kinds)
+        )
+        self.assertTrue(
+            {
+                "generic_ruby",
+                "minitest",
+                "vagrantfile",
+                "sinatra",
+                "hanami",
+                "rake",
+                "gemfile",
+                "gemspec",
+            }.issubset(profiles)
+        )
+        self.assertIn("file:lib/example/service.rb", targets)
+        self.assertIn("external:ruby-gem:rack", targets)
+        self.assertIn("external:vagrant-box:example%2Fubuntu", targets)
+        self.assertNotIn("echo setup", stdout)
+
     def test_discover_command_emits_feed_observations_from_fixture(self):
         fixture = REPO_ROOT / "src" / "test" / "fixtures" / "discovery" / "feed_static_basic"
 

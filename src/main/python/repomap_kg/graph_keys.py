@@ -55,9 +55,15 @@ _SEGMENT_COUNTS = {
     "document.sheet": 2,
     "document.column": 2,
     "document.latex_command": 2,
+    "ruby.file": 1,
     "ruby.module": 1,
     "ruby.class": 1,
     "ruby.method": 2,
+    "ruby.singleton_method": 2,
+    "ruby.constant": 2,
+    "ruby.test_case": 2,
+    "ruby.test_method": 2,
+    "ruby.route": 2,
     "dynamic": 2,
     "external": 2,
     "unknown": 2,
@@ -313,6 +319,10 @@ def document_latex_command_key(
     )
 
 
+def ruby_file_key(path_or_file_key: str | os.PathLike[str]) -> str:
+    return _key("ruby.file", _coerce_file_key(path_or_file_key))
+
+
 def ruby_module_key(name: str) -> str:
     return _key("ruby.module", name)
 
@@ -323,6 +333,30 @@ def ruby_class_key(class_name: str) -> str:
 
 def ruby_method_key(owner: str, method_name: str) -> str:
     return _key("ruby.method", owner, method_name)
+
+
+def ruby_singleton_method_key(owner: str, method_name: str) -> str:
+    return _key("ruby.singleton_method", owner, method_name)
+
+
+def ruby_constant_key(owner: str, constant_name: str) -> str:
+    return _key("ruby.constant", owner, constant_name)
+
+
+def ruby_test_case_key(path_or_file_key: str | os.PathLike[str], name: str) -> str:
+    return _key("ruby.test_case", _coerce_file_key(path_or_file_key), name)
+
+
+def ruby_test_method_key(test_case_canonical_key: str, method_name: str) -> str:
+    return _key(
+        "ruby.test_method",
+        _coerce_namespace_key(test_case_canonical_key, "ruby.test_case"),
+        method_name,
+    )
+
+
+def ruby_route_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
+    return _key("ruby.route", _coerce_file_key(path_or_file_key), _coerce_pointer(pointer))
 
 
 def dynamic_key(domain: str, reason: str) -> str:

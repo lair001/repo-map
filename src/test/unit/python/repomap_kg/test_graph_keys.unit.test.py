@@ -49,8 +49,14 @@ from repomap_kg.graph_keys import (
     python_method_key,
     python_module_key,
     ruby_class_key,
+    ruby_constant_key,
+    ruby_file_key,
     ruby_method_key,
     ruby_module_key,
+    ruby_route_key,
+    ruby_singleton_method_key,
+    ruby_test_case_key,
+    ruby_test_method_key,
     tool_key,
     unknown_key,
     validate_key,
@@ -304,6 +310,37 @@ class GraphKeysUnitTests(unittest.TestCase):
             ruby_method_key("RepoMap::Runner", "call"),
             "ruby.method:RepoMap%3A%3ARunner:call",
         )
+        self.assertEqual(
+            ruby_file_key("lib/example.rb"),
+            "ruby.file:file%3Alib%2Fexample.rb",
+        )
+        self.assertEqual(
+            ruby_singleton_method_key("RepoMap::Runner", "build"),
+            "ruby.singleton_method:RepoMap%3A%3ARunner:build",
+        )
+        self.assertEqual(
+            ruby_constant_key("RepoMap::Runner", "DEFAULT_URL"),
+            "ruby.constant:RepoMap%3A%3ARunner:DEFAULT_URL",
+        )
+        self.assertEqual(
+            ruby_test_case_key("test/example_test.rb", "ExampleTest"),
+            "ruby.test_case:file%3Atest%2Fexample_test.rb:ExampleTest",
+        )
+        self.assertEqual(
+            ruby_test_method_key(
+                "ruby.test_case:file%3Atest%2Fexample_test.rb:ExampleTest",
+                "test_call",
+            ),
+            (
+                "ruby.test_method:"
+                "ruby.test_case%3Afile%253Atest%252Fexample_test.rb%3AExampleTest:"
+                "test_call"
+            ),
+        )
+        self.assertEqual(
+            ruby_route_key("app.rb", "/routes/get:/health"),
+            "ruby.route:file%3Aapp.rb:%2Froutes%2Fget%3A%2Fhealth",
+        )
 
     def test_placeholder_builders_encode_domain_and_reason(self):
         self.assertEqual(
@@ -340,6 +377,7 @@ class GraphKeysUnitTests(unittest.TestCase):
         parsed_warc_record = parse_key(
             "warc.record:warc.document%3Afile%253Aarchives%252Fexample.warc:record-1"
         )
+        parsed_ruby_route = parse_key("ruby.route:file%3Aapp.rb:%2Froutes%2Fget")
 
         self.assertEqual(parsed_file.graph_key_version, GRAPH_KEY_VERSION)
         self.assertEqual(parsed_file.namespace, "file")
@@ -378,6 +416,8 @@ class GraphKeysUnitTests(unittest.TestCase):
             parsed_warc_record.segments,
             ("warc.document:file%3Aarchives%2Fexample.warc", "record-1"),
         )
+        self.assertEqual(parsed_ruby_route.namespace, "ruby.route")
+        self.assertEqual(parsed_ruby_route.segments, ("file:app.rb", "/routes/get"))
 
     def test_parse_key_rejects_bad_grammar_and_malformed_escapes(self):
         cases = (

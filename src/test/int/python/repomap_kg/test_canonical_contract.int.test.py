@@ -6,6 +6,7 @@ import zipfile
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 
+from repomap_kg import ruby as ruby_module
 from repomap_kg.canonical import (
     CanonicalEdge,
     CanonicalEdgeEvidenceLink,
@@ -61,8 +62,14 @@ from repomap_kg.graph_keys import (
     python_method_key,
     python_module_key,
     ruby_class_key,
+    ruby_constant_key,
+    ruby_file_key,
     ruby_method_key,
     ruby_module_key,
+    ruby_route_key,
+    ruby_singleton_method_key,
+    ruby_test_case_key,
+    ruby_test_method_key,
     tool_key,
     unknown_key,
     validate_key,
@@ -79,6 +86,7 @@ from repomap_kg.markdown import (
     resolve_markdown_link_target,
 )
 from repomap_kg.observations import RawObservation, read_observations_jsonl
+from repomap_kg.ruby import extract_ruby_file_observations
 
 
 FIXTURE_ROOT = Path(__file__).parents[3] / "fixtures" / "canonicalization"
@@ -110,6 +118,7 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             "config_toml_basic",
             "config_codex_mcp_dogfood",
             "yaml_basic",
+            "ruby_basic",
             "xml_plist_chrome_policy_basic",
             "xml_java_spring_maven_basic",
             "html_static_basic",
@@ -149,6 +158,15 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             ruby_module_key("RepoMap"),
             ruby_class_key("RepoMap::Runner"),
             ruby_method_key("RepoMap::Runner", "call"),
+            ruby_file_key("lib/example.rb"),
+            ruby_singleton_method_key("RepoMap::Runner", "build"),
+            ruby_constant_key("RepoMap::Runner", "DEFAULT_URL"),
+            ruby_test_case_key("test/example_test.rb", "ExampleTest"),
+            ruby_test_method_key(
+                ruby_test_case_key("test/example_test.rb", "ExampleTest"),
+                "test_call",
+            ),
+            ruby_route_key("app.rb", "/routes/get:/health"),
             dynamic_key("file", "shell source expanded"),
             external_key("python.module", "requests"),
             unknown_key("env", "missing variable"),
@@ -293,6 +311,306 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
         wrong_type = validate_key(os.PathLike)
         self.assertFalse(wrong_type.valid)
         self.assertIn("string", wrong_type.error)
+
+    def test_static_ruby_extractor_edge_contracts(self):
+        observations = list(
+            extract_ruby_file_observations(
+                "scripts/edge.rb",
+                (
+                    'require "./local"\n'
+                    'require_relative "../outside"\n'
+                    'require "#{dynamic_name}"\n'
+                    'load "json"\n'
+                    "module Edge\n"
+                    "  FLAG = true\n"
+                    "  COUNT = 42\n"
+                    "  ITEMS = []\n"
+                    "  CONFIG = {}\n"
+                    "  class Runner\n"
+                    "    def self.build\n"
+                    "    end\n"
+                    "    def Edge.utility\n"
+                    "    end\n"
+                    "  end\n"
+                    "end\n"
+                ),
+                repository_paths=frozenset({"scripts/edge.rb", "scripts/local.rb"}),
+            )
+        )
+        observations.extend(
+            extract_ruby_file_observations(
+                "Vagrantfile",
+                (
+                    'Vagrant.configure("2") do |config|\n'
+                    '  config.vm.synced_folder "../outside", "/vagrant/outside"\n'
+                    '  config.vm.synced_folder "$ROOT", "/vagrant/dynamic"\n'
+                    '  config.vm.synced_folder "/tmp/source", "/vagrant/absolute"\n'
+                    '  config.vm.synced_folder "s3://example", "/vagrant/unsupported"\n'
+                    "end\n"
+                ),
+            )
+        )
+        observations.extend(
+            extract_ruby_file_observations(
+                "Gemfile",
+                (
+                    'source "https://user:pass@example.invalid:8443/rubygems?token=value&ok=1"\n'
+                    'gem "example_static"\n'
+                ),
+            )
+        )
+        observations.extend(
+            extract_ruby_file_observations(
+                "sinatra_app.rb",
+                'require "sinatra"\nget "/items/#{id}" do\nend\n',
+            )
+        )
+        observations.extend(
+            extract_ruby_file_observations("large.rb", "x" * (600 * 1024))
+        )
+
+        targets = {
+            observation.target
+            for observation in observations
+            if observation.kind == "ruby.reference"
+        }
+        parse_error_kinds = {
+            observation.metadata.get("error_kind")
+            for observation in observations
+            if observation.kind == "ruby.parse_error"
+        }
+        constant_types = {
+            observation.metadata.get("constant_name"): observation.metadata.get("value_type")
+            for observation in observations
+            if observation.kind == "ruby.constant"
+        }
+        payload = "\n".join(observation.to_json_line() for observation in observations)
+
+        self.assertIn("file:scripts/local.rb", targets)
+        self.assertIn("unknown:file:repo-escaping-ruby-reference", targets)
+        self.assertIn("dynamic:ruby.reference:interpolated-require", targets)
+        self.assertIn("dynamic:ruby.reference:dynamic-path", targets)
+        self.assertIn("external:file:absolute-ruby-reference", targets)
+        self.assertIn("unknown:ruby.reference:unsupported-scheme", targets)
+        self.assertIn("dynamic-route", parse_error_kinds)
+        self.assertIn("file-size-limit", parse_error_kinds)
+        self.assertEqual(constant_types["FLAG"], "boolean")
+        self.assertEqual(constant_types["COUNT"], "integer")
+        self.assertEqual(constant_types["ITEMS"], "array")
+        self.assertEqual(constant_types["CONFIG"], "hash")
+        self.assertNotIn("pass@example", payload)
+        self.assertNotIn("token=value", payload)
+        self.assertIn("token%3DREDACTED", payload)
+
+    def test_static_ruby_profile_dsl_contracts(self):
+        collections = [
+            extract_ruby_file_observations(
+                "test/service_spec.rb",
+                (
+                    'require "minitest/autorun"\n'
+                    'describe "Service behavior" do\n'
+                    '  it "records facts" do\n'
+                    "  end\n"
+                    "end\n"
+                ),
+            ),
+            extract_ruby_file_observations(
+                "Vagrantfile",
+                (
+                    'Vagrant.configure("2") do |config|\n'
+                    '  config.vm.network "private_network", type: "dhcp"\n'
+                    '  config.vm.provider "virtualbox"\n'
+                    '  config.vm.synced_folder "https://example.invalid/assets?token=value", "/vagrant/assets"\n'
+                    "end\n"
+                ),
+            ),
+            extract_ruby_file_observations(
+                "Rakefile",
+                (
+                    "namespace :fixtures do\n"
+                    f'  desc "{"a" * 140}"\n'
+                    "  task :prepare do\n"
+                    "  end\n"
+                    "end\n"
+                ),
+            ),
+            extract_ruby_file_observations(
+                "sinatra_app.rb",
+                (
+                    'require "sinatra/base"\n'
+                    "class App < Sinatra::Base\n"
+                    "  configure do\n"
+                    "  end\n"
+                    "  before do\n"
+                    "  end\n"
+                    "end\n"
+                ),
+            ),
+            extract_ruby_file_observations(
+                "config/app.rb",
+                "class ExampleApp < Hanami::App\nend\n",
+            ),
+            extract_ruby_file_observations(
+                "lib/comments.rb",
+                (
+                    'TITLE = "hash # inside literal"\n'
+                    "COUNT = 7 # outside comment\n"
+                    "NEGATIVE = -7\n"
+                    "VALUE = ENV['PUBLIC_NAME']\n"
+                    'LONG = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+                    'aaaaaaaaaaaaaaaaaaaaaaaa"\n'
+                ),
+            ),
+            extract_ruby_file_observations(
+                "lib/more.rb",
+                (
+                    'require_relative "missing"\n'
+                    'require "../../escape"\n'
+                    "module Foo::Bar\n"
+                    "  def self.ready?\n"
+                    "  end\n"
+                    "  def Missing.owner\n"
+                    "  end\n"
+                    "end\n"
+                    "def top_level\n"
+                    "end\n"
+                    "3.times do\n"
+                    "end\n"
+                ),
+                repository_paths=frozenset({"lib/more.rb"}),
+            ),
+        ]
+        observations = [item for collection in collections for item in collection]
+
+        targets = {
+            item.target
+            for item in observations
+            if item.kind == "ruby.reference"
+        }
+        test_cases = [item for item in observations if item.kind == "ruby.test_case"]
+        test_methods = [item for item in observations if item.kind == "ruby.test_method"]
+        dsl_facts = [
+            (
+                item.metadata.get("profile"),
+                item.metadata.get("dsl_name"),
+                item.metadata.get("namespace_name"),
+            )
+            for item in observations
+            if item.kind == "ruby.dsl"
+        ]
+        vagrant_configs = {
+            item.metadata.get("vagrant_key"): item.metadata.get("value_summary")
+            for item in observations
+            if item.kind == "ruby.vagrant_config"
+        }
+        profiles = {item.metadata.get("profile") for item in observations}
+        constants = {
+            item.metadata.get("constant_name"): item.metadata.get("value_type")
+            for item in observations
+            if item.kind == "ruby.constant"
+        }
+        payload = "\n".join(item.to_json_line() for item in observations)
+
+        self.assertIn("minitest", profiles)
+        self.assertIn("hanami", profiles)
+        self.assertTrue(any(item.target.endswith("describe%5B1%5D") for item in test_cases))
+        self.assertTrue(any(item.metadata.get("method_name") == "it[1]" for item in test_methods))
+        self.assertIn(("rake", "namespace", "fixtures"), dsl_facts)
+        self.assertIn(("sinatra", "configure", None), dsl_facts)
+        self.assertIn(("sinatra", "before", None), dsl_facts)
+        self.assertEqual(vagrant_configs["network"], "private_network")
+        self.assertEqual(vagrant_configs["provider"], "virtualbox")
+        self.assertIn("external.url:https%3A%2F%2Fexample.invalid%2Fassets%3Ftoken%3DREDACTED", targets)
+        self.assertIn("file:lib/missing.rb", targets)
+        self.assertIn("unknown:file:repo-escaping-ruby-reference", targets)
+        self.assertEqual(constants["TITLE"], "string")
+        self.assertEqual(constants["COUNT"], "integer")
+        self.assertEqual(constants["NEGATIVE"], "integer")
+        self.assertEqual(constants["VALUE"], "expression")
+        self.assertNotIn("hash # inside literal", payload)
+        self.assertNotIn("outside comment", payload)
+        self.assertIn("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", payload)
+
+    def test_static_ruby_reference_helper_contracts(self):
+        self.assertEqual(
+            ruby_module._sanitize_url(
+                "https://user:pass@example.invalid:8443/path?token=value&ok=1"
+            ),
+            "https://example.invalid:8443/path?token=REDACTED&ok=1",
+        )
+        self.assertEqual(ruby_module._sanitize_url("http://[broken"), "about:invalid")
+        self.assertEqual(ruby_module._safe_summary(None), None)
+        self.assertEqual(ruby_module._safe_summary("api_key"), "REDACTED")
+        self.assertEqual(ruby_module._safe_summary("x" * 130), "x" * 117 + "...")
+        self.assertEqual(ruby_module._literal_type("false"), "boolean")
+        self.assertEqual(ruby_module._literal_type("[]"), "array")
+        self.assertEqual(ruby_module._literal_type("{}"), "hash")
+        self.assertEqual(ruby_module._literal_type("ENV.fetch('NAME')"), "expression")
+        self.assertEqual(ruby_module._first_literal(", '~> 1.0'"), "~> 1.0")
+        self.assertEqual(ruby_module._first_literal(", version"), None)
+        self.assertFalse(ruby_module._is_secret_prone(None))
+        self.assertTrue(ruby_module._is_secret_prone("rack_secret"))
+        self.assertEqual(
+            ruby_module._require_target("lib/a.rb", "require_relative", "missing", frozenset()),
+            ("file:lib/missing.rb", "repo-local-candidate"),
+        )
+        self.assertEqual(
+            ruby_module._require_target("a.rb", "require", "./local", None),
+            ("file:local.rb", "repo-local"),
+        )
+        self.assertEqual(
+            ruby_module._require_target("a.rb", "require", "../outside", None),
+            ("unknown:file:repo-escaping-ruby-reference", "repo-escaping"),
+        )
+        self.assertEqual(
+            ruby_module._require_target("a.rb", "require", "json", None),
+            ("external:ruby.require:json", "external-ruby-require"),
+        )
+        self.assertEqual(
+            ruby_module._normalize_relative_path(
+                "lib/a.rb",
+                "plain",
+                default_suffix=None,
+            ),
+            "lib/plain",
+        )
+        self.assertEqual(
+            ruby_module._path_target("~/.ssh/config", None),
+            "dynamic:ruby.reference:dynamic-path",
+        )
+        self.assertEqual(
+            ruby_module._path_target("*.rb", None),
+            "dynamic:ruby.reference:dynamic-path",
+        )
+        self.assertEqual(
+            ruby_module._path_target("s3://bucket/key", None),
+            "unknown:ruby.reference:unsupported-scheme",
+        )
+        self.assertEqual(
+            ruby_module._path_target("/tmp/file", None),
+            "external:file:absolute-ruby-reference",
+        )
+        self.assertEqual(
+            ruby_module._path_target("../outside", None),
+            "unknown:file:repo-escaping-ruby-reference",
+        )
+        self.assertEqual(ruby_module._path_target("local.rb", frozenset()), "file:local.rb")
+        self.assertEqual(
+            ruby_module._path_target("mailto:ops@example.invalid", None),
+            "external.url:mailto%3Aops%40example.invalid",
+        )
+        self.assertEqual(ruby_module._method_owner("self.call", []), (None, "call", True))
+        self.assertEqual(ruby_module._method_owner("Owner.call", []), ("Owner", "call", True))
+        self.assertEqual(ruby_module._method_owner("call", []), (None, "call", False))
+        empty_stack = []
+        ruby_module._pop_scope(empty_stack)
+        self.assertEqual(empty_stack, [])
+        self.assertFalse(ruby_module._opens_block("class Example"))
+        self.assertFalse(ruby_module._opens_block("puts 1"))
+        self.assertTrue(ruby_module._opens_block("3.times do"))
+        self.assertTrue(ruby_module._looks_like_route_profile("generic_ruby", "Sinatra", "app.rb"))
+        self.assertFalse(ruby_module._looks_like_route_profile("generic_ruby", "", "lib/app.rb"))
 
     def test_result_serialization_sorts_records_and_counts_diagnostics(self):
         edge_key = canonical_edge_key(

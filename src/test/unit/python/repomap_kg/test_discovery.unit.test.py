@@ -265,6 +265,89 @@ class DiscoveryUnitTests(unittest.TestCase):
         self.assertNotIn("fake-kubernetes-password", payload)
         self.assertNotIn("fake-client-secret", payload)
 
+    def test_discover_observations_includes_ruby_facts_for_ruby_files_and_dsls(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.write(
+                root / "lib" / "example.rb",
+                (
+                    'require_relative "example/service"\n'
+                    "module Example\n"
+                    "  class Runner\n"
+                    "    def call\n"
+                    "    end\n"
+                    "  end\n"
+                    "end\n"
+                ),
+            )
+            self.write(root / "lib" / "example" / "service.rb", "module Example\nend\n")
+            self.write(root / "Gemfile", 'source "https://example.invalid"\ngem "rack"\n')
+            self.write(root / "Rakefile", 'desc "Run tests"\ntask :test do\nend\n')
+            self.write(root / "Vagrantfile", 'Vagrant.configure("2") do |config|\n  config.vm.box = "example/box"\nend\n')
+            shebang = root / "bin" / "tool"
+            self.write(shebang, "#!/usr/bin/env ruby\nrequire_relative '../lib/example'\n")
+            shebang.chmod(shebang.stat().st_mode | 0o111)
+
+            observations = discover_observations(root)
+
+        kinds = {observation.kind for observation in observations}
+        ruby_profiles = {
+            observation.metadata.get("profile")
+            for observation in observations
+            if observation.kind == "ruby.file"
+        }
+        ruby_targets = {
+            observation.target
+            for observation in observations
+            if observation.kind == "ruby.reference"
+        }
+
+        self.assertIn("ruby.file", kinds)
+        self.assertIn("ruby.module", kinds)
+        self.assertIn("ruby.class", kinds)
+        self.assertIn("ruby.method", kinds)
+        self.assertIn("ruby.gem_dependency", kinds)
+        self.assertIn("ruby.vagrant_config", kinds)
+        self.assertIn("generic_ruby", ruby_profiles)
+        self.assertIn("gemfile", ruby_profiles)
+        self.assertIn("rake", ruby_profiles)
+        self.assertIn("vagrantfile", ruby_profiles)
+        self.assertIn("file:lib/example/service.rb", ruby_targets)
+        self.assertIn("external:ruby-gem:rack", ruby_targets)
+
+    def test_discover_observations_reads_ruby_basic_fixture(self):
+        observations = discover_observations(FIXTURE_ROOT / "ruby_basic")
+        kinds = {observation.kind for observation in observations}
+        ruby_profiles = {
+            observation.metadata.get("profile")
+            for observation in observations
+            if observation.kind == "ruby.file"
+        }
+        ruby_targets = {
+            observation.target
+            for observation in observations
+            if observation.kind == "ruby.reference"
+        }
+
+        self.assertIn("ruby.module", kinds)
+        self.assertIn("ruby.class", kinds)
+        self.assertIn("ruby.route", kinds)
+        self.assertIn("ruby.test_method", kinds)
+        self.assertIn("ruby.gem_dependency", kinds)
+        self.assertIn("ruby.vagrant_config", kinds)
+        self.assertIn("sinatra", ruby_profiles)
+        self.assertIn("hanami", ruby_profiles)
+        self.assertIn("minitest", ruby_profiles)
+        self.assertIn("file:lib/example/service.rb", ruby_targets)
+        self.assertIn("external:ruby-gem:rack", ruby_targets)
+        self.assertTrue(
+            any(
+                observation.metadata.get("redacted")
+                for observation in observations
+                if observation.path == "redaction.rb"
+            )
+        )
+
     def test_discover_observations_keeps_plist_config_and_extracts_generic_xml(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

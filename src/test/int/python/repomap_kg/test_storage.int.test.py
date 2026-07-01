@@ -619,6 +619,100 @@ FROM canonical_edges;
         self.assertEqual(len(edges[0].identity_metadata_hash), 64)
         self.assertFalse(edges[0].conflict)
 
+    def test_storage_load_files_reads_ruby_nodes_references_and_explain(self):
+        require_postgres_binaries()
+        raw_jsonl = canonicalization_fixture("ruby_basic", "raw_observations.jsonl")
+        root_path = "/tmp/ruby-fixture"
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            exit_code, _stdout, stderr = run_repo_map_in_process(
+                "storage",
+                "load-files",
+                str(raw_jsonl),
+                "--repository-name",
+                "ruby-fixture",
+                "--root-path",
+                root_path,
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+                "--json",
+            )
+
+            ruby_files = query_canonical_node_records(
+                postgres.psql_args,
+                root_path=root_path,
+                kind="ruby.file",
+                psql_command=postgres.psql_command,
+            )
+            ruby_classes = query_canonical_node_records(
+                postgres.psql_args,
+                root_path=root_path,
+                kind="ruby.class",
+                canonical_key="ruby.class:Example%3A%3ARunner",
+                psql_command=postgres.psql_command,
+            )
+            routes = query_canonical_node_records(
+                postgres.psql_args,
+                root_path=root_path,
+                kind="ruby.route",
+                psql_command=postgres.psql_command,
+            )
+            references = query_canonical_edge_records(
+                postgres.psql_args,
+                root_path=root_path,
+                kind="references",
+                source_key="ruby.file:file%3Alib%2Fexample.rb",
+                target_key="file:lib/example/service.rb",
+                psql_command=postgres.psql_command,
+            )
+            explanation = query_canonical_edge_explanation(
+                postgres.psql_args,
+                root_path=root_path,
+                source_key=references[0].source_key,
+                kind=references[0].edge_kind,
+                target_key=references[0].target_key,
+                identity_metadata_hash=references[0].identity_metadata_hash,
+                psql_command=postgres.psql_command,
+            )
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertGreaterEqual(len(ruby_files), 10)
+        self.assertEqual(
+            [node.canonical_key for node in ruby_classes],
+            ["ruby.class:Example%3A%3ARunner"],
+        )
+        self.assertTrue(
+            any(node.canonical_key.startswith("ruby.route:") for node in routes)
+        )
+        self.assertEqual(len(references), 1)
+        self.assertEqual(references[0].edge_kind, "references")
+        self.assertIsNotNone(explanation.edge)
+        self.assertEqual(explanation.edge.source_key, "ruby.file:file%3Alib%2Fexample.rb")
+        readback_payload = "\n".join(
+            (
+                *(str(node.to_dict()) for node in ruby_files),
+                *(str(node.to_dict()) for node in ruby_classes),
+                *(str(node.to_dict()) for node in routes),
+                *(str(edge.to_dict()) for edge in references),
+                str(explanation.to_dict()),
+            )
+        )
+        self.assertNotIn("EXAMPLE_API_KEY", readback_payload)
+        self.assertNotIn("EXAMPLE_SESSION_SECRET", readback_payload)
+
     def test_storage_canonical_nodes_cli_reads_c2_loaded_rows_and_filters(self):
         require_postgres_binaries()
         raw_jsonl = canonicalization_fixture(
