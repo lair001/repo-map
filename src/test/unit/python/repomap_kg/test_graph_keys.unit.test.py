@@ -22,6 +22,7 @@ from repomap_kg.graph_keys import (
     external_key,
     email_address_key,
     email_attachment_stub_key,
+    email_mailbox_key,
     email_message_key,
     email_part_key,
     email_thread_hint_key,
@@ -345,6 +346,10 @@ class GraphKeysUnitTests(unittest.TestCase):
         self.assertEqual(
             ruby_route_key("app.rb", "/routes/get:/health"),
             "ruby.route:file%3Aapp.rb:%2Froutes%2Fget%3A%2Fhealth",
+        )
+        self.assertEqual(
+            email_mailbox_key("mail/sample.mbox"),
+            "email.mailbox:file%3Amail%2Fsample.mbox",
         )
         self.assertEqual(
             email_message_key("mail/single-message.eml", "message:abc123"),

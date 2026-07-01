@@ -32,6 +32,7 @@ from repomap_kg.email_extractor import (
     MAX_HEADER_BYTES,
     MAX_MIME_PARTS,
     extract_eml_file_observations,
+    extract_mbox_file_observations,
 )
 from repomap_kg.discovery import (
     discover_observations,
@@ -1121,6 +1122,120 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
         self.assertNotIn("unsubscribe@example.invalid", payload)
         self.assertNotIn("fake-mail-token", payload)
         self.assertNotIn("fake-mail-reset-code", payload)
+
+    def test_static_mbox_extraction_and_canonicalization_contract(self):
+        observations = []
+        observations.extend(
+            extract_mbox_file_observations(
+                "mailbox.mbox",
+                (
+                    b"From MAILER-DAEMON Tue Jun 30 12:00:00 2026\n"
+                    b"Message-ID: <mbox-contract-one@example.invalid>\n"
+                    b"Date: Tue, 30 Jun 2026 12:00:00 +0000\n"
+                    b"From: Alice Person <alice@example.invalid>\n"
+                    b"To: Bob Person <bob@example.invalid>\n"
+                    b"Subject: MBOX contract private subject fake-mail-token\n"
+                    b"List-Unsubscribe: <https://example.invalid/unsub?token=fake-mail-token>\n"
+                    b"Content-Type: text/plain; charset=utf-8\n"
+                    b"\n"
+                    b"MBOX contract body fake-mail-token must not leak.\n"
+                    b"From MAILER-DAEMON Tue Jun 30 12:05:00 2026\n"
+                    b"Message-ID: <mbox-contract-two@example.invalid>\n"
+                    b"Date: Tue, 30 Jun 2026 12:05:00 +0000\n"
+                    b"From: Bob Person <bob@example.invalid>\n"
+                    b"To: Alice Person <alice@example.invalid>\n"
+                    b"Subject: Re: MBOX contract private subject\n"
+                    b"In-Reply-To: <mbox-contract-one@example.invalid>\n"
+                    b"References: <mbox-contract-one@example.invalid>\n"
+                    b"MIME-Version: 1.0\n"
+                    b"Content-Type: multipart/mixed; boundary=\"contract\"\n"
+                    b"\n"
+                    b"--contract\n"
+                    b"Content-Type: text/plain; charset=utf-8\n"
+                    b"\n"
+                    b"MBOX reply body must not leak.\n"
+                    b"--contract\n"
+                    b"Content-Type: text/plain\n"
+                    b"Content-Disposition: attachment; filename=\"contract-secret-note.txt\"\n"
+                    b"\n"
+                    b"MBOX attachment body must not leak.\n"
+                    b"--contract--\n"
+                ),
+            )
+        )
+        observations.extend(
+            extract_mbox_file_observations(
+                "limited.mbox",
+                (
+                    b"From MAILER-DAEMON Tue Jun 30 12:00:00 2026\n"
+                    b"Message-ID: <limited-one@example.invalid>\n\nbody\n"
+                    b"From MAILER-DAEMON Tue Jun 30 12:01:00 2026\n"
+                    b"Message-ID: <limited-two@example.invalid>\n\nbody\n"
+                ),
+                max_messages=1,
+            )
+        )
+        observations.extend(
+            extract_mbox_file_observations(
+                "malformed.mbox",
+                b"Message-ID: <not-mbox@example.invalid>\n\nbody\n",
+            )
+        )
+        observations.extend(
+            extract_mbox_file_observations(
+                "message-limit.mbox",
+                (
+                    b"From MAILER-DAEMON Tue Jun 30 12:00:00 2026\n"
+                    b"Message-ID: <message-limit@example.invalid>\n\nbody\n"
+                ),
+                max_message_bytes=10,
+            )
+        )
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+        serialized = result.to_json()
+        node_kinds = {node["kind"] for node in payload["nodes"]}
+        edge_pairs = {
+            (edge["source_key"], edge["kind"], edge["target_key"])
+            for edge in payload["edges"]
+        }
+        mailbox_key = next(
+            node["canonical_key"]
+            for node in payload["nodes"]
+            if node["kind"] == "email.mailbox"
+            and node["canonical_key"] == "email.mailbox:file%3Amailbox.mbox"
+        )
+        message_keys = [
+            node["canonical_key"]
+            for node in payload["nodes"]
+            if node["kind"] == "email.message"
+            and node["metadata"].get("format") == "mbox"
+        ]
+        parse_error_kinds = {
+            item.metadata["error_kind"]
+            for item in observations
+            if item.kind == "email.parse_error"
+        }
+
+        self.assertTrue(result.ok)
+        self.assertIn("email.mailbox", node_kinds)
+        self.assertIn("email.message", node_kinds)
+        self.assertIn("email.attachment_stub", node_kinds)
+        self.assertIn("email.thread_hint", node_kinds)
+        self.assertIn(("file:mailbox.mbox", "defines", mailbox_key), edge_pairs)
+        self.assertTrue(
+            any((mailbox_key, "defines", message_key) in edge_pairs for message_key in message_keys)
+        )
+        self.assertIn("mbox-message-count-limit", parse_error_kinds)
+        self.assertIn("mbox-missing-from-separator", parse_error_kinds)
+        self.assertIn("mbox-message-size-limit", parse_error_kinds)
+        self.assertNotIn("alice@example.invalid", serialized)
+        self.assertNotIn("bob@example.invalid", serialized)
+        self.assertNotIn("MBOX contract private subject", serialized)
+        self.assertNotIn("MBOX contract body", serialized)
+        self.assertNotIn("contract-secret-note.txt", serialized)
+        self.assertNotIn("fake-mail-token", serialized)
 
     def test_email_canonicalization_diagnostic_contracts(self):
         message_hash = "a" * 64

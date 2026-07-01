@@ -980,6 +980,12 @@ FROM canonical_edges;
                         "--json",
                     )
                 )
+                mailboxes = query_canonical_node_records(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    kind="email.mailbox",
+                    psql_command=postgres.psql_command,
+                )
                 messages = query_canonical_node_records(
                     postgres.psql_args,
                     root_path=str(fixture_root),
@@ -1016,6 +1022,18 @@ FROM canonical_edges;
                     kind="references",
                     psql_command=postgres.psql_command,
                 )
+                defines = query_canonical_edge_records(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    kind="defines",
+                    psql_command=postgres.psql_command,
+                )
+                mailbox_define = next(
+                    edge
+                    for edge in defines
+                    if edge.source_key.startswith("email.mailbox:")
+                    and edge.target_key.startswith("email.message:")
+                )
                 thread_reference = next(
                     edge
                     for edge in references
@@ -1031,6 +1049,15 @@ FROM canonical_edges;
                     identity_metadata_hash=thread_reference.identity_metadata_hash,
                     psql_command=postgres.psql_command,
                 )
+                mailbox_explanation = query_canonical_edge_explanation(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    source_key=mailbox_define.source_key,
+                    kind=mailbox_define.edge_kind,
+                    target_key=mailbox_define.target_key,
+                    identity_metadata_hash=mailbox_define.identity_metadata_hash,
+                    psql_command=postgres.psql_command,
+                )
 
         self.assertEqual(discover_exit_code, 0, discover_stderr)
         discovered = [
@@ -1039,27 +1066,37 @@ FROM canonical_edges;
             if line.strip()
         ]
         self.assertIn("email.message", {record["kind"] for record in discovered})
+        self.assertIn("email.mailbox", {record["kind"] for record in discovered})
         self.assertEqual(load_exit_code, 0, load_stderr)
+        self.assertTrue(mailboxes)
         self.assertGreaterEqual(len(messages), 8)
         self.assertGreaterEqual(len(addresses), 2)
         self.assertTrue(parts)
         self.assertTrue(attachment_stubs)
         self.assertTrue(thread_hints)
         self.assertIsNotNone(explanation.edge)
+        self.assertIsNotNone(mailbox_explanation.edge)
         self.assertEqual(
             explanation.evidence[0].raw_observation["kind"],
             "email.reference",
         )
+        self.assertEqual(
+            mailbox_explanation.evidence[0].raw_observation["kind"],
+            "email.message",
+        )
         readback_payload = "\n".join(
             (
                 discover_stdout,
+                *(str(node.to_dict()) for node in mailboxes),
                 *(str(node.to_dict()) for node in messages),
                 *(str(node.to_dict()) for node in addresses),
                 *(str(node.to_dict()) for node in parts),
                 *(str(node.to_dict()) for node in attachment_stubs),
                 *(str(node.to_dict()) for node in thread_hints),
+                *(str(edge.to_dict()) for edge in defines),
                 *(str(edge.to_dict()) for edge in references),
                 str(explanation.to_dict()),
+                str(mailbox_explanation.to_dict()),
             )
         )
         self.assertNotIn("alice@example.invalid", readback_payload)
@@ -1072,6 +1109,9 @@ FROM canonical_edges;
         self.assertNotIn("invoice-secret-code.txt", readback_payload)
         self.assertNotIn("fake-mail-reset-code", readback_payload)
         self.assertNotIn("fake-mail-token", readback_payload)
+        self.assertNotIn("Sample MBOX private subject", readback_payload)
+        self.assertNotIn("Sample MBOX body text", readback_payload)
+        self.assertNotIn("sample-mbox-secret-note.txt", readback_payload)
 
     def test_storage_canonical_nodes_cli_reads_c2_loaded_rows_and_filters(self):
         require_postgres_binaries()

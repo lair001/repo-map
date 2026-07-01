@@ -222,7 +222,7 @@ class DiscoveryUnitTests(unittest.TestCase):
         self.assertIn(".jsonl", {item.path[-6:] for item in observations})
         self.assertIn(".jsonc", {item.path[-6:] for item in observations})
 
-    def test_discover_observations_routes_eml_files_without_mbox(self):
+    def test_discover_observations_routes_eml_and_mbox_files(self):
         observations = discover_observations(FIXTURE_ROOT / "mail_basic")
         payload = "\n".join(item.to_json_line() for item in observations)
         kinds = {observation.kind for observation in observations}
@@ -233,11 +233,12 @@ class DiscoveryUnitTests(unittest.TestCase):
         }
 
         self.assertEqual(languages["single-message.eml"], "eml")
+        self.assertEqual(languages["sample.mbox"], "mbox")
         self.assertIn("email.message", kinds)
+        self.assertIn("email.mailbox", kinds)
         self.assertIn("email.part", kinds)
         self.assertIn("email.attachment_stub", kinds)
         self.assertIn("email.thread_hint", kinds)
-        self.assertNotIn("email.mailbox", kinds)
         self.assertNotIn("alice@example.invalid", payload)
         self.assertNotIn("fake-mail-reset-code", payload)
 

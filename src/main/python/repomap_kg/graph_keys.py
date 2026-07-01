@@ -74,6 +74,7 @@ _SEGMENT_COUNTS = {
     "js.test_suite": 2,
     "js.test_case": 2,
     "js.route": 2,
+    "email.mailbox": 1,
     "email.message": 2,
     "email.address": 1,
     "email.part": 2,
@@ -423,6 +424,10 @@ def js_route_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
 
 def email_message_key(path_or_file_key: str | os.PathLike[str], identity: str) -> str:
     return _key("email.message", _coerce_file_key(path_or_file_key), identity)
+
+
+def email_mailbox_key(path_or_file_key: str | os.PathLike[str]) -> str:
+    return _key("email.mailbox", _coerce_file_key(path_or_file_key))
 
 
 def email_address_key(address_identity: str) -> str:

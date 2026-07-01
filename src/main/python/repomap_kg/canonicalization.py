@@ -36,6 +36,7 @@ from repomap_kg.graph_keys import (
     dynamic_key,
     email_address_key,
     email_attachment_stub_key,
+    email_mailbox_key,
     email_message_key,
     email_part_key,
     email_thread_hint_key,
@@ -320,6 +321,7 @@ def canonicalize_observations(
             evidence.append(_evidence_from_observation(observation, ordinal))
             continue
         if observation.kind in (
+            "email.mailbox",
             "email.message",
             "email.part",
             "email.attachment_stub",
@@ -4678,7 +4680,15 @@ def _canonicalize_email_reference_observation(
 
 
 def _email_definition_source_key(observation: RawObservation) -> str:
+    if observation.kind == "email.mailbox":
+        return file_key(observation.path)
     if observation.kind == "email.message":
+        source_key = _metadata_text(observation.metadata, "source_key")
+        if source_key is not None:
+            parsed = parse_key(source_key)
+            if parsed.namespace == "email.mailbox":
+                return source_key
+            raise GraphKeyError("email.message source_key must be email.mailbox")
         return file_key(observation.path)
     source_key = _metadata_text(observation.metadata, "source_key")
     if source_key is None:
@@ -4693,6 +4703,7 @@ def _email_definition_target_key(observation: RawObservation) -> str:
     if observation.target is not None:
         parsed = parse_key(observation.target)
         if parsed.namespace in (
+            "email.mailbox",
             "email.message",
             "email.part",
             "email.attachment_stub",
@@ -4700,6 +4711,8 @@ def _email_definition_target_key(observation: RawObservation) -> str:
         ):
             return observation.target
         raise GraphKeyError(f"{observation.kind} target has unsupported namespace")
+    if observation.kind == "email.mailbox":
+        return email_mailbox_key(observation.path)
     if observation.kind == "email.message":
         message_id_hash = _metadata_text(observation.metadata, "message_id_hash")
         identity_strength = _metadata_text(observation.metadata, "identity_strength")
@@ -4789,9 +4802,23 @@ def _email_reference_target_key(
 
 def _email_node_metadata(kind: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     keys_by_kind = {
+        "email.mailbox": (
+            "format",
+            "parser",
+            "mailbox_message_count",
+            "mailbox_message_count_limited",
+            "mailbox_byte_count",
+            "mailbox_parse_status",
+            "mailbox_limit_reason",
+            "mailbox_digest",
+            "identity_strength",
+        ),
         "email.message": (
             "format",
             "parser",
+            "mailbox_file_key",
+            "mbox_message_ordinal",
+            "mbox_message_identity",
             "message_id_hash",
             "message_id_present",
             "message_id_valid",
@@ -4881,6 +4908,8 @@ def _email_define_edge_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
     summary: dict[str, Any] = {}
     for source_key, target_key in (
         ("format", "formats"),
+        ("mailbox_parse_status", "mailbox_parse_statuses"),
+        ("mailbox_limit_reason", "mailbox_limit_reasons"),
         ("content_type", "content_types"),
         ("content_disposition", "content_dispositions"),
         ("part_path", "part_paths"),
@@ -4918,6 +4947,11 @@ def _email_reference_edge_metadata(metadata: Mapping[str, Any]) -> dict[str, Any
 
 
 def _email_display_name(canonical_key: str, observation: RawObservation) -> str:
+    if observation.kind == "email.mailbox":
+        count = observation.metadata.get("mailbox_message_count")
+        if isinstance(count, int):
+            return f"email mailbox ({count} messages)"
+        return "email mailbox"
     for key in (
         "address_domain",
         "part_path",

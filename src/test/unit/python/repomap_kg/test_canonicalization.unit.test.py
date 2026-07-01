@@ -10,7 +10,10 @@ from repomap_kg.documents import (
     extract_document_file_observations,
     extract_odf_file_observations,
 )
-from repomap_kg.email_extractor import extract_eml_file_observations
+from repomap_kg.email_extractor import (
+    extract_eml_file_observations,
+    extract_mbox_file_observations,
+)
 from repomap_kg.feed import extract_feed_file_observations
 from repomap_kg.html import extract_html_file_observations
 from repomap_kg.observations import RawObservation
@@ -310,6 +313,55 @@ class CanonicalizationUnitTests(unittest.TestCase):
         self.assertNotIn("bob@example.invalid", serialized)
         self.assertNotIn("private subject", serialized)
         self.assertNotIn("private body text", serialized)
+
+    def test_email_mbox_observations_create_mailbox_container_edges(self):
+        observations = extract_mbox_file_observations(
+            "mail/sample.mbox",
+            (
+                b"From MAILER-DAEMON Tue Jun 30 12:00:00 2026\n"
+                b"Message-ID: <mbox-one@example.invalid>\n"
+                b"Date: Tue, 30 Jun 2026 12:00:00 +0000\n"
+                b"From: Example Sender <alice@example.invalid>\n"
+                b"To: Example Receiver <bob@example.invalid>\n"
+                b"Subject: MBOX private subject\n"
+                b"Content-Type: text/plain; charset=utf-8\n"
+                b"\n"
+                b"MBOX body text must not leak.\n"
+                b"From MAILER-DAEMON Tue Jun 30 12:05:00 2026\n"
+                b"Message-ID: <mbox-two@example.invalid>\n"
+                b"Date: Tue, 30 Jun 2026 12:05:00 +0000\n"
+                b"From: Example Receiver <bob@example.invalid>\n"
+                b"To: Example Sender <alice@example.invalid>\n"
+                b"Subject: Re: MBOX private subject\n"
+                b"In-Reply-To: <mbox-one@example.invalid>\n"
+                b"References: <mbox-one@example.invalid>\n"
+                b"Content-Type: text/plain; charset=utf-8\n"
+                b"\n"
+                b"Reply body text must not leak.\n"
+            ),
+        )
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+        nodes = {node["canonical_key"]: node for node in payload["nodes"]}
+        edge_pairs = {
+            (edge["source_key"], edge["kind"], edge["target_key"])
+            for edge in payload["edges"]
+        }
+        serialized = result.to_json()
+        mailbox_key = next(key for key in nodes if key.startswith("email.mailbox:"))
+        message_keys = [key for key in nodes if key.startswith("email.message:")]
+
+        self.assertTrue(result.ok)
+        self.assertIn(("file:mail/sample.mbox", "defines", mailbox_key), edge_pairs)
+        self.assertGreaterEqual(len(message_keys), 2)
+        self.assertTrue(
+            all((mailbox_key, "defines", message_key) in edge_pairs for message_key in message_keys)
+        )
+        self.assertNotIn("alice@example.invalid", serialized)
+        self.assertNotIn("bob@example.invalid", serialized)
+        self.assertNotIn("MBOX private subject", serialized)
+        self.assertNotIn("MBOX body text", serialized)
 
     def test_file_observations_with_multiple_roles_merge_without_conflict(self):
         observations = [
