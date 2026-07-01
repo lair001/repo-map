@@ -15,6 +15,7 @@ from repomap_kg.graph_keys import (
     document_file_key,
     document_latex_command_key,
     document_section_key,
+    document_sheet_key,
     document_table_key,
     dynamic_key,
     env_key,
@@ -278,6 +279,10 @@ class GraphKeysUnitTests(unittest.TestCase):
         self.assertEqual(
             document_table_key("data/report.csv", "/table"),
             "document.table:file%3Adata%2Freport.csv:%2Ftable",
+        )
+        self.assertEqual(
+            document_sheet_key("spreadsheet.ods", "/sheets/budget"),
+            "document.sheet:file%3Aspreadsheet.ods:%2Fsheets%2Fbudget",
         )
         self.assertEqual(
             document_column_key("data/report.csv", "/table/columns/status"),

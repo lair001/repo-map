@@ -27,6 +27,7 @@ from repomap_kg.graph_keys import (
     document_file_key,
     document_latex_command_key,
     document_section_key,
+    document_sheet_key,
     document_table_key,
     doc_adr_key,
     doc_page_key,
@@ -467,6 +468,11 @@ def canonicalize_observations(
             "document.latex_document",
             "document.latex_section",
             "document.latex_command",
+            "document.odf_document",
+            "document.odf_text",
+            "document.odf_table",
+            "document.odf_sheet",
+            "document.odf_column",
         ):
             _canonicalize_document_definition_observation(
                 observation=observation,
@@ -4060,11 +4066,19 @@ def _document_definition(
         )
     ]
 
-    if observation.kind in ("document.text_document", "document.latex_document"):
+    if observation.kind in (
+        "document.text_document",
+        "document.latex_document",
+        "document.odf_document",
+    ):
         _append_raw_target_diagnostic(observation, ordinal, diagnostics)
         return {"nodes": nodes, "edges": edges}
 
-    if observation.kind in ("document.text_section", "document.latex_section"):
+    if observation.kind in (
+        "document.text_section",
+        "document.latex_section",
+        "document.odf_text",
+    ):
         pointer = _metadata_text(observation.metadata, "pointer") or observation.name
         if not isinstance(pointer, str) or not pointer.strip():
             raise GraphKeyError(f"{observation.kind} observation requires pointer")
@@ -4087,10 +4101,10 @@ def _document_definition(
         )
         return {"nodes": nodes, "edges": edges}
 
-    if observation.kind == "document.table_document":
+    if observation.kind in ("document.table_document", "document.odf_table"):
         pointer = _metadata_text(observation.metadata, "pointer") or observation.name
         if not isinstance(pointer, str) or not pointer.strip():
-            raise GraphKeyError("document.table_document observation requires pointer")
+            raise GraphKeyError(f"{observation.kind} observation requires pointer")
         table_key = document_table_key(observation.path, pointer)
         _append_raw_target_diagnostic(observation, ordinal, diagnostics)
         nodes.append(
@@ -4110,20 +4124,54 @@ def _document_definition(
         )
         return {"nodes": nodes, "edges": edges}
 
-    if observation.kind == "document.table_column":
+    if observation.kind == "document.odf_sheet":
         pointer = _metadata_text(observation.metadata, "pointer") or observation.name
         if not isinstance(pointer, str) or not pointer.strip():
-            raise GraphKeyError("document.table_column observation requires pointer")
-        table_key = _metadata_text(observation.metadata, "table_key")
-        if table_key is None:
-            table_key = document_table_key(observation.path, "/table")
-        elif parse_key(table_key).namespace != "document.table":
-            raise GraphKeyError("document.table_column table_key must be document.table")
+            raise GraphKeyError("document.odf_sheet observation requires pointer")
+        sheet_key = document_sheet_key(observation.path, pointer)
+        _append_raw_target_diagnostic(observation, ordinal, diagnostics)
+        nodes.append(
+            (
+                sheet_key,
+                _metadata_text(observation.metadata, "display_name") or pointer,
+                _document_sheet_node_metadata(observation.metadata),
+                "observed",
+            )
+        )
+        edges.append(
+            (
+                document_key,
+                sheet_key,
+                _document_define_edge_metadata(observation.metadata),
+            )
+        )
+        return {"nodes": nodes, "edges": edges}
+
+    if observation.kind in ("document.table_column", "document.odf_column"):
+        pointer = _metadata_text(observation.metadata, "pointer") or observation.name
+        if not isinstance(pointer, str) or not pointer.strip():
+            raise GraphKeyError(f"{observation.kind} observation requires pointer")
+        parent_key = _metadata_text(observation.metadata, "parent_key")
+        parent_key_source = "parent_key"
+        if parent_key is None:
+            parent_key = _metadata_text(observation.metadata, "table_key")
+            parent_key_source = "table_key"
+        if parent_key is None:
+            parent_key = document_table_key(observation.path, "/table")
+        parsed_parent = parse_key(parent_key)
+        if parsed_parent.namespace not in ("document.table", "document.sheet"):
+            if parent_key_source == "table_key":
+                raise GraphKeyError(
+                    "document.table_column table_key must be document.table"
+                )
+            raise GraphKeyError(
+                f"{observation.kind} parent_key must be document.table or document.sheet"
+            )
         column_key = document_column_key(observation.path, pointer)
         _append_raw_target_diagnostic(observation, ordinal, diagnostics)
         nodes.extend(
             (
-                (table_key, _display_name_from_key(table_key), {}, "inferred_from_edge"),
+                (parent_key, _display_name_from_key(parent_key), {}, "inferred_from_edge"),
                 (
                     column_key,
                     _metadata_text(observation.metadata, "column_name_summary") or pointer,
@@ -4134,7 +4182,7 @@ def _document_definition(
         )
         edges.append(
             (
-                table_key,
+                parent_key,
                 column_key,
                 _document_define_edge_metadata(observation.metadata),
             )
@@ -4186,6 +4234,7 @@ def _document_reference_source_key(observation: RawObservation) -> str:
         "document.file",
         "document.section",
         "document.table",
+        "document.sheet",
         "document.column",
         "document.latex_command",
     ):
@@ -4247,6 +4296,24 @@ def _document_file_node_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
         "reference_count",
         "summary_redacted",
         "compiled",
+        "document_kind",
+        "template",
+        "package_byte_count",
+        "package_part_count",
+        "parsed_part_count",
+        "skipped_part_count",
+        "total_uncompressed_bytes",
+        "paragraph_count",
+        "heading_count",
+        "table_count",
+        "sheet_count",
+        "row_count_summary",
+        "column_count_summary",
+        "formulas_evaluated",
+        "formula_count",
+        "macro_script_ignored",
+        "style_count",
+        "title_summary",
     ):
         if key in metadata:
             summary[key] = metadata[key]
@@ -4278,6 +4345,29 @@ def _document_table_node_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]
         "column_count",
         "header_present",
         "delimiter",
+        "display_name",
+        "formula_count",
+        "formulas_evaluated",
+        "redacted",
+    ):
+        if key in metadata:
+            summary[key] = metadata[key]
+    return summary
+
+
+def _document_sheet_node_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for key in (
+        "format",
+        "parser",
+        "pointer",
+        "display_name",
+        "row_count",
+        "column_count",
+        "header_present",
+        "formula_count",
+        "formulas_evaluated",
+        "redacted",
     ):
         if key in metadata:
             summary[key] = metadata[key]
@@ -4322,8 +4412,13 @@ def _document_define_edge_metadata(metadata: Mapping[str, Any]) -> dict[str, Any
         ("pointer", "pointers"),
         ("command", "commands"),
         ("type_summary", "type_summaries"),
+        ("document_kind", "document_kinds"),
+        ("source_part", "source_parts"),
     ):
         _append_metadata_text(summary, metadata, source_key, summary_key)
+    template = metadata.get("template")
+    if isinstance(template, bool):
+        summary["template_observed"] = template
     return summary
 
 

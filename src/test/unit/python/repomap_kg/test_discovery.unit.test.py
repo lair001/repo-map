@@ -1,5 +1,7 @@
 import tempfile
 import unittest
+import zipfile
+from io import BytesIO
 from pathlib import Path
 
 from repomap_kg.discovery import (
@@ -12,6 +14,42 @@ from repomap_kg.discovery import (
 
 
 FIXTURE_ROOT = Path(__file__).parents[3] / "fixtures" / "discovery"
+
+ODF_NS = (
+    'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+    'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" '
+    'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"'
+)
+
+
+def odf_package(content_xml: str) -> bytes:
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as package:
+        package.writestr("content.xml", content_xml.encode("utf-8"))
+    return buffer.getvalue()
+
+
+def odt_content() -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content {ODF_NS}>
+  <office:body><office:text><text:h text:outline-level="1">Overview</text:h></office:text></office:body>
+</office:document-content>
+"""
+
+
+def ods_content() -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content {ODF_NS}>
+  <office:body>
+    <office:spreadsheet>
+      <table:table table:name="Budget">
+        <table:table-row><table:table-cell><text:p>amount</text:p></table:table-cell></table:table-row>
+        <table:table-row><table:table-cell><text:p>12</text:p></table:table-cell></table:table-row>
+      </table:table>
+    </office:spreadsheet>
+  </office:body>
+</office:document-content>
+"""
 
 
 class DiscoveryUnitTests(unittest.TestCase):
@@ -469,6 +507,28 @@ class DiscoveryUnitTests(unittest.TestCase):
         self.assertIn("markdown.document", kinds)
         self.assertNotIn("document.pdf", kinds)
 
+    def test_discover_observations_routes_docs2_odf_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.write_bytes(root / "notes.odt", odf_package(odt_content()))
+            self.write_bytes(root / "spreadsheet.ods", odf_package(ods_content()))
+            self.write_bytes(root / "template.ott", odf_package(odt_content()))
+            self.write_bytes(root / "sheet-template.ots", odf_package(ods_content()))
+            self.write(root / "notes.txt", "# DOCS1\n")
+            self.write(root / "README.md", "# Markdown\n")
+            self.write(root / "ignored.xlsx", "not-supported\n")
+
+            observations = discover_observations(root)
+
+        kinds = {observation.kind for observation in observations}
+        self.assertIn("document.odf_document", kinds)
+        self.assertIn("document.odf_text", kinds)
+        self.assertIn("document.odf_sheet", kinds)
+        self.assertIn("document.odf_column", kinds)
+        self.assertIn("document.text_document", kinds)
+        self.assertIn("markdown.document", kinds)
+        self.assertNotIn("document.xlsx", kinds)
+
     def test_unknown_language_and_role_fall_back_honestly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -483,6 +543,10 @@ class DiscoveryUnitTests(unittest.TestCase):
     def write(self, path: Path, content: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
+
+    def write_bytes(self, path: Path, content: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,10 @@ from repomap_kg import __version__
 from repomap_kg.config_extractor import extract_config_file_observations
 from repomap_kg.css import extract_css_file_observations
 from repomap_kg.css_html_matching import extract_css_selector_match_observations
-from repomap_kg.documents import extract_document_file_observations
+from repomap_kg.documents import (
+    extract_document_file_observations,
+    extract_odf_file_observations,
+)
 from repomap_kg.feed import extract_feed_file_observations
 from repomap_kg.html import extract_html_file_observations
 from repomap_kg.markdown import (
@@ -58,6 +61,10 @@ LANGUAGE_BY_EXTENSION = {
     ".jsonl": "jsonl",
     ".md": "markdown",
     ".nix": "nix",
+    ".ods": "odf",
+    ".odt": "odf",
+    ".ots": "odf",
+    ".ott": "odf",
     ".plist": "plist",
     ".py": "python",
     ".rb": "ruby",
@@ -200,7 +207,7 @@ def discover_observations(
                     file_info.path,
                 )
             )
-        if file_info.language in ("text", "csv", "tsv", "latex"):
+        if file_info.language in ("text", "csv", "tsv", "latex", "odf"):
             observations.extend(
                 extract_document_file_observations_from_file(
                     repository_root,
@@ -300,6 +307,33 @@ def extract_document_file_observations_from_file(
     *,
     repository_paths: frozenset[str] | None = None,
 ) -> tuple[RawObservation, ...]:
+    suffix = Path(relative_path).suffix.lower()
+    if suffix in (".odt", ".ods", ".ott", ".ots"):
+        try:
+            content = (repository_root / relative_path).read_bytes()
+        except OSError as error:
+            return (
+                RawObservation(
+                    kind="document.parse_error",
+                    source_id=f"{relative_path}#document-parse-error:read",
+                    path=relative_path,
+                    confidence="unknown",
+                    extractor="repo-documents",
+                    extractor_version=__version__,
+                    metadata={
+                        "format": suffix.lstrip(".") or "unknown",
+                        "parser": "stdlib-document-conservative",
+                        "error_kind": "read-error",
+                        "message_summary": str(error)[:120],
+                        "recovered": False,
+                    },
+                ),
+            )
+        return extract_odf_file_observations(
+            relative_path,
+            content,
+            repository_paths=repository_paths,
+        )
     try:
         content = (repository_root / relative_path).read_text(encoding="utf-8")
     except UnicodeDecodeError:

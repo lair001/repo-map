@@ -52,6 +52,7 @@ _SEGMENT_COUNTS = {
     "document.file": 1,
     "document.section": 2,
     "document.table": 2,
+    "document.sheet": 2,
     "document.column": 2,
     "document.latex_command": 2,
     "ruby.module": 1,
@@ -281,6 +282,14 @@ def document_section_key(path_or_file_key: str | os.PathLike[str], pointer: str)
 def document_table_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
     return _key(
         "document.table",
+        _coerce_file_key(path_or_file_key),
+        _coerce_pointer(pointer),
+    )
+
+
+def document_sheet_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
+    return _key(
+        "document.sheet",
         _coerce_file_key(path_or_file_key),
         _coerce_pointer(pointer),
     )

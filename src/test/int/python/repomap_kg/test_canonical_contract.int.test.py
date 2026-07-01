@@ -2,6 +2,8 @@ import json
 import os
 import tempfile
 import unittest
+import zipfile
+from io import BytesIO
 from pathlib import Path, PurePosixPath
 
 from repomap_kg.canonical import (
@@ -19,7 +21,10 @@ from repomap_kg.canonicalization import canonicalize_observations
 from repomap_kg.config_extractor import extract_config_file_observations
 from repomap_kg.css import extract_css_file_observations
 from repomap_kg.css_html_matching import extract_css_selector_match_observations
-from repomap_kg.documents import extract_document_file_observations
+from repomap_kg.documents import (
+    extract_document_file_observations,
+    extract_odf_file_observations,
+)
 from repomap_kg.discovery import (
     extract_css_file_observations_from_file,
     extract_feed_file_observations_from_file,
@@ -108,6 +113,7 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             "html_static_basic",
             "css_static_basic",
             "feed_static_basic",
+            "docs_odf_basic",
         )
 
         for fixture_name in fixture_names:
@@ -2729,6 +2735,174 @@ Read https://example.com/docs.
             "document.table_column table_key must be document.table",
         )
 
+    def test_docs2_odf_extraction_and_canonicalization_contract(self):
+        fixture = DISCOVERY_FIXTURE_ROOT / "docs_odf_basic"
+        observations = (
+            *extract_odf_file_observations(
+                "notes.odt",
+                (fixture / "notes.odt").read_bytes(),
+            ),
+            *extract_odf_file_observations(
+                "spreadsheet.ods",
+                (fixture / "spreadsheet.ods").read_bytes(),
+            ),
+            *extract_odf_file_observations(
+                "template.ott",
+                (fixture / "template.ott").read_bytes(),
+            ),
+            *extract_odf_file_observations(
+                "sheet-template.ots",
+                (fixture / "sheet-template.ots").read_bytes(),
+            ),
+            *extract_odf_file_observations(
+                "malformed.odt",
+                (fixture / "malformed.odt").read_bytes(),
+            ),
+            *extract_odf_file_observations(
+                "dangerous.odt",
+                (fixture / "dangerous.odt").read_bytes(),
+            ),
+        )
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        serialized = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("docs2-sensitive-secret", serialized)
+        self.assertNotIn("docs2-cell-secret", serialized)
+        node_keys = {node["canonical_key"] for node in payload["nodes"]}
+        self.assertIn("document.file:file%3Anotes.odt", node_keys)
+        self.assertIn(
+            "document.section:file%3Anotes.odt:%2Fsections%2Foverview",
+            node_keys,
+        )
+        self.assertIn(
+            "document.table:file%3Anotes.odt:%2Ftables%2Ftasks",
+            node_keys,
+        )
+        self.assertIn(
+            "document.sheet:file%3Aspreadsheet.ods:%2Fsheets%2Fbudget",
+            node_keys,
+        )
+        self.assertIn(
+            "document.column:file%3Aspreadsheet.ods:"
+            "%2Fsheets%2Fbudget%2Fcolumns%2Famount",
+            node_keys,
+        )
+        edges = {
+            (edge["source_key"], edge["kind"], edge["target_key"])
+            for edge in payload["edges"]
+        }
+        self.assertIn(
+            (
+                "document.sheet:file%3Aspreadsheet.ods:%2Fsheets%2Fbudget",
+                "defines",
+                "document.column:file%3Aspreadsheet.ods:"
+                "%2Fsheets%2Fbudget%2Fcolumns%2Famount",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "document.section:file%3Anotes.odt:%2Fsections%2Foverview",
+                "references",
+                "external.url:https%3A%2F%2Fexample.com%2Fdocs2",
+            ),
+            edges,
+        )
+        self.assertEqual(
+            [observation.kind for observation in observations].count(
+                "document.parse_error"
+            ),
+            2,
+        )
+
+    def test_docs2_odf_package_safety_contracts(self):
+        safe_content = (
+            b'<?xml version="1.0" encoding="UTF-8"?>'
+            b'<office:document-content '
+            b'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+            b'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">'
+            b"<office:body><office:text><text:p>Fixture</text:p></office:text>"
+            b"</office:body></office:document-content>"
+        )
+
+        self.assertEqual(extract_odf_file_observations("ignored.docx", b"not-odf"), ())
+
+        cases = (
+            (
+                "missing-content.odt",
+                _odf_package({"meta.xml": safe_content}),
+                {},
+                "missing-content-xml",
+            ),
+            (
+                "traversal.odt",
+                _odf_package({"content.xml": safe_content, "../outside.xml": b"x"}),
+                {},
+                "zip-path-traversal",
+            ),
+            (
+                "absolute.odt",
+                _odf_package({"content.xml": safe_content, "/absolute.xml": b"x"}),
+                {},
+                "zip-path-traversal",
+            ),
+            (
+                "dangerous.odt",
+                _odf_package(
+                    {
+                        "content.xml": (
+                            b'<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+                            b"<office:document-content />"
+                        )
+                    }
+                ),
+                {},
+                "dangerous-xml",
+            ),
+            (
+                "file-count.odt",
+                _odf_package({"content.xml": safe_content, "styles.xml": b"<styles />"}),
+                {"max_file_count": 1},
+                "zip-file-count-limit",
+            ),
+            (
+                "package-size.odt",
+                _odf_package({"content.xml": safe_content}),
+                {"max_package_bytes": 8},
+                "zip-package-size-limit",
+            ),
+            (
+                "part-size.odt",
+                _odf_package({"content.xml": safe_content}),
+                {"max_part_bytes": 8},
+                "zip-part-size-limit",
+            ),
+            (
+                "total-size.odt",
+                _odf_package({"content.xml": safe_content}),
+                {"max_total_uncompressed_bytes": 8},
+                "zip-uncompressed-limit",
+            ),
+        )
+
+        for path, package_bytes, options, error_kind in cases:
+            with self.subTest(path=path):
+                observations = extract_odf_file_observations(
+                    path,
+                    package_bytes,
+                    **options,
+                )
+
+                self.assertEqual(len(observations), 1)
+                self.assertEqual(observations[0].kind, "document.parse_error")
+                self.assertEqual(observations[0].metadata["error_kind"], error_kind)
+                result = canonicalize_observations(observations)
+                self.assertTrue(result.ok)
+                self.assertEqual(result.to_dict()["summary"]["nodes"], 0)
+
 
 def _observations_by_kind(
     observations: tuple[RawObservation, ...],
@@ -2737,6 +2911,14 @@ def _observations_by_kind(
     for observation in observations:
         grouped.setdefault(observation.kind, []).append(observation)
     return grouped
+
+
+def _odf_package(parts: dict[str, bytes]) -> bytes:
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as package:
+        for name, payload in parts.items():
+            package.writestr(name, payload)
+    return buffer.getvalue()
 
 
 if __name__ == "__main__":

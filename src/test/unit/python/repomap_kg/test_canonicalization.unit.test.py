@@ -1,13 +1,68 @@
 import unittest
+import zipfile
+from io import BytesIO
 
 from repomap_kg.canonical import canonical_edge_key
 from repomap_kg.canonicalization import canonicalize_observations
 from repomap_kg.config_extractor import extract_config_file_observations
 from repomap_kg.css import extract_css_file_observations
-from repomap_kg.documents import extract_document_file_observations
+from repomap_kg.documents import (
+    extract_document_file_observations,
+    extract_odf_file_observations,
+)
 from repomap_kg.feed import extract_feed_file_observations
 from repomap_kg.html import extract_html_file_observations
 from repomap_kg.observations import RawObservation
+
+
+ODF_NS = (
+    'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+    'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" '
+    'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" '
+    'xmlns:xlink="http://www.w3.org/1999/xlink"'
+)
+
+
+def odf_package(parts):
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as package:
+        for name, content in parts.items():
+            package.writestr(name, content.encode("utf-8"))
+    return buffer.getvalue()
+
+
+def odf_spreadsheet_content():
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content {ODF_NS}>
+  <office:body>
+    <office:spreadsheet>
+      <table:table table:name="Budget">
+        <table:table-row>
+          <table:table-cell><text:p>item</text:p></table:table-cell>
+          <table:table-cell><text:p>amount</text:p></table:table-cell>
+        </table:table-row>
+        <table:table-row>
+          <table:table-cell><text:p>hosting</text:p></table:table-cell>
+          <table:table-cell office:value-type="float" office:value="12.5"><text:p>12.5</text:p></table:table-cell>
+        </table:table-row>
+      </table:table>
+    </office:spreadsheet>
+  </office:body>
+</office:document-content>
+"""
+
+
+def odf_text_content():
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content {ODF_NS}>
+  <office:body>
+    <office:text>
+      <text:h text:outline-level="1">Overview</text:h>
+      <text:p><text:a xlink:href="https://example.com/odf">link</text:a></text:p>
+    </office:text>
+  </office:body>
+</office:document-content>
+"""
 
 
 class CanonicalizationUnitTests(unittest.TestCase):
@@ -2689,6 +2744,68 @@ class CanonicalizationUnitTests(unittest.TestCase):
                 "document.latex_command:file%3Apaper.tex:%2Fcommands%2Furl%3A2",
                 "references",
                 "external.url:https%3A%2F%2Fexample.com%2Fpaper",
+            ),
+            edges,
+        )
+
+    def test_odf_observations_define_document_sheet_columns_and_references(self):
+        observations = (
+            *extract_odf_file_observations(
+                "notes.odt",
+                odf_package({"content.xml": odf_text_content()}),
+            ),
+            *extract_odf_file_observations(
+                "spreadsheet.ods",
+                odf_package({"content.xml": odf_spreadsheet_content()}),
+            ),
+        )
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        node_keys = {node["canonical_key"] for node in payload["nodes"]}
+        self.assertIn("document.file:file%3Anotes.odt", node_keys)
+        self.assertIn(
+            "document.section:file%3Anotes.odt:%2Fsections%2Foverview",
+            node_keys,
+        )
+        self.assertIn("document.file:file%3Aspreadsheet.ods", node_keys)
+        self.assertIn(
+            "document.sheet:file%3Aspreadsheet.ods:%2Fsheets%2Fbudget",
+            node_keys,
+        )
+        self.assertIn(
+            "document.column:file%3Aspreadsheet.ods:"
+            "%2Fsheets%2Fbudget%2Fcolumns%2Famount",
+            node_keys,
+        )
+        edges = {
+            (edge["source_key"], edge["kind"], edge["target_key"])
+            for edge in payload["edges"]
+        }
+        self.assertIn(
+            (
+                "document.file:file%3Aspreadsheet.ods",
+                "defines",
+                "document.sheet:file%3Aspreadsheet.ods:%2Fsheets%2Fbudget",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "document.sheet:file%3Aspreadsheet.ods:%2Fsheets%2Fbudget",
+                "defines",
+                "document.column:file%3Aspreadsheet.ods:"
+                "%2Fsheets%2Fbudget%2Fcolumns%2Famount",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "document.section:file%3Anotes.odt:%2Fsections%2Foverview",
+                "references",
+                "external.url:https%3A%2F%2Fexample.com%2Fodf",
             ),
             edges,
         )
