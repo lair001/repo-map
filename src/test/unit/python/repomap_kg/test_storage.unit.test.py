@@ -17,6 +17,7 @@ from repomap_kg.storage import (
     CanonicalNodeRecord,
     CanonicalStorageSummaryRecord,
     EdgeRecord,
+    EmailSummaryRecord,
     FileNodeRecord,
     FileNeighborhoodRecord,
     JSSummaryRecord,
@@ -26,6 +27,7 @@ from repomap_kg.storage import (
     StorageSummaryRecord,
     StorageSchemaError,
     build_canonical_storage_summary_query_sql,
+    build_email_summary_query_sql,
     build_ingested_source_query_sql,
     build_js_summary_query_sql,
     build_ruby_summary_query_sql,
@@ -50,6 +52,7 @@ from repomap_kg.storage import (
     default_rdbms_root,
     discover_migrations,
     format_edge_table,
+    format_email_summary_table,
     format_file_node_table,
     format_file_neighborhood_table,
     format_neighborhood_table,
@@ -59,6 +62,7 @@ from repomap_kg.storage import (
     format_storage_summary_table,
     file_rows_from_observations,
     query_edge_records,
+    query_email_summary,
     query_file_node_records,
     query_file_records,
     query_file_neighborhood,
@@ -91,6 +95,7 @@ from repomap_kg.storage import (
     source_summary_from_storage_payload,
     js_summary_from_storage_payload,
     ruby_summary_from_storage_payload,
+    email_summary_from_storage_payload,
     format_canonical_edge_table,
     format_canonical_edge_explanation_table,
     format_canonical_neighborhood_table,
@@ -104,6 +109,7 @@ from repomap_kg.storage import (
     query_ingested_source_records,
     js_summary_to_jsonable,
     ruby_summary_to_jsonable,
+    email_summary_to_jsonable,
     query_source_feed_item_records,
     query_source_reference_records,
     query_source_run_records,
@@ -2284,6 +2290,122 @@ SELECT 1;
             with self.assertRaisesRegex(StorageSchemaError, "js summary"):
                 query_js_summary(["-d", "postgres"], root_path="/tmp/fixture")
 
+    def test_query_email_summary_returns_safe_counts(self):
+        completed = SimpleNamespace(
+            stdout=(
+                '{"root_path":"/tmp/fixture",'
+                '"repository_name":"fixture",'
+                '"mailboxes":1,'
+                '"messages":10,'
+                '"eml_messages":8,'
+                '"mbox_messages":2,'
+                '"addresses":6,'
+                '"address_observations":12,'
+                '"address_domains":1,'
+                '"mime_parts":22,'
+                '"text_plain_parts":9,'
+                '"text_html_parts":4,'
+                '"attachment_stubs":3,'
+                '"inline_attachments":1,'
+                '"content_id_parts":1,'
+                '"thread_hints":5,'
+                '"message_references":4,'
+                '"external_url_references":1,'
+                '"list_unsubscribe_references":1,'
+                '"parse_errors":2,'
+                '"malformed_or_oversized_diagnostics":2,'
+                '"message_id_present":9,'
+                '"message_id_missing_or_invalid":1,'
+                '"messages_with_attachments":2,'
+                '"messages_with_html":4,'
+                '"messages_with_plain":9,'
+                '"mailbox_limits":1,'
+                '"no_provider_api":true,'
+                '"no_mutation":true,'
+                '"no_body_text":true,'
+                '"no_attachment_content":true}\n'
+            )
+        )
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+            summary = query_email_summary(
+                ["-d", "postgres"],
+                root_path="/tmp/fixture",
+                psql_command="/bin/psql",
+            )
+
+        self.assertEqual(summary.repository_name, "fixture")
+        self.assertEqual(summary.mailboxes, 1)
+        self.assertEqual(summary.messages, 10)
+        self.assertEqual(summary.eml_messages, 8)
+        self.assertEqual(summary.mbox_messages, 2)
+        self.assertEqual(summary.address_domains, 1)
+        self.assertEqual(summary.text_html_parts, 4)
+        self.assertEqual(summary.attachment_stubs, 3)
+        self.assertEqual(summary.message_references, 4)
+        self.assertEqual(summary.list_unsubscribe_references, 1)
+        self.assertEqual(summary.message_id_missing_or_invalid, 1)
+        self.assertEqual(summary.mailbox_limits, 1)
+        self.assertTrue(summary.no_provider_api)
+        self.assertTrue(summary.no_mutation)
+        self.assertTrue(summary.no_body_text)
+        self.assertTrue(summary.no_attachment_content)
+        self.assertIn("-qAt", run.call_args.args[0])
+        self.assertIn("canonical_nodes.kind LIKE 'email.%'", run.call_args.kwargs["input"])
+
+    def test_query_email_summary_rejects_malformed_json(self):
+        completed = SimpleNamespace(stdout='{"root_path": "/tmp/fixture"}\n')
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(StorageSchemaError, "email summary"):
+                query_email_summary(["-d", "postgres"], root_path="/tmp/fixture")
+
+    def test_email_summary_payload_parser_preserves_safe_counts(self):
+        summary = email_summary_from_storage_payload(
+            {
+                "root_path": "/tmp/fixture",
+                "repository_name": "fixture",
+                "mailboxes": 1,
+                "messages": 10,
+                "eml_messages": 8,
+                "mbox_messages": 2,
+                "addresses": 6,
+                "address_observations": 12,
+                "address_domains": 1,
+                "mime_parts": 22,
+                "text_plain_parts": 9,
+                "text_html_parts": 4,
+                "attachment_stubs": 3,
+                "inline_attachments": 1,
+                "content_id_parts": 1,
+                "thread_hints": 5,
+                "message_references": 4,
+                "external_url_references": 1,
+                "list_unsubscribe_references": 1,
+                "parse_errors": 2,
+                "malformed_or_oversized_diagnostics": 2,
+                "message_id_present": 9,
+                "message_id_missing_or_invalid": 1,
+                "messages_with_attachments": 2,
+                "messages_with_html": 4,
+                "messages_with_plain": 9,
+                "mailbox_limits": 1,
+                "no_provider_api": True,
+                "no_mutation": True,
+                "no_body_text": True,
+                "no_attachment_content": True,
+            }
+        )
+
+        self.assertEqual(summary.root_path, "/tmp/fixture")
+        self.assertEqual(summary.mailboxes, 1)
+        self.assertEqual(summary.messages, 10)
+        self.assertEqual(summary.address_observations, 12)
+        self.assertEqual(summary.content_id_parts, 1)
+        self.assertEqual(summary.malformed_or_oversized_diagnostics, 2)
+        self.assertTrue(summary.no_body_text)
+        self.assertEqual(email_summary_to_jsonable(summary), summary.to_dict())
+
     def test_js_summary_payload_parser_preserves_safe_counts(self):
         summary = js_summary_from_storage_payload(
             {
@@ -2818,6 +2940,28 @@ SELECT 1;
         self.assertIn("profile_counts", sql)
         self.assertIn("'no_execution', true", sql)
 
+    def test_build_email_summary_query_sql_counts_safe_email_facts(self):
+        sql = build_email_summary_query_sql("/tmp/fixture's repo")
+
+        self.assertIn("fixture''s repo", sql)
+        self.assertIn("canonical_nodes.kind LIKE 'email.%'", sql)
+        self.assertIn("COUNT(*) FILTER (WHERE kind = 'email.mailbox')", sql)
+        self.assertIn("COUNT(*) FILTER (WHERE kind = 'email.message')", sql)
+        self.assertIn("COUNT(*) FILTER (WHERE kind = 'email.address')", sql)
+        self.assertIn("COUNT(*) FILTER (WHERE kind = 'email.part')", sql)
+        self.assertIn("COUNT(*) FILTER (WHERE kind = 'email.attachment_stub')", sql)
+        self.assertIn("COUNT(*) FILTER (WHERE kind = 'email.thread_hint')", sql)
+        self.assertIn("canonical_edges.edge_kind = 'references'", sql)
+        self.assertIn("raw_observations.kind = 'email.address'", sql)
+        self.assertIn("raw_observations.kind = 'email.reference'", sql)
+        self.assertIn("raw_observations.kind = 'email.parse_error'", sql)
+        self.assertIn("list_unsubscribe_references", sql)
+        self.assertIn("mailbox_limits", sql)
+        self.assertIn("'no_provider_api', true", sql)
+        self.assertIn("'no_mutation', true", sql)
+        self.assertIn("'no_body_text', true", sql)
+        self.assertIn("'no_attachment_content', true", sql)
+
     def test_format_edge_table_uses_edge_columns(self):
         table = format_edge_table(
             [
@@ -2961,6 +3105,51 @@ SELECT 1;
         self.assertIn("profile_counts", table)
         self.assertIn("react=3", table)
         self.assertIn("no_execution", table)
+
+    def test_format_email_summary_table_uses_privacy_and_readback_columns(self):
+        table = format_email_summary_table(
+            EmailSummaryRecord(
+                root_path="/tmp/fixture",
+                repository_name="fixture",
+                mailboxes=1,
+                messages=10,
+                eml_messages=8,
+                mbox_messages=2,
+                addresses=6,
+                address_observations=12,
+                address_domains=1,
+                mime_parts=22,
+                text_plain_parts=9,
+                text_html_parts=4,
+                attachment_stubs=3,
+                inline_attachments=1,
+                content_id_parts=1,
+                thread_hints=5,
+                message_references=4,
+                external_url_references=1,
+                list_unsubscribe_references=1,
+                parse_errors=2,
+                malformed_or_oversized_diagnostics=2,
+                message_id_present=9,
+                message_id_missing_or_invalid=1,
+                messages_with_attachments=2,
+                messages_with_html=4,
+                messages_with_plain=9,
+                mailbox_limits=1,
+                no_provider_api=True,
+                no_mutation=True,
+                no_body_text=True,
+                no_attachment_content=True,
+            )
+        )
+
+        self.assertIn("mailboxes", table)
+        self.assertIn("messages", table)
+        self.assertIn("mbox_messages", table)
+        self.assertIn("attachment_stubs", table)
+        self.assertIn("list_unsubscribe_references", table)
+        self.assertIn("no_provider_api", table)
+        self.assertIn("no_attachment_content", table)
 
     def test_format_node_table_uses_node_columns(self):
         table = format_node_table(

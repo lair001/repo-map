@@ -514,6 +514,44 @@ class JSSummaryRecord:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class EmailSummaryRecord:
+    root_path: str
+    repository_name: str | None
+    mailboxes: int
+    messages: int
+    eml_messages: int
+    mbox_messages: int
+    addresses: int
+    address_observations: int
+    address_domains: int
+    mime_parts: int
+    text_plain_parts: int
+    text_html_parts: int
+    attachment_stubs: int
+    inline_attachments: int
+    content_id_parts: int
+    thread_hints: int
+    message_references: int
+    external_url_references: int
+    list_unsubscribe_references: int
+    parse_errors: int
+    malformed_or_oversized_diagnostics: int
+    message_id_present: int
+    message_id_missing_or_invalid: int
+    messages_with_attachments: int
+    messages_with_html: int
+    messages_with_plain: int
+    mailbox_limits: int
+    no_provider_api: bool
+    no_mutation: bool
+    no_body_text: bool
+    no_attachment_content: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 CHANGESET_PATTERN = re.compile(r"^--changeset\s+(\S+)")
 
 
@@ -1182,6 +1220,21 @@ def query_js_summary(
     )
     return js_summary_from_storage_payload(
         parse_psql_json(result.stdout, "js summary")
+    )
+
+
+def query_email_summary(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    psql_command: str = "psql",
+) -> EmailSummaryRecord:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_email_summary_query_sql(root_path),
+    )
+    return email_summary_from_storage_payload(
+        parse_psql_json(result.stdout, "email summary")
     )
 
 
@@ -2523,6 +2576,118 @@ def build_ingested_source_query_sql(
         "ORDER BY source_id_configured "
         f"LIMIT {positive_limit(limit)}"
         ") source_rows;"
+    )
+
+
+def build_email_summary_query_sql(root_path: str) -> str:
+    quoted_root = sql_literal(root_path)
+    return (
+        "WITH repo AS ("
+        "SELECT id, name, root_path FROM repositories "
+        f"WHERE repositories.root_path = {quoted_root}"
+        "), "
+        "email_nodes AS ("
+        "SELECT canonical_nodes.* FROM canonical_nodes "
+        "JOIN repo ON repo.id = canonical_nodes.repository_id "
+        "WHERE canonical_nodes.graph_key_version = 1 "
+        "AND canonical_nodes.kind LIKE 'email.%'"
+        "), "
+        "email_raw AS ("
+        "SELECT raw_observations.* FROM raw_observations "
+        "JOIN repo ON repo.id = raw_observations.repository_id "
+        "WHERE raw_observations.kind LIKE 'email.%'"
+        "), "
+        "email_references AS ("
+        "SELECT canonical_edges.* FROM canonical_edges "
+        "JOIN repo ON repo.id = canonical_edges.repository_id "
+        "WHERE canonical_edges.graph_key_version = 1 "
+        "AND canonical_edges.edge_kind = 'references' "
+        "AND canonical_edges.source_canonical_key LIKE 'email.%'"
+        ") "
+        "SELECT json_build_object("
+        f"'root_path', {quoted_root}, "
+        "'repository_name', (SELECT name FROM repo), "
+        "'mailboxes', (SELECT COUNT(*) FILTER (WHERE kind = 'email.mailbox') "
+        "FROM email_nodes), "
+        "'messages', (SELECT COUNT(*) FILTER (WHERE kind = 'email.message') "
+        "FROM email_nodes), "
+        "'eml_messages', (SELECT COUNT(*) FROM email_nodes "
+        "WHERE kind = 'email.message' "
+        "AND metadata_json->>'format' = 'eml'), "
+        "'mbox_messages', (SELECT COUNT(*) FROM email_nodes "
+        "WHERE kind = 'email.message' "
+        "AND metadata_json->>'format' = 'mbox'), "
+        "'addresses', (SELECT COUNT(*) FILTER (WHERE kind = 'email.address') "
+        "FROM email_nodes), "
+        "'address_observations', (SELECT COUNT(*) FROM email_raw raw_observations "
+        "WHERE raw_observations.kind = 'email.address'), "
+        "'address_domains', (SELECT COUNT(DISTINCT metadata_json->>'address_domain') "
+        "FROM email_nodes WHERE kind = 'email.address' "
+        "AND metadata_json ? 'address_domain'), "
+        "'mime_parts', (SELECT COUNT(*) FILTER (WHERE kind = 'email.part') "
+        "FROM email_nodes), "
+        "'text_plain_parts', (SELECT COUNT(*) FROM email_nodes "
+        "WHERE kind = 'email.part' "
+        "AND metadata_json->>'content_type' = 'text/plain'), "
+        "'text_html_parts', (SELECT COUNT(*) FROM email_nodes "
+        "WHERE kind = 'email.part' "
+        "AND metadata_json->>'content_type' = 'text/html'), "
+        "'attachment_stubs', (SELECT COUNT(*) FILTER "
+        "(WHERE kind = 'email.attachment_stub') FROM email_nodes), "
+        "'inline_attachments', (SELECT COUNT(*) FROM email_nodes "
+        "WHERE kind = 'email.attachment_stub' "
+        "AND COALESCE((metadata_json->>'inline')::boolean, false)), "
+        "'content_id_parts', (SELECT COUNT(*) FROM email_nodes "
+        "WHERE kind IN ('email.part', 'email.attachment_stub') "
+        "AND COALESCE((metadata_json->>'content_id_present')::boolean, false)), "
+        "'thread_hints', (SELECT COUNT(*) FILTER "
+        "(WHERE kind = 'email.thread_hint') FROM email_nodes), "
+        "'message_references', (SELECT COUNT(*) FROM email_references "
+        "WHERE target_canonical_key LIKE 'email.message:%' "
+        "OR target_canonical_key LIKE 'unknown:email-message:%'), "
+        "'external_url_references', (SELECT COUNT(*) FROM email_references "
+        "WHERE target_canonical_key LIKE 'external.url:%'), "
+        "'list_unsubscribe_references', (SELECT COUNT(*) FROM email_raw raw_observations "
+        "WHERE raw_observations.kind = 'email.reference' "
+        "AND raw_observations.payload_json->'metadata'->>'reference_kind' = "
+        "'list_unsubscribe'), "
+        "'parse_errors', (SELECT COUNT(*) FROM email_raw raw_observations "
+        "WHERE raw_observations.kind = 'email.parse_error'), "
+        "'malformed_or_oversized_diagnostics', (SELECT COUNT(*) "
+        "FROM email_raw raw_observations "
+        "WHERE raw_observations.kind = 'email.parse_error' "
+        "AND (raw_observations.payload_json->'metadata'->>'error_kind' "
+        "LIKE '%limit%' "
+        "OR raw_observations.payload_json->'metadata'->>'error_kind' "
+        "LIKE '%malformed%' "
+        "OR raw_observations.payload_json->'metadata'->>'error_kind' "
+        "= 'mbox-missing-from-separator')), "
+        "'message_id_present', (SELECT COUNT(*) FROM email_nodes "
+        "WHERE kind = 'email.message' "
+        "AND COALESCE((metadata_json->>'message_id_present')::boolean, false)), "
+        "'message_id_missing_or_invalid', (SELECT COUNT(*) FROM email_nodes "
+        "WHERE kind = 'email.message' "
+        "AND NOT (COALESCE((metadata_json->>'message_id_present')::boolean, false) "
+        "AND COALESCE((metadata_json->>'message_id_valid')::boolean, false))), "
+        "'messages_with_attachments', (SELECT COUNT(*) FROM email_nodes "
+        "WHERE kind = 'email.message' "
+        "AND COALESCE((metadata_json->>'has_attachments')::boolean, false)), "
+        "'messages_with_html', (SELECT COUNT(*) FROM email_nodes "
+        "WHERE kind = 'email.message' "
+        "AND COALESCE((metadata_json->>'has_text_html')::boolean, false)), "
+        "'messages_with_plain', (SELECT COUNT(*) FROM email_nodes "
+        "WHERE kind = 'email.message' "
+        "AND COALESCE((metadata_json->>'has_text_plain')::boolean, false)), "
+        "'mailbox_limits', (SELECT COUNT(*) FROM email_nodes "
+        "WHERE kind = 'email.mailbox' "
+        "AND COALESCE("
+        "(metadata_json->>'mailbox_message_count_limited')::boolean, "
+        "false)), "
+        "'no_provider_api', true, "
+        "'no_mutation', true, "
+        "'no_body_text', true, "
+        "'no_attachment_content', true"
+        ")::text;"
     )
 
 
@@ -4189,6 +4354,124 @@ def js_summary_from_storage_payload(payload: Any) -> JSSummaryRecord:
     )
 
 
+def email_summary_from_storage_payload(payload: Any) -> EmailSummaryRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed email summary")
+    return EmailSummaryRecord(
+        root_path=payload_text(payload, "root_path", label="email summary"),
+        repository_name=payload_optional_text(
+            payload,
+            "repository_name",
+            label="email summary",
+        ),
+        mailboxes=payload_int(payload, "mailboxes", label="email summary"),
+        messages=payload_int(payload, "messages", label="email summary"),
+        eml_messages=payload_int(payload, "eml_messages", label="email summary"),
+        mbox_messages=payload_int(payload, "mbox_messages", label="email summary"),
+        addresses=payload_int(payload, "addresses", label="email summary"),
+        address_observations=payload_int(
+            payload,
+            "address_observations",
+            label="email summary",
+        ),
+        address_domains=payload_int(
+            payload,
+            "address_domains",
+            label="email summary",
+        ),
+        mime_parts=payload_int(payload, "mime_parts", label="email summary"),
+        text_plain_parts=payload_int(
+            payload,
+            "text_plain_parts",
+            label="email summary",
+        ),
+        text_html_parts=payload_int(
+            payload,
+            "text_html_parts",
+            label="email summary",
+        ),
+        attachment_stubs=payload_int(
+            payload,
+            "attachment_stubs",
+            label="email summary",
+        ),
+        inline_attachments=payload_int(
+            payload,
+            "inline_attachments",
+            label="email summary",
+        ),
+        content_id_parts=payload_int(
+            payload,
+            "content_id_parts",
+            label="email summary",
+        ),
+        thread_hints=payload_int(payload, "thread_hints", label="email summary"),
+        message_references=payload_int(
+            payload,
+            "message_references",
+            label="email summary",
+        ),
+        external_url_references=payload_int(
+            payload,
+            "external_url_references",
+            label="email summary",
+        ),
+        list_unsubscribe_references=payload_int(
+            payload,
+            "list_unsubscribe_references",
+            label="email summary",
+        ),
+        parse_errors=payload_int(payload, "parse_errors", label="email summary"),
+        malformed_or_oversized_diagnostics=payload_int(
+            payload,
+            "malformed_or_oversized_diagnostics",
+            label="email summary",
+        ),
+        message_id_present=payload_int(
+            payload,
+            "message_id_present",
+            label="email summary",
+        ),
+        message_id_missing_or_invalid=payload_int(
+            payload,
+            "message_id_missing_or_invalid",
+            label="email summary",
+        ),
+        messages_with_attachments=payload_int(
+            payload,
+            "messages_with_attachments",
+            label="email summary",
+        ),
+        messages_with_html=payload_int(
+            payload,
+            "messages_with_html",
+            label="email summary",
+        ),
+        messages_with_plain=payload_int(
+            payload,
+            "messages_with_plain",
+            label="email summary",
+        ),
+        mailbox_limits=payload_int(
+            payload,
+            "mailbox_limits",
+            label="email summary",
+        ),
+        no_provider_api=payload_bool(
+            payload,
+            "no_provider_api",
+            label="email summary",
+        ),
+        no_mutation=payload_bool(payload, "no_mutation", label="email summary"),
+        no_body_text=payload_bool(payload, "no_body_text", label="email summary"),
+        no_attachment_content=payload_bool(
+            payload,
+            "no_attachment_content",
+            label="email summary",
+        ),
+    )
+
+
 def file_node_records_to_jsonable(
     records: Sequence[FileNodeRecord],
 ) -> list[dict[str, Any]]:
@@ -4250,6 +4533,10 @@ def ruby_summary_to_jsonable(record: RubySummaryRecord) -> dict[str, Any]:
 
 
 def js_summary_to_jsonable(record: JSSummaryRecord) -> dict[str, Any]:
+    return record.to_dict()
+
+
+def email_summary_to_jsonable(record: EmailSummaryRecord) -> dict[str, Any]:
     return record.to_dict()
 
 
@@ -4689,6 +4976,51 @@ def format_js_summary_table(record: JSSummaryRecord) -> str:
         "parse_errors",
         "profile_counts",
         "no_execution",
+    )
+    rendered_row = {key: render_table_value(row[key]) for key in columns}
+    widths = {key: max(len(key), len(rendered_row[key])) for key in columns}
+    return "\n".join(
+        [
+            format_table_row(dict(zip(columns, columns, strict=True)), columns, widths),
+            format_table_row(rendered_row, columns, widths),
+        ]
+    )
+
+
+def format_email_summary_table(record: EmailSummaryRecord) -> str:
+    row = record.to_dict()
+    columns = (
+        "root_path",
+        "repository_name",
+        "mailboxes",
+        "messages",
+        "eml_messages",
+        "mbox_messages",
+        "addresses",
+        "address_observations",
+        "address_domains",
+        "mime_parts",
+        "text_plain_parts",
+        "text_html_parts",
+        "attachment_stubs",
+        "inline_attachments",
+        "content_id_parts",
+        "thread_hints",
+        "message_references",
+        "external_url_references",
+        "list_unsubscribe_references",
+        "parse_errors",
+        "malformed_or_oversized_diagnostics",
+        "message_id_present",
+        "message_id_missing_or_invalid",
+        "messages_with_attachments",
+        "messages_with_html",
+        "messages_with_plain",
+        "mailbox_limits",
+        "no_provider_api",
+        "no_mutation",
+        "no_body_text",
+        "no_attachment_content",
     )
     rendered_row = {key: render_table_value(row[key]) for key in columns}
     widths = {key: max(len(key), len(rendered_row[key])) for key in columns}

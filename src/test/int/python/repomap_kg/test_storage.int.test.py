@@ -30,6 +30,7 @@ from repomap_kg.storage import (
     query_canonical_edge_explanation,
     query_canonical_edge_records,
     query_canonical_node_records,
+    query_email_summary,
     query_js_summary,
     query_ruby_summary,
     raw_observation_rows_from_observations,
@@ -1034,11 +1035,30 @@ FROM canonical_edges;
                     if edge.source_key.startswith("email.mailbox:")
                     and edge.target_key.startswith("email.message:")
                 )
+                eml_define = next(
+                    edge
+                    for edge in defines
+                    if edge.source_key == "file:single-message.eml"
+                    and edge.target_key.startswith("email.message:")
+                )
                 thread_reference = next(
                     edge
                     for edge in references
                     if edge.source_key.startswith("email.message:")
                     and edge.target_key.startswith("unknown:email-message:")
+                )
+                address_reference = next(
+                    edge
+                    for edge in references
+                    if edge.source_key.startswith("email.message:")
+                    and edge.target_key.startswith("email.address:")
+                )
+                list_unsubscribe_reference = next(
+                    edge
+                    for edge in references
+                    if edge.source_key.startswith("email.message:")
+                    and edge.target_key.startswith("external.url:")
+                    and "list_unsubscribe" in edge.metadata.get("reference_kinds", [])
                 )
                 explanation = query_canonical_edge_explanation(
                     postgres.psql_args,
@@ -1058,6 +1078,55 @@ FROM canonical_edges;
                     identity_metadata_hash=mailbox_define.identity_metadata_hash,
                     psql_command=postgres.psql_command,
                 )
+                eml_explanation = query_canonical_edge_explanation(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    source_key=eml_define.source_key,
+                    kind=eml_define.edge_kind,
+                    target_key=eml_define.target_key,
+                    identity_metadata_hash=eml_define.identity_metadata_hash,
+                    psql_command=postgres.psql_command,
+                )
+                address_explanation = query_canonical_edge_explanation(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    source_key=address_reference.source_key,
+                    kind=address_reference.edge_kind,
+                    target_key=address_reference.target_key,
+                    identity_metadata_hash=address_reference.identity_metadata_hash,
+                    psql_command=postgres.psql_command,
+                )
+                list_unsubscribe_explanation = query_canonical_edge_explanation(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    source_key=list_unsubscribe_reference.source_key,
+                    kind=list_unsubscribe_reference.edge_kind,
+                    target_key=list_unsubscribe_reference.target_key,
+                    identity_metadata_hash=(
+                        list_unsubscribe_reference.identity_metadata_hash
+                    ),
+                    psql_command=postgres.psql_command,
+                )
+                email_summary = query_email_summary(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    psql_command=postgres.psql_command,
+                )
+                summary_exit_code, summary_stdout, summary_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "email-summary",
+                        *storage_args,
+                        "--json",
+                    )
+                )
+                table_exit_code, table_stdout, table_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "email-summary",
+                        *storage_args,
+                    )
+                )
 
         self.assertEqual(discover_exit_code, 0, discover_stderr)
         discovered = [
@@ -1076,6 +1145,9 @@ FROM canonical_edges;
         self.assertTrue(thread_hints)
         self.assertIsNotNone(explanation.edge)
         self.assertIsNotNone(mailbox_explanation.edge)
+        self.assertIsNotNone(eml_explanation.edge)
+        self.assertIsNotNone(address_explanation.edge)
+        self.assertIsNotNone(list_unsubscribe_explanation.edge)
         self.assertEqual(
             explanation.evidence[0].raw_observation["kind"],
             "email.reference",
@@ -1084,6 +1156,58 @@ FROM canonical_edges;
             mailbox_explanation.evidence[0].raw_observation["kind"],
             "email.message",
         )
+        self.assertEqual(
+            eml_explanation.evidence[0].raw_observation["kind"],
+            "email.message",
+        )
+        self.assertEqual(
+            address_explanation.evidence[0].raw_observation["kind"],
+            "email.address",
+        )
+        self.assertEqual(
+            list_unsubscribe_explanation.evidence[0].raw_observation["kind"],
+            "email.reference",
+        )
+        self.assertEqual(summary_exit_code, 0, summary_stderr)
+        self.assertEqual(table_exit_code, 0, table_stderr)
+        self.assertGreaterEqual(email_summary.mailboxes, 1)
+        self.assertGreaterEqual(email_summary.messages, len(messages))
+        self.assertGreaterEqual(email_summary.eml_messages, 8)
+        self.assertGreaterEqual(email_summary.mbox_messages, 2)
+        self.assertGreaterEqual(email_summary.addresses, 2)
+        self.assertGreaterEqual(email_summary.address_observations, 2)
+        self.assertGreaterEqual(email_summary.address_domains, 1)
+        self.assertGreaterEqual(email_summary.mime_parts, len(parts))
+        self.assertGreaterEqual(email_summary.text_plain_parts, 1)
+        self.assertGreaterEqual(email_summary.text_html_parts, 1)
+        self.assertGreaterEqual(email_summary.attachment_stubs, 1)
+        self.assertGreaterEqual(email_summary.inline_attachments, 1)
+        self.assertGreaterEqual(email_summary.content_id_parts, 1)
+        self.assertGreaterEqual(email_summary.thread_hints, 1)
+        self.assertGreaterEqual(email_summary.message_references, 1)
+        self.assertGreaterEqual(email_summary.external_url_references, 1)
+        self.assertGreaterEqual(email_summary.list_unsubscribe_references, 1)
+        self.assertGreaterEqual(email_summary.parse_errors, 1)
+        self.assertGreaterEqual(email_summary.malformed_or_oversized_diagnostics, 1)
+        self.assertGreaterEqual(email_summary.message_id_present, 1)
+        self.assertGreaterEqual(email_summary.message_id_missing_or_invalid, 1)
+        self.assertGreaterEqual(email_summary.messages_with_attachments, 1)
+        self.assertGreaterEqual(email_summary.messages_with_html, 1)
+        self.assertGreaterEqual(email_summary.messages_with_plain, 1)
+        self.assertGreaterEqual(email_summary.mailbox_limits, 0)
+        self.assertTrue(email_summary.no_provider_api)
+        self.assertTrue(email_summary.no_mutation)
+        self.assertTrue(email_summary.no_body_text)
+        self.assertTrue(email_summary.no_attachment_content)
+        summary_payload = json.loads(summary_stdout)
+        self.assertEqual(summary_payload["messages"], email_summary.messages)
+        self.assertEqual(summary_payload["mailboxes"], email_summary.mailboxes)
+        self.assertTrue(summary_payload["no_provider_api"])
+        self.assertTrue(summary_payload["no_body_text"])
+        self.assertIn("mailboxes", table_stdout)
+        self.assertIn("attachment_stubs", table_stdout)
+        self.assertIn("no_provider_api", table_stdout)
+        self.assertIn("no_attachment_content", table_stdout)
         readback_payload = "\n".join(
             (
                 discover_stdout,
@@ -1097,6 +1221,12 @@ FROM canonical_edges;
                 *(str(edge.to_dict()) for edge in references),
                 str(explanation.to_dict()),
                 str(mailbox_explanation.to_dict()),
+                str(eml_explanation.to_dict()),
+                str(address_explanation.to_dict()),
+                str(list_unsubscribe_explanation.to_dict()),
+                str(email_summary.to_dict()),
+                summary_stdout,
+                table_stdout,
             )
         )
         self.assertNotIn("alice@example.invalid", readback_payload)

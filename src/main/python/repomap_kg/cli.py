@@ -64,6 +64,7 @@ from repomap_kg.storage import (
     format_canonical_node_table,
     format_canonical_storage_summary_table,
     format_edge_table,
+    format_email_summary_table,
     format_file_neighborhood_table,
     format_file_node_table,
     format_js_summary_table,
@@ -82,6 +83,7 @@ from repomap_kg.storage import (
     query_canonical_edge_records,
     query_canonical_storage_summary,
     query_edge_records,
+    query_email_summary,
     query_file_neighborhood,
     query_file_node_records,
     query_file_records,
@@ -91,6 +93,7 @@ from repomap_kg.storage import (
     query_node_records,
     query_ruby_summary,
     query_storage_summary,
+    email_summary_to_jsonable,
     js_summary_to_jsonable,
     ruby_summary_to_jsonable,
     storage_summary_to_jsonable,
@@ -761,6 +764,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit stored JavaScript summary as JSON",
+    )
+    storage_email_summary = storage_subcommands.add_parser(
+        "email-summary",
+        help="summarize stored local email graph facts from Postgres storage",
+    )
+    add_storage_root_argument(storage_email_summary)
+    add_storage_connection_arguments(storage_email_summary)
+    storage_email_summary.add_argument(
+        "--json",
+        action="store_true",
+        help="emit stored email summary as JSON",
     )
 
     return parser
@@ -1563,6 +1577,22 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(js_summary_to_jsonable(summary), sort_keys=True))
         else:
             print(format_js_summary_table(summary))
+        return 0
+
+    if args.command == "storage" and args.storage_command == "email-summary":
+        try:
+            summary = query_email_summary(
+                psql_args_from_args(args),
+                root_path=args.root_path,
+                psql_command=args.psql_command,
+            )
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(email_summary_to_jsonable(summary), sort_keys=True))
+        else:
+            print(format_email_summary_table(summary))
         return 0
 
     parser.print_help()

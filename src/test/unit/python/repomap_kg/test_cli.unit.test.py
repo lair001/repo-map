@@ -20,6 +20,7 @@ from repomap_kg.storage import (
     CanonicalNodeRecord,
     CanonicalStorageSummaryRecord,
     EdgeRecord,
+    EmailSummaryRecord,
     FileNodeRecord,
     FileNeighborhoodRecord,
     JSSummaryRecord,
@@ -131,6 +132,7 @@ class CliUnitTests(unittest.TestCase):
             ("summary", ["--root-path", "/tmp/fixture"]),
             ("ruby-summary", ["--root-path", "/tmp/fixture"]),
             ("js-summary", ["--root-path", "/tmp/fixture"]),
+            ("email-summary", ["--root-path", "/tmp/fixture"]),
         )
 
         for subcommand, required_args in cases:
@@ -3619,6 +3621,150 @@ class CliUnitTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertIn("psql did not return js summary", stderr.getvalue())
+
+    def test_storage_email_summary_prints_json_record(self):
+        summary = EmailSummaryRecord(
+            root_path="/tmp/fixture",
+            repository_name="fixture",
+            mailboxes=1,
+            messages=10,
+            eml_messages=8,
+            mbox_messages=2,
+            addresses=6,
+            address_observations=12,
+            address_domains=1,
+            mime_parts=22,
+            text_plain_parts=9,
+            text_html_parts=4,
+            attachment_stubs=3,
+            inline_attachments=1,
+            content_id_parts=1,
+            thread_hints=5,
+            message_references=4,
+            external_url_references=1,
+            list_unsubscribe_references=1,
+            parse_errors=2,
+            malformed_or_oversized_diagnostics=2,
+            message_id_present=9,
+            message_id_missing_or_invalid=1,
+            messages_with_attachments=2,
+            messages_with_html=4,
+            messages_with_plain=9,
+            mailbox_limits=1,
+            no_provider_api=True,
+            no_mutation=True,
+            no_body_text=True,
+            no_attachment_content=True,
+        )
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_email_summary",
+            return_value=summary,
+        ) as query:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "email-summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--pg-database",
+                        "postgres",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["root_path"], "/tmp/fixture")
+        self.assertEqual(payload["mailboxes"], 1)
+        self.assertEqual(payload["messages"], 10)
+        self.assertEqual(payload["mbox_messages"], 2)
+        self.assertEqual(payload["attachment_stubs"], 3)
+        self.assertEqual(payload["list_unsubscribe_references"], 1)
+        self.assertTrue(payload["no_provider_api"])
+        self.assertTrue(payload["no_mutation"])
+        self.assertTrue(payload["no_body_text"])
+        self.assertTrue(payload["no_attachment_content"])
+        self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
+        self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+
+    def test_storage_email_summary_prints_table_record(self):
+        summary = EmailSummaryRecord(
+            root_path="/tmp/fixture",
+            repository_name="fixture",
+            mailboxes=1,
+            messages=10,
+            eml_messages=8,
+            mbox_messages=2,
+            addresses=6,
+            address_observations=12,
+            address_domains=1,
+            mime_parts=22,
+            text_plain_parts=9,
+            text_html_parts=4,
+            attachment_stubs=3,
+            inline_attachments=1,
+            content_id_parts=1,
+            thread_hints=5,
+            message_references=4,
+            external_url_references=1,
+            list_unsubscribe_references=1,
+            parse_errors=2,
+            malformed_or_oversized_diagnostics=2,
+            message_id_present=9,
+            message_id_missing_or_invalid=1,
+            messages_with_attachments=2,
+            messages_with_html=4,
+            messages_with_plain=9,
+            mailbox_limits=1,
+            no_provider_api=True,
+            no_mutation=True,
+            no_body_text=True,
+            no_attachment_content=True,
+        )
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_email_summary",
+            return_value=summary,
+        ):
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "email-summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("mailboxes", stdout.getvalue())
+        self.assertIn("attachment_stubs", stdout.getvalue())
+        self.assertIn("no_provider_api", stdout.getvalue())
+        self.assertIn("no_attachment_content", stdout.getvalue())
+
+    def test_storage_email_summary_reports_query_errors(self):
+        stderr = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_email_summary",
+            side_effect=StorageSchemaError("psql did not return email summary"),
+        ):
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "storage",
+                        "email-summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("psql did not return email summary", stderr.getvalue())
 
     def test_discover_prints_text_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
