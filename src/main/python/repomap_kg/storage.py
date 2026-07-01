@@ -516,6 +516,26 @@ class JSSummaryRecord:
 
 
 @dataclass(frozen=True)
+class JSFrameworkSummaryRecord:
+    root_path: str
+    repository_name: str | None
+    framework_observations: int
+    framework_profiles: dict[str, int]
+    node: dict[str, int]
+    express: dict[str, int]
+    nest: dict[str, int]
+    next: dict[str, int]
+    jest: dict[str, int]
+    jquery: dict[str, int]
+    generic_js: dict[str, int]
+    diagnostics: dict[str, int]
+    safety: dict[str, bool]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class EmailSummaryRecord:
     root_path: str
     repository_name: str | None
@@ -1291,6 +1311,21 @@ def query_js_summary(
     )
     return js_summary_from_storage_payload(
         parse_psql_json(result.stdout, "js summary")
+    )
+
+
+def query_js_framework_summary(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    psql_command: str = "psql",
+) -> JSFrameworkSummaryRecord:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_js_framework_summary_query_sql(root_path),
+    )
+    return js_framework_summary_from_storage_payload(
+        parse_psql_json(result.stdout, "js framework summary")
     )
 
 
@@ -2665,6 +2700,152 @@ def build_js_summary_query_sql(root_path: str) -> str:
         "FROM profile_rows"
         "), '{}'::json), "
         "'no_execution', true"
+        ")::text;"
+    )
+
+
+def build_js_framework_summary_query_sql(root_path: str) -> str:
+    quoted_root = sql_literal(root_path)
+    framework_kinds = (
+        "node.entrypoint",
+        "node.export",
+        "node.require",
+        "express.app",
+        "express.router",
+        "express.route",
+        "express.middleware",
+        "express.error_handler",
+        "nest.module",
+        "nest.controller",
+        "nest.provider",
+        "nest.route",
+        "nest.decorator",
+        "next.route",
+        "next.page",
+        "next.api_route",
+        "next.app_route",
+        "next.component",
+        "jest.suite",
+        "jest.test",
+        "jest.expectation",
+        "jest.mock",
+        "jquery.selector",
+        "jquery.event",
+        "jquery.ajax",
+        "jquery.plugin_reference",
+        "js.dom_selector",
+        "js.dom_event",
+        "js.ajax_reference",
+        "js.framework_reference",
+        "js.framework_profile",
+        "js.runtime_profile",
+        "js.package_context",
+        "js.route_handler",
+        "js.middleware",
+        "js.controller",
+        "js.provider",
+        "js.module_binding",
+        "js.test_config",
+        "js.server_entrypoint",
+        "js.client_entrypoint",
+    )
+    framework_kind_sql = ", ".join(sql_literal(kind) for kind in framework_kinds)
+    return (
+        "WITH repo AS ("
+        "SELECT id, name, root_path FROM repositories "
+        f"WHERE repositories.root_path = {quoted_root}"
+        "), "
+        "raw AS ("
+        "SELECT raw_observations.* FROM raw_observations "
+        "JOIN repo ON repo.id = raw_observations.repository_id"
+        "), "
+        "framework_raw AS ("
+        "SELECT * FROM raw WHERE kind IN ("
+        f"{framework_kind_sql}"
+        ")"
+        "), "
+        "canonical_js AS ("
+        "SELECT canonical_nodes.* FROM canonical_nodes "
+        "JOIN repo ON repo.id = canonical_nodes.repository_id "
+        "WHERE canonical_nodes.graph_key_version = 1 "
+        "AND canonical_nodes.kind IN ("
+        "'js.route', 'js.test_suite', 'js.test_case', 'js.component'"
+        ")"
+        ") "
+        "SELECT json_build_object("
+        f"'root_path', {quoted_root}, "
+        "'repository_name', (SELECT name FROM repo), "
+        "'framework_observations', (SELECT COUNT(*) FROM framework_raw), "
+        "'framework_profiles', json_build_object("
+        "'node', (SELECT COUNT(*) FROM framework_raw WHERE kind LIKE 'node.%'), "
+        "'express', (SELECT COUNT(*) FROM framework_raw WHERE kind LIKE 'express.%'), "
+        "'nest', (SELECT COUNT(*) FROM framework_raw WHERE kind LIKE 'nest.%'), "
+        "'next', (SELECT COUNT(*) FROM framework_raw WHERE kind LIKE 'next.%'), "
+        "'jest', (SELECT COUNT(*) FROM framework_raw WHERE kind LIKE 'jest.%'), "
+        "'jquery', (SELECT COUNT(*) FROM framework_raw WHERE kind LIKE 'jquery.%'), "
+        "'generic_js', (SELECT COUNT(*) FROM framework_raw "
+        "WHERE kind IN ("
+        "'js.dom_selector', 'js.dom_event', 'js.ajax_reference', "
+        "'js.framework_reference', 'js.framework_profile', 'js.runtime_profile', "
+        "'js.package_context', 'js.route_handler', 'js.middleware', "
+        "'js.controller', 'js.provider', 'js.module_binding', 'js.test_config', "
+        "'js.server_entrypoint', 'js.client_entrypoint'"
+        "))), "
+        "'node', json_build_object("
+        "'entrypoints', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'node.entrypoint'), "
+        "'requires', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'node.require'), "
+        "'exports', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'node.export'), "
+        "'env_references', (SELECT COUNT(*) FROM framework_raw "
+        "WHERE kind = 'js.framework_reference' "
+        "AND payload_json->'metadata'->>'reference_kind' = 'environment')), "
+        "'express', json_build_object("
+        "'apps', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'express.app'), "
+        "'routers', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'express.router'), "
+        "'routes', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'express.route'), "
+        "'middleware', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'express.middleware'), "
+        "'error_handlers', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'express.error_handler'), "
+        "'dynamic_routes', (SELECT COUNT(*) FROM framework_raw "
+        "WHERE kind = 'express.route' "
+        "AND COALESCE((payload_json->'metadata'->>'dynamic')::boolean, false))), "
+        "'nest', json_build_object("
+        "'modules', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'nest.module'), "
+        "'controllers', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'nest.controller'), "
+        "'providers', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'nest.provider'), "
+        "'routes', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'nest.route'), "
+        "'decorators', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'nest.decorator')), "
+        "'next', json_build_object("
+        "'pages', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'next.page'), "
+        "'api_routes', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'next.api_route'), "
+        "'app_routes', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'next.app_route'), "
+        "'components', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'next.component'), "
+        "'route_handlers', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'next.route')), "
+        "'jest', json_build_object("
+        "'suites', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'jest.suite'), "
+        "'tests', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'jest.test'), "
+        "'expectations', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'jest.expectation'), "
+        "'mocks', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'jest.mock')), "
+        "'jquery', json_build_object("
+        "'selectors', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'jquery.selector'), "
+        "'events', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'jquery.event'), "
+        "'ajax_references', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'jquery.ajax'), "
+        "'plugin_references', (SELECT COUNT(*) FROM framework_raw WHERE kind = 'jquery.plugin_reference')), "
+        "'generic_js', json_build_object("
+        "'canonical_routes', (SELECT COUNT(*) FROM canonical_js WHERE kind = 'js.route'), "
+        "'canonical_test_suites', (SELECT COUNT(*) FROM canonical_js WHERE kind = 'js.test_suite'), "
+        "'canonical_test_cases', (SELECT COUNT(*) FROM canonical_js WHERE kind = 'js.test_case'), "
+        "'canonical_components', (SELECT COUNT(*) FROM canonical_js WHERE kind = 'js.component')), "
+        "'diagnostics', json_build_object("
+        "'framework_observation_limit', (SELECT COUNT(*) FROM raw "
+        "WHERE kind = 'js.parse_error' "
+        "AND payload_json->'metadata'->>'error_kind' = 'framework-observation-limit'), "
+        "'framework_selector_limit', (SELECT COUNT(*) FROM raw "
+        "WHERE kind = 'js.parse_error' "
+        "AND payload_json->'metadata'->>'error_kind' = 'framework-selector-limit')), "
+        "'safety', json_build_object("
+        "'no_execution', true, "
+        "'no_fetch', true, "
+        "'raw_profile_only', true, "
+        "'no_new_canonical_namespaces', true)"
         ")::text;"
     )
 
@@ -4861,6 +5042,112 @@ def js_summary_from_storage_payload(payload: Any) -> JSSummaryRecord:
     )
 
 
+def js_framework_summary_from_storage_payload(
+    payload: Any,
+) -> JSFrameworkSummaryRecord:
+    label = "js framework summary"
+    if not isinstance(payload, dict):
+        raise StorageSchemaError(f"psql returned a malformed {label}")
+    return JSFrameworkSummaryRecord(
+        root_path=payload_text(payload, "root_path", label=label),
+        repository_name=payload_optional_text(
+            payload,
+            "repository_name",
+            label=label,
+        ),
+        framework_observations=payload_int(
+            payload,
+            "framework_observations",
+            label=label,
+        ),
+        framework_profiles=payload_required_count_map(
+            payload,
+            "framework_profiles",
+            (
+                "node",
+                "express",
+                "nest",
+                "next",
+                "jest",
+                "jquery",
+                "generic_js",
+            ),
+            label=label,
+        ),
+        node=payload_required_count_map(
+            payload,
+            "node",
+            ("entrypoints", "requires", "exports", "env_references"),
+            label=label,
+        ),
+        express=payload_required_count_map(
+            payload,
+            "express",
+            (
+                "apps",
+                "routers",
+                "routes",
+                "middleware",
+                "error_handlers",
+                "dynamic_routes",
+            ),
+            label=label,
+        ),
+        nest=payload_required_count_map(
+            payload,
+            "nest",
+            ("modules", "controllers", "providers", "routes", "decorators"),
+            label=label,
+        ),
+        next=payload_required_count_map(
+            payload,
+            "next",
+            ("pages", "api_routes", "app_routes", "components", "route_handlers"),
+            label=label,
+        ),
+        jest=payload_required_count_map(
+            payload,
+            "jest",
+            ("suites", "tests", "expectations", "mocks"),
+            label=label,
+        ),
+        jquery=payload_required_count_map(
+            payload,
+            "jquery",
+            ("selectors", "events", "ajax_references", "plugin_references"),
+            label=label,
+        ),
+        generic_js=payload_required_count_map(
+            payload,
+            "generic_js",
+            (
+                "canonical_routes",
+                "canonical_test_suites",
+                "canonical_test_cases",
+                "canonical_components",
+            ),
+            label=label,
+        ),
+        diagnostics=payload_required_count_map(
+            payload,
+            "diagnostics",
+            ("framework_observation_limit", "framework_selector_limit"),
+            label=label,
+        ),
+        safety=payload_required_bool_map(
+            payload,
+            "safety",
+            (
+                "no_execution",
+                "no_fetch",
+                "raw_profile_only",
+                "no_new_canonical_namespaces",
+            ),
+            label=label,
+        ),
+    )
+
+
 def email_summary_from_storage_payload(payload: Any) -> EmailSummaryRecord:
     if not isinstance(payload, dict):
         raise StorageSchemaError("psql returned a malformed email summary")
@@ -5293,6 +5580,12 @@ def js_summary_to_jsonable(record: JSSummaryRecord) -> dict[str, Any]:
     return record.to_dict()
 
 
+def js_framework_summary_to_jsonable(
+    record: JSFrameworkSummaryRecord,
+) -> dict[str, Any]:
+    return record.to_dict()
+
+
 def email_summary_to_jsonable(record: EmailSummaryRecord) -> dict[str, Any]:
     return record.to_dict()
 
@@ -5709,6 +6002,16 @@ def format_ruby_summary_table(record: RubySummaryRecord) -> str:
     )
 
 
+def format_count_summary(counts: Mapping[str, int]) -> str:
+    return ", ".join(f"{key}={value}" for key, value in counts.items())
+
+
+def format_bool_summary(values: Mapping[str, bool]) -> str:
+    return ", ".join(
+        f"{key}={str(value).lower()}" for key, value in values.items()
+    )
+
+
 def format_js_summary_table(record: JSSummaryRecord) -> str:
     row = record.to_dict()
     row["profile_counts"] = ", ".join(
@@ -5741,6 +6044,47 @@ def format_js_summary_table(record: JSSummaryRecord) -> str:
         "parse_errors",
         "profile_counts",
         "no_execution",
+    )
+    rendered_row = {key: render_table_value(row[key]) for key in columns}
+    widths = {key: max(len(key), len(rendered_row[key])) for key in columns}
+    return "\n".join(
+        [
+            format_table_row(dict(zip(columns, columns, strict=True)), columns, widths),
+            format_table_row(rendered_row, columns, widths),
+        ]
+    )
+
+
+def format_js_framework_summary_table(record: JSFrameworkSummaryRecord) -> str:
+    row = {
+        "root_path": record.root_path,
+        "repository_name": record.repository_name,
+        "framework_observations": record.framework_observations,
+        "framework_profiles": format_count_summary(record.framework_profiles),
+        "node": format_count_summary(record.node),
+        "express": format_count_summary(record.express),
+        "nest": format_count_summary(record.nest),
+        "next": format_count_summary(record.next),
+        "jest": format_count_summary(record.jest),
+        "jquery": format_count_summary(record.jquery),
+        "generic_js": format_count_summary(record.generic_js),
+        "diagnostics": format_count_summary(record.diagnostics),
+        "safety": format_bool_summary(record.safety),
+    }
+    columns = (
+        "root_path",
+        "repository_name",
+        "framework_observations",
+        "framework_profiles",
+        "node",
+        "express",
+        "nest",
+        "next",
+        "jest",
+        "jquery",
+        "generic_js",
+        "diagnostics",
+        "safety",
     )
     rendered_row = {key: render_table_value(row[key]) for key in columns}
     widths = {key: max(len(key), len(rendered_row[key])) for key in columns}
@@ -6035,6 +6379,37 @@ def payload_count_map(
                 f"psql returned a malformed {label}: {key}"
             ) from error
     return dict(sorted(counts.items()))
+
+
+def payload_required_count_map(
+    payload: dict[str, Any],
+    key: str,
+    required_keys: Sequence[str],
+    *,
+    label: str,
+) -> dict[str, int]:
+    counts = payload_count_map(payload, key, label=label)
+    missing_keys = [required_key for required_key in required_keys if required_key not in counts]
+    if missing_keys:
+        raise StorageSchemaError(f"psql returned a malformed {label}: {key}")
+    return {required_key: counts[required_key] for required_key in required_keys}
+
+
+def payload_required_bool_map(
+    payload: dict[str, Any],
+    key: str,
+    required_keys: Sequence[str],
+    *,
+    label: str,
+) -> dict[str, bool]:
+    value = payload_json_object(payload, key, label=label)
+    result: dict[str, bool] = {}
+    for required_key in required_keys:
+        item = value.get(required_key)
+        if not isinstance(item, bool):
+            raise StorageSchemaError(f"psql returned a malformed {label}: {key}")
+        result[required_key] = item
+    return result
 
 
 def payload_int(payload: dict[str, Any], key: str, *, label: str) -> int:

@@ -86,6 +86,7 @@ from repomap_kg.storage import (
     format_email_summary_table,
     format_file_neighborhood_table,
     format_file_node_table,
+    format_js_framework_summary_table,
     format_js_summary_table,
     format_neighborhood_table,
     format_node_table,
@@ -109,12 +110,14 @@ from repomap_kg.storage import (
     query_file_node_records,
     query_file_records,
     query_host_mutator_records,
+    query_js_framework_summary,
     query_js_summary,
     query_neighborhood,
     query_node_records,
     query_ruby_summary,
     query_storage_summary,
     email_summary_to_jsonable,
+    js_framework_summary_to_jsonable,
     js_summary_to_jsonable,
     ruby_summary_to_jsonable,
     storage_summary_to_jsonable,
@@ -899,6 +902,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit stored JavaScript summary as JSON",
+    )
+    storage_js_framework_summary = storage_subcommands.add_parser(
+        "js-framework-summary",
+        help="summarize stored static JS/TS framework evidence from Postgres storage",
+    )
+    add_storage_root_argument(storage_js_framework_summary)
+    add_storage_connection_arguments(storage_js_framework_summary)
+    storage_js_framework_summary.add_argument(
+        "--json",
+        action="store_true",
+        help="emit stored JavaScript framework summary as JSON",
     )
     storage_email_summary = storage_subcommands.add_parser(
         "email-summary",
@@ -1858,6 +1872,22 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(js_summary_to_jsonable(summary), sort_keys=True))
         else:
             print(format_js_summary_table(summary))
+        return 0
+
+    if args.command == "storage" and args.storage_command == "js-framework-summary":
+        try:
+            summary = query_js_framework_summary(
+                psql_args_from_args(args),
+                root_path=args.root_path,
+                psql_command=args.psql_command,
+            )
+        except StorageSchemaError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(js_framework_summary_to_jsonable(summary), sort_keys=True))
+        else:
+            print(format_js_framework_summary_table(summary))
         return 0
 
     if args.command == "storage" and args.storage_command == "email-summary":

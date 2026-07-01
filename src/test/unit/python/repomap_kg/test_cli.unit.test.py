@@ -27,6 +27,7 @@ from repomap_kg.storage import (
     FileNodeRecord,
     FileNeighborhoodRecord,
     JSSummaryRecord,
+    JSFrameworkSummaryRecord,
     LoadSummary,
     NeighborhoodRecord,
     NodeRecord,
@@ -135,6 +136,7 @@ class CliUnitTests(unittest.TestCase):
             ("summary", ["--root-path", "/tmp/fixture"]),
             ("ruby-summary", ["--root-path", "/tmp/fixture"]),
             ("js-summary", ["--root-path", "/tmp/fixture"]),
+            ("js-framework-summary", ["--root-path", "/tmp/fixture"]),
             ("email-summary", ["--root-path", "/tmp/fixture"]),
         )
 
@@ -4074,6 +4076,89 @@ class CliUnitTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("psql did not return js summary", stderr.getvalue())
 
+    def test_storage_js_framework_summary_prints_json_record(self):
+        summary = js_framework_summary_fixture()
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_js_framework_summary",
+            return_value=summary,
+        ) as query:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "js-framework-summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--pg-database",
+                        "postgres",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["root_path"], "/tmp/fixture")
+        self.assertEqual(payload["framework_observations"], 42)
+        self.assertEqual(payload["framework_profiles"]["express"], 8)
+        self.assertEqual(payload["node"]["entrypoints"], 2)
+        self.assertEqual(payload["express"]["dynamic_routes"], 1)
+        self.assertEqual(payload["next"]["route_handlers"], 1)
+        self.assertEqual(payload["jquery"]["ajax_references"], 2)
+        self.assertTrue(payload["safety"]["no_fetch"])
+        self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
+        self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+
+    def test_storage_js_framework_summary_prints_table_record(self):
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_js_framework_summary",
+            return_value=js_framework_summary_fixture(),
+        ):
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "js-framework-summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        table = stdout.getvalue()
+        self.assertIn("framework_observations", table)
+        self.assertIn("entrypoints=2", table)
+        self.assertIn("dynamic_routes=1", table)
+        self.assertIn("no_fetch=true", table)
+
+    def test_storage_js_framework_summary_reports_query_errors(self):
+        stderr = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_js_framework_summary",
+            side_effect=StorageSchemaError(
+                "psql did not return js framework summary"
+            ),
+        ):
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "storage",
+                        "js-framework-summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn(
+            "psql did not return js framework summary",
+            stderr.getvalue(),
+        )
+
     def test_storage_email_summary_prints_json_record(self):
         summary = EmailSummaryRecord(
             root_path="/tmp/fixture",
@@ -4527,6 +4612,79 @@ class CliUnitTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertIn("confidence_overrides", stderr.getvalue())
+
+
+def js_framework_summary_fixture() -> JSFrameworkSummaryRecord:
+    return JSFrameworkSummaryRecord(
+        root_path="/tmp/fixture",
+        repository_name="fixture",
+        framework_observations=42,
+        framework_profiles={
+            "node": 5,
+            "express": 8,
+            "nest": 6,
+            "next": 7,
+            "jest": 9,
+            "jquery": 7,
+            "generic_js": 4,
+        },
+        node={
+            "entrypoints": 2,
+            "requires": 4,
+            "exports": 3,
+            "env_references": 2,
+        },
+        express={
+            "apps": 1,
+            "routers": 1,
+            "routes": 6,
+            "middleware": 3,
+            "error_handlers": 1,
+            "dynamic_routes": 1,
+        },
+        nest={
+            "modules": 1,
+            "controllers": 2,
+            "providers": 3,
+            "routes": 5,
+            "decorators": 12,
+        },
+        next={
+            "pages": 3,
+            "api_routes": 1,
+            "app_routes": 2,
+            "components": 2,
+            "route_handlers": 1,
+        },
+        jest={
+            "suites": 2,
+            "tests": 4,
+            "expectations": 6,
+            "mocks": 2,
+        },
+        jquery={
+            "selectors": 4,
+            "events": 3,
+            "ajax_references": 2,
+            "plugin_references": 1,
+        },
+        generic_js={
+            "canonical_routes": 6,
+            "canonical_test_suites": 2,
+            "canonical_test_cases": 4,
+            "canonical_components": 2,
+        },
+        diagnostics={
+            "framework_observation_limit": 1,
+            "framework_selector_limit": 1,
+        },
+        safety={
+            "no_execution": True,
+            "no_fetch": True,
+            "raw_profile_only": True,
+            "no_new_canonical_namespaces": True,
+        },
+    )
 
 
 if __name__ == "__main__":
