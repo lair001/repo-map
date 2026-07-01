@@ -923,6 +923,73 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertIn("external:vagrant-box:example%2Fubuntu", targets)
         self.assertNotIn("echo setup", stdout)
 
+    def test_discover_command_emits_js_static_observations_from_fixture(self):
+        fixture = REPO_ROOT / "src" / "test" / "fixtures" / "discovery" / "js_basic"
+
+        exit_code, stdout, stderr = self.run_module_entrypoint(
+            "discover", str(fixture), "--jsonl"
+        )
+
+        self.assertEqual(exit_code, 0, stderr)
+        observations = [
+            json.loads(line)
+            for line in stdout.splitlines()
+            if line.strip()
+        ]
+        kinds = {observation["kind"] for observation in observations}
+        profiles = {
+            observation["metadata"].get("profile")
+            for observation in observations
+            if observation["kind"] == "js.file"
+        }
+        targets = {
+            observation.get("target")
+            for observation in observations
+            if observation["kind"] == "js.reference"
+        }
+
+        self.assertTrue(
+            {
+                "js.file",
+                "js.module",
+                "js.import",
+                "js.export",
+                "js.function",
+                "js.class",
+                "js.method",
+                "js.variable",
+                "js.component",
+                "js.hook",
+                "js.route",
+                "js.test_suite",
+                "js.test_case",
+                "js.test_expectation",
+                "js.reference",
+                "js.parse_error",
+            }.issubset(kinds)
+        )
+        self.assertTrue(
+            {
+                "generic_javascript",
+                "generic_typescript",
+                "jest",
+                "react",
+                "angular",
+                "vue",
+                "frontend_asset",
+                "test_report_asset",
+            }.issubset(profiles)
+        )
+        self.assertIn("file:src/util.mjs", targets)
+        self.assertIn("external:js-package:react", targets)
+        self.assertIn("file:public/report.js.map", targets)
+        self.assertIn(
+            "external.url:https%3A%2F%2Fexample.invalid%2Fapi%3Ftoken%3DREDACTED",
+            targets,
+        )
+        self.assertNotIn("placeholder", stdout)
+        self.assertNotIn("Bearer ${apiToken}", stdout)
+
     def test_discover_command_emits_feed_observations_from_fixture(self):
         fixture = REPO_ROOT / "src" / "test" / "fixtures" / "discovery" / "feed_static_basic"
 

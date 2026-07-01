@@ -64,6 +64,16 @@ _SEGMENT_COUNTS = {
     "ruby.test_case": 2,
     "ruby.test_method": 2,
     "ruby.route": 2,
+    "js.file": 1,
+    "js.module": 1,
+    "js.function": 2,
+    "js.class": 2,
+    "js.method": 2,
+    "js.variable": 2,
+    "js.component": 2,
+    "js.test_suite": 2,
+    "js.test_case": 2,
+    "js.route": 2,
     "dynamic": 2,
     "external": 2,
     "unknown": 2,
@@ -359,6 +369,53 @@ def ruby_route_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> st
     return _key("ruby.route", _coerce_file_key(path_or_file_key), _coerce_pointer(pointer))
 
 
+def js_file_key(path_or_file_key: str | os.PathLike[str]) -> str:
+    return _key("js.file", _coerce_file_key(path_or_file_key))
+
+
+def js_module_key(path_or_file_key: str | os.PathLike[str]) -> str:
+    return _key("js.module", _coerce_file_key(path_or_file_key))
+
+
+def js_function_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
+    return _key("js.function", _coerce_file_key(path_or_file_key), _coerce_js_pointer(pointer))
+
+
+def js_class_key(path_or_file_key: str | os.PathLike[str], class_name: str) -> str:
+    return _key("js.class", _coerce_file_key(path_or_file_key), class_name)
+
+
+def js_method_key(js_class_canonical_key: str, method_name: str) -> str:
+    return _key(
+        "js.method",
+        _coerce_namespace_key(js_class_canonical_key, "js.class"),
+        method_name,
+    )
+
+
+def js_variable_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
+    return _key("js.variable", _coerce_file_key(path_or_file_key), _coerce_js_pointer(pointer))
+
+
+def js_component_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
+    return _key("js.component", _coerce_file_key(path_or_file_key), _coerce_js_pointer(pointer))
+
+
+def js_test_suite_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
+    return _key("js.test_suite", _coerce_file_key(path_or_file_key), _coerce_pointer(pointer))
+
+
+def js_test_case_key(owner_canonical_key: str, pointer: str) -> str:
+    parsed = parse_key(owner_canonical_key)
+    if parsed.namespace not in ("js.file", "js.test_suite"):
+        raise GraphKeyError("js.test_case keys require js.file or js.test_suite owner")
+    return _key("js.test_case", owner_canonical_key, _coerce_pointer(pointer))
+
+
+def js_route_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
+    return _key("js.route", _coerce_file_key(path_or_file_key), _coerce_pointer(pointer))
+
+
 def dynamic_key(domain: str, reason: str) -> str:
     return _key("dynamic", domain, reason)
 
@@ -439,6 +496,12 @@ def _coerce_pointer(pointer: str) -> str:
         raise GraphKeyError("config pointer is required")
     if not pointer.startswith("/"):
         raise GraphKeyError("config pointer must be normalized")
+    return pointer
+
+
+def _coerce_js_pointer(pointer: str) -> str:
+    if not isinstance(pointer, str) or not pointer.strip():
+        raise GraphKeyError("JavaScript pointer is required")
     return pointer
 
 

@@ -6,6 +6,7 @@ import zipfile
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 
+from repomap_kg import javascript as javascript_module
 from repomap_kg import ruby as ruby_module
 from repomap_kg.canonical import (
     CanonicalEdge,
@@ -51,6 +52,16 @@ from repomap_kg.graph_keys import (
     html_anchor_key,
     html_document_key,
     html_element_key,
+    js_class_key,
+    js_component_key,
+    js_file_key,
+    js_function_key,
+    js_method_key,
+    js_module_key,
+    js_route_key,
+    js_test_case_key,
+    js_test_suite_key,
+    js_variable_key,
     nix_app_key,
     nix_check_key,
     nix_dev_shell_key,
@@ -86,6 +97,7 @@ from repomap_kg.markdown import (
     resolve_markdown_link_target,
 )
 from repomap_kg.observations import RawObservation, read_observations_jsonl
+from repomap_kg.javascript import extract_javascript_file_observations
 from repomap_kg.ruby import extract_ruby_file_observations
 
 
@@ -119,6 +131,7 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             "config_codex_mcp_dogfood",
             "yaml_basic",
             "ruby_basic",
+            "js_basic",
             "xml_plist_chrome_policy_basic",
             "xml_java_spring_maven_basic",
             "html_static_basic",
@@ -167,6 +180,19 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
                 "test_call",
             ),
             ruby_route_key("app.rb", "/routes/get:/health"),
+            js_file_key("src/index.js"),
+            js_module_key("src/index.js"),
+            js_function_key("src/index.js", "main"),
+            js_class_key("src/index.js", "Runner"),
+            js_method_key(js_class_key("src/index.js", "Runner"), "start"),
+            js_variable_key("src/index.js", "COUNT"),
+            js_component_key("src/component.jsx", "ExampleComponent"),
+            js_test_suite_key("src/jest/example.test.js", "/tests/describe[1]"),
+            js_test_case_key(
+                js_test_suite_key("src/jest/example.test.js", "/tests/describe[1]"),
+                "/tests/test[1]",
+            ),
+            js_route_key("src/react/App.jsx", "/routes/path:/home"),
             dynamic_key("file", "shell source expanded"),
             external_key("python.module", "requests"),
             unknown_key("env", "missing variable"),
@@ -231,6 +257,13 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             "nix.output:repo-map:packages%2Faarch64-darwin%2Fdefault",
         )
         self.assertEqual(keys[16], "ruby.class:RepoMap%3A%3ARunner")
+        self.assertEqual(keys[24], "js.file:file%3Asrc%2Findex.js")
+        self.assertEqual(keys[26], "js.function:file%3Asrc%2Findex.js:main")
+        self.assertEqual(keys[27], "js.class:file%3Asrc%2Findex.js:Runner")
+        self.assertEqual(
+            keys[28],
+            "js.method:js.class%3Afile%253Asrc%252Findex.js%3ARunner:start",
+        )
         self.assertEqual(keys[-11], "xml.document:file%3Apom.xml")
         self.assertEqual(
             keys[-10],
@@ -611,6 +644,285 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
         self.assertTrue(ruby_module._opens_block("3.times do"))
         self.assertTrue(ruby_module._looks_like_route_profile("generic_ruby", "Sinatra", "app.rb"))
         self.assertFalse(ruby_module._looks_like_route_profile("generic_ruby", "", "lib/app.rb"))
+
+    def test_static_javascript_extractor_edge_contracts(self):
+        observations = list(
+            extract_javascript_file_observations(
+                "src/edge.js",
+                (
+                    'import React from "react";\n'
+                    'import local from "./local";\n'
+                    'export { local } from "./local";\n'
+                    'const apiToken = "fixture-js-secret-value";\n'
+                    'const value = require("../../outside");\n'
+                    'const absolute = import("/tmp/absolute.js");\n'
+                    'const dynamic = import(`./${name}.js`);\n'
+                    'fetch("https://example.invalid/api?token=value&ok=1");\n'
+                    'importScripts("s3://bucket/script.js");\n'
+                    "//# sourceMappingURL=edge.js.map\n"
+                ),
+                repository_paths=frozenset(
+                    {"src/edge.js", "src/local.js", "src/edge.js.map"}
+                ),
+            )
+        )
+        observations.extend(
+            extract_javascript_file_observations("large.js", "x" * (600 * 1024))
+        )
+
+        targets = {
+            observation.target
+            for observation in observations
+            if observation.kind == "js.reference"
+        }
+        parse_error_kinds = {
+            observation.metadata.get("error_kind")
+            for observation in observations
+            if observation.kind == "js.parse_error"
+        }
+        variable_metadata = {
+            observation.name: observation.metadata
+            for observation in observations
+            if observation.kind == "js.variable"
+        }
+        payload = "\n".join(observation.to_json_line() for observation in observations)
+
+        self.assertIn("file:src/local.js", targets)
+        self.assertIn("external:js-package:react", targets)
+        self.assertIn("unknown:file:repo-escaping-js-reference", targets)
+        self.assertIn("external:file:absolute-js-reference", targets)
+        self.assertIn("unknown:js.reference:unsupported-scheme", targets)
+        self.assertIn("file:src/edge.js.map", targets)
+        self.assertIn(
+            "external.url:https%3A%2F%2Fexample.invalid%2Fapi%3Ftoken%3DREDACTED%26ok%3D1",
+            targets,
+        )
+        self.assertIn("dynamic-interpolation", parse_error_kinds)
+        self.assertIn("dynamic-dynamic-import", parse_error_kinds)
+        self.assertIn("file-size-limit", parse_error_kinds)
+        self.assertTrue(variable_metadata["apiToken"]["redacted"])
+        self.assertNotIn("fixture-js-secret-value", payload)
+        self.assertIn("token%3DREDACTED", payload)
+
+    def test_static_javascript_profile_contracts(self):
+        collections = [
+            extract_javascript_file_observations(
+                "src/jest/example.test.js",
+                (
+                    "import { describe, expect, test } from '@jest/globals';\n"
+                    "describe('suite', () => {\n"
+                    "  test('case', () => expect(1).toBe(1));\n"
+                    "});\n"
+                ),
+            ),
+            extract_javascript_file_observations(
+                "src/react/App.jsx",
+                (
+                    "import React, { useState } from 'react';\n"
+                    "export function App() {\n"
+                    "  useState(0);\n"
+                    "  return <Route path=\"/home\" />;\n"
+                    "}\n"
+                ),
+            ),
+            extract_javascript_file_observations(
+                "src/angular/app.component.ts",
+                (
+                    "import { Component } from '@angular/core';\n"
+                    "@Component({ templateUrl: './app.html', styleUrls: ['./app.css'] })\n"
+                    "export class AppComponent {}\n"
+                ),
+                repository_paths=frozenset(
+                    {
+                        "src/angular/app.component.ts",
+                        "src/angular/app.html",
+                        "src/angular/app.css",
+                    }
+                ),
+            ),
+            extract_javascript_file_observations(
+                "src/vue/main.ts",
+                "import { createApp, defineComponent } from 'vue';\nconst App = defineComponent({});\n",
+            ),
+            extract_javascript_file_observations(
+                "public/report.js",
+                "export function renderReport() {}\n//# sourceMappingURL=report.js.map\n",
+                repository_paths=frozenset({"public/report.js", "public/report.js.map"}),
+            ),
+            extract_javascript_file_observations(
+                "public/worker.js",
+                (
+                    'importScripts("https://example.invalid/sw.js");\n'
+                    'axios.get("https://example.invalid/api");\n'
+                    "class Widget extends React.Component {\n"
+                    "  render() {\n"
+                    "    return null;\n"
+                    "  }\n"
+                    "}\n"
+                    "function useLocalData() {}\n"
+                ),
+            ),
+            extract_javascript_file_observations(
+                "src/vue/routes.ts",
+                (
+                    "import { defineComponent } from 'vue';\n"
+                    "const routes = [{ path: '/vue-home' }];\n"
+                    "const App = defineComponent({});\n"
+                ),
+            ),
+        ]
+        observations = [item for collection in collections for item in collection]
+        profiles = {
+            item.metadata.get("profile")
+            for item in observations
+            if item.kind == "js.file"
+        }
+        targets = {
+            item.target
+            for item in observations
+            if item.kind == "js.reference"
+        }
+        kinds = {item.kind for item in observations}
+
+        self.assertTrue(
+            {"jest", "react", "angular", "vue", "test_report_asset"}.issubset(
+                profiles
+            )
+        )
+        self.assertIn("js.test_suite", kinds)
+        self.assertIn("js.test_case", kinds)
+        self.assertIn("js.test_expectation", kinds)
+        self.assertIn("js.component", kinds)
+        self.assertIn("js.hook", kinds)
+        self.assertIn("js.route", kinds)
+        self.assertIn("file:src/angular/app.html", targets)
+        self.assertIn("file:src/angular/app.css", targets)
+        self.assertIn("file:public/report.js.map", targets)
+        self.assertIn("external.url:https%3A%2F%2Fexample.invalid%2Fsw.js", targets)
+        self.assertIn("external.url:https%3A%2F%2Fexample.invalid%2Fapi", targets)
+        self.assertTrue(
+            any(item.metadata.get("hook_name") == "useLocalData" for item in observations)
+        )
+        self.assertTrue(
+            any(item.metadata.get("route_pattern") == "/vue-home" for item in observations)
+        )
+
+    def test_static_javascript_reference_helper_contracts(self):
+        self.assertEqual(
+            javascript_module._sanitize_url(
+                "https://user:pass@example.invalid:8443/path?token=value&ok=1"
+            ),
+            "https://example.invalid:8443/path?token=REDACTED&ok=1",
+        )
+        self.assertEqual(javascript_module._sanitize_url("http://[broken"), "http://[broken")
+        self.assertEqual(javascript_module._safe_summary(None), None)
+        self.assertEqual(javascript_module._safe_summary("apiToken"), "REDACTED")
+        self.assertEqual(javascript_module._safe_summary("x" * 130), "x" * 117 + "...")
+        self.assertEqual(javascript_module._literal_type("'text'"), "string")
+        self.assertEqual(javascript_module._literal_type("false"), "boolean")
+        self.assertEqual(javascript_module._literal_type("null"), "null")
+        self.assertEqual(javascript_module._literal_type("42"), "integer")
+        self.assertEqual(javascript_module._literal_type("4.2"), "decimal")
+        self.assertEqual(javascript_module._literal_type("[]"), "array")
+        self.assertEqual(javascript_module._literal_type("{}"), "object")
+        self.assertEqual(javascript_module._literal_type("handler"), "expression")
+        self.assertFalse(javascript_module._is_secret_prone("publicName"))
+        self.assertTrue(javascript_module._is_secret_prone("firebaseApiKey"))
+        self.assertEqual(
+            javascript_module._specifier_target(
+                "src/a.js",
+                "./local",
+                frozenset({"src/local.ts"}),
+            ),
+            ("file:src/local.ts", "repo-local"),
+        )
+        self.assertEqual(
+            javascript_module._specifier_target("src/a.js", "../../outside", None),
+            ("unknown:file:repo-escaping-js-reference", "repo-escaping"),
+        )
+        self.assertEqual(
+            javascript_module._specifier_target("src/a.js", "/tmp/file", None),
+            ("external:file:absolute-js-reference", "absolute-file"),
+        )
+        self.assertEqual(
+            javascript_module._specifier_target(
+                "src/a.js",
+                "mailto:ops@example.invalid",
+                None,
+            ),
+            ("external.url:mailto%3Aops%40example.invalid", "external-url"),
+        )
+        self.assertEqual(
+            javascript_module._specifier_target("src/a.js", "s3://bucket/key", None),
+            ("unknown:js.reference:unsupported-scheme", "unsupported-scheme"),
+        )
+        self.assertEqual(
+            javascript_module._specifier_target("src/a.js", "@scope/pkg/subpath", None),
+            ("external:js-package:%40scope%2Fpkg", "external-js-package"),
+        )
+        self.assertEqual(
+            javascript_module._specifier_target("src/a.js", "~/app.js", None),
+            ("dynamic:js.reference:dynamic-path", "dynamic"),
+        )
+        self.assertEqual(
+            javascript_module._specifier_target("src/a.js", "*.js", None),
+            ("dynamic:js.reference:dynamic-specifier", "dynamic"),
+        )
+        self.assertEqual(
+            javascript_module._specifier_target("src/a.js", "", None),
+            ("unknown:js.reference:empty-specifier", "unknown"),
+        )
+        self.assertEqual(javascript_module._detect_format("src/tool.mts"), "typescript")
+        self.assertEqual(javascript_module._detect_format("src/view.tsx"), "tsx")
+        self.assertEqual(javascript_module._detect_format("src/view.jsx"), "jsx")
+        self.assertEqual(
+            javascript_module._detect_profile("vite.config.ts", "", "typescript"),
+            "node_config",
+        )
+        self.assertEqual(
+            javascript_module._detect_profile(
+                ".repomap/source-artifacts/source/run/payload.js",
+                "",
+                "javascript",
+            ),
+            "saved_page_asset",
+        )
+        self.assertEqual(
+            javascript_module._detect_module_system(
+                'const x = require("x");\nexport { x };\n'
+            ),
+            "mixed",
+        )
+        self.assertEqual(
+            javascript_module._strip_line_comment('const url = "http://x"; // comment'),
+            'const url = "http://x"; ',
+        )
+        self.assertEqual(
+            javascript_module._route_patterns('<Route path="/ok" />', "react"),
+            ("/ok",),
+        )
+        self.assertEqual(javascript_module._detect_module_system("const x = 1;\n"), "script")
+        self.assertEqual(
+            javascript_module._detect_module_system('const x = require("x");\n'),
+            "commonjs",
+        )
+        self.assertEqual(
+            javascript_module._detect_module_system("export const x = 1;\n"),
+            "esm",
+        )
+        self.assertEqual(
+            javascript_module._candidate_paths("src/local")[:4],
+            ("src/local", "src/local.js", "src/local.mjs", "src/local.cjs"),
+        )
+        self.assertEqual(javascript_module._package_name("@scope/pkg/sub"), "@scope/pkg")
+        self.assertEqual(javascript_module._package_name("plain/sub"), "plain")
+        self.assertTrue(javascript_module._is_dynamic_literal("*.js"))
+        self.assertFalse(javascript_module._is_dynamic_literal("./local.js"))
+        self.assertTrue(javascript_module._looks_like_secret_literal("BEGIN PRIVATE KEY"))
+        self.assertEqual(javascript_module._brace_delta("if (x) { return y; }"), 0)
+        self.assertTrue(javascript_module._looks_like_non_method("if (ready) {"))
+        self.assertTrue(javascript_module._looks_like_component("Widget", "react", "jsx", ""))
+        self.assertFalse(javascript_module._looks_like_component("TOKEN", "react", "jsx", ""))
 
     def test_result_serialization_sorts_records_and_counts_diagnostics(self):
         edge_key = canonical_edge_key(

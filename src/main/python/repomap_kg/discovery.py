@@ -18,6 +18,7 @@ from repomap_kg.documents import (
 )
 from repomap_kg.feed import extract_feed_file_observations
 from repomap_kg.html import extract_html_file_observations
+from repomap_kg.javascript import extract_javascript_file_observations
 from repomap_kg.markdown import (
     extract_markdown_file_observations,
     markdown_anchors_for_content,
@@ -57,10 +58,15 @@ LANGUAGE_BY_EXTENSION = {
     ".csv": "csv",
     ".htm": "html",
     ".html": "html",
+    ".cjs": "javascript",
     ".json": "json",
     ".jsonc": "jsonc",
     ".jsonl": "jsonl",
+    ".js": "javascript",
+    ".jsx": "javascript",
     ".md": "markdown",
+    ".mjs": "javascript",
+    ".mts": "javascript",
     ".nix": "nix",
     ".ods": "odf",
     ".odt": "odf",
@@ -78,6 +84,9 @@ LANGUAGE_BY_EXTENSION = {
     ".tsv": "tsv",
     ".txt": "text",
     ".toml": "toml",
+    ".cts": "javascript",
+    ".ts": "javascript",
+    ".tsx": "javascript",
     ".xml": "xml",
     ".yaml": "yaml",
     ".yml": "yaml",
@@ -181,6 +190,14 @@ def discover_observations(
         if file_info.language == "ruby":
             observations.extend(
                 extract_ruby_file_observations_from_file(
+                    repository_root,
+                    file_info.path,
+                    repository_paths=repository_paths,
+                )
+            )
+        if file_info.language == "javascript":
+            observations.extend(
+                extract_javascript_file_observations_from_file(
                     repository_root,
                     file_info.path,
                     repository_paths=repository_paths,
@@ -292,6 +309,23 @@ def extract_ruby_file_observations_from_file(
     except UnicodeDecodeError:
         return ()
     return extract_ruby_file_observations(
+        relative_path,
+        content,
+        repository_paths=repository_paths,
+    )
+
+
+def extract_javascript_file_observations_from_file(
+    repository_root: Path,
+    relative_path: str,
+    *,
+    repository_paths: frozenset[str] | None = None,
+) -> tuple[RawObservation, ...]:
+    try:
+        content = (repository_root / relative_path).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return ()
+    return extract_javascript_file_observations(
         relative_path,
         content,
         repository_paths=repository_paths,
