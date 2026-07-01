@@ -16,6 +16,7 @@ from repomap_kg.documents import (
     extract_document_file_observations,
     extract_odf_file_observations,
 )
+from repomap_kg.email_extractor import extract_eml_file_observations
 from repomap_kg.feed import extract_feed_file_observations
 from repomap_kg.html import extract_html_file_observations
 from repomap_kg.javascript import extract_javascript_file_observations
@@ -56,6 +57,7 @@ LANGUAGE_BY_EXTENSION = {
     ".bash": "shell",
     ".css": "css",
     ".csv": "csv",
+    ".eml": "eml",
     ".htm": "html",
     ".html": "html",
     ".cjs": "javascript",
@@ -203,6 +205,13 @@ def discover_observations(
                     repository_paths=repository_paths,
                 )
             )
+        if file_info.language == "eml":
+            observations.extend(
+                extract_eml_file_observations_from_file(
+                    repository_root,
+                    file_info.path,
+                )
+            )
         if file_info.language == "nix":
             observations.extend(
                 extract_nix_file_observations_from_file(repository_root, file_info.path)
@@ -330,6 +339,33 @@ def extract_javascript_file_observations_from_file(
         content,
         repository_paths=repository_paths,
     )
+
+
+def extract_eml_file_observations_from_file(
+    repository_root: Path,
+    relative_path: str,
+) -> tuple[RawObservation, ...]:
+    try:
+        content = (repository_root / relative_path).read_bytes()
+    except OSError as error:
+        return (
+            RawObservation(
+                kind="email.parse_error",
+                source_id=f"{relative_path}#email-parse-error:read",
+                path=relative_path,
+                confidence="unknown",
+                extractor="repo-email",
+                extractor_version=__version__,
+                metadata={
+                    "format": "eml",
+                    "parser": "stdlib-email",
+                    "error_kind": "read-error",
+                    "message_summary": str(error)[:120],
+                    "recovered": False,
+                },
+            ),
+        )
+    return extract_eml_file_observations(relative_path, content)
 
 
 def extract_config_file_observations_from_file(

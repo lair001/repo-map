@@ -20,6 +20,11 @@ from repomap_kg.graph_keys import (
     dynamic_key,
     env_key,
     external_key,
+    email_address_key,
+    email_attachment_stub_key,
+    email_message_key,
+    email_part_key,
+    email_thread_hint_key,
     file_key,
     host_category_key,
     html_anchor_key,
@@ -341,6 +346,47 @@ class GraphKeysUnitTests(unittest.TestCase):
             ruby_route_key("app.rb", "/routes/get:/health"),
             "ruby.route:file%3Aapp.rb:%2Froutes%2Fget%3A%2Fhealth",
         )
+        self.assertEqual(
+            email_message_key("mail/single-message.eml", "message:abc123"),
+            "email.message:file%3Amail%2Fsingle-message.eml:message%3Aabc123",
+        )
+        self.assertEqual(
+            email_address_key("addrhash:abc123"),
+            "email.address:addrhash%3Aabc123",
+        )
+        self.assertEqual(
+            email_part_key(
+                "email.message:file%3Amail%2Fsingle-message.eml:message%3Aabc123",
+                "/parts/1.2",
+            ),
+            (
+                "email.part:"
+                "email.message%3Afile%253Amail%252Fsingle-message.eml%3Amessage%253Aabc123:"
+                "%2Fparts%2F1.2"
+            ),
+        )
+        self.assertEqual(
+            email_attachment_stub_key(
+                "email.message:file%3Amail%2Fsingle-message.eml:message%3Aabc123",
+                "/attachments/1",
+            ),
+            (
+                "email.attachment_stub:"
+                "email.message%3Afile%253Amail%252Fsingle-message.eml%3Amessage%253Aabc123:"
+                "%2Fattachments%2F1"
+            ),
+        )
+        self.assertEqual(
+            email_thread_hint_key(
+                "email.message:file%3Amail%2Fsingle-message.eml:message%3Aabc123",
+                "/thread/in-reply-to/1",
+            ),
+            (
+                "email.thread_hint:"
+                "email.message%3Afile%253Amail%252Fsingle-message.eml%3Amessage%253Aabc123:"
+                "%2Fthread%2Fin-reply-to%2F1"
+            ),
+        )
 
     def test_placeholder_builders_encode_domain_and_reason(self):
         self.assertEqual(
@@ -378,6 +424,13 @@ class GraphKeysUnitTests(unittest.TestCase):
             "warc.record:warc.document%3Afile%253Aarchives%252Fexample.warc:record-1"
         )
         parsed_ruby_route = parse_key("ruby.route:file%3Aapp.rb:%2Froutes%2Fget")
+        parsed_email_part = parse_key(
+            (
+                "email.part:"
+                "email.message%3Afile%253Amail%252Fsingle-message.eml%3Amessage%253Aabc123:"
+                "%2Fparts%2F1"
+            )
+        )
 
         self.assertEqual(parsed_file.graph_key_version, GRAPH_KEY_VERSION)
         self.assertEqual(parsed_file.namespace, "file")
@@ -418,6 +471,14 @@ class GraphKeysUnitTests(unittest.TestCase):
         )
         self.assertEqual(parsed_ruby_route.namespace, "ruby.route")
         self.assertEqual(parsed_ruby_route.segments, ("file:app.rb", "/routes/get"))
+        self.assertEqual(parsed_email_part.namespace, "email.part")
+        self.assertEqual(
+            parsed_email_part.segments,
+            (
+                "email.message:file%3Amail%2Fsingle-message.eml:message%3Aabc123",
+                "/parts/1",
+            ),
+        )
 
     def test_parse_key_rejects_bad_grammar_and_malformed_escapes(self):
         cases = (
@@ -433,6 +494,7 @@ class GraphKeysUnitTests(unittest.TestCase):
             ("css.rule:file%3Astyle.css:", "segment"),
             ("xml.attribute:file%3Abeans.xml:%2Fbeans", "segments"),
             ("warc.record:warc.document%3Afile%253Aarchives%252Fexample.warc", "segments"),
+            ("email.part:email.message%3Afile%253Amail%252Fsingle-message.eml", "segments"),
         )
 
         for key, message in cases:

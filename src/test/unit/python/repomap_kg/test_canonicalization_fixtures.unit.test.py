@@ -44,6 +44,7 @@ class CanonicalizationFixtureTests(unittest.TestCase):
             "feed_static_basic",
             "docs_text_table_basic",
             "docs_odf_basic",
+            "mail_basic",
         )
 
         for fixture_name in fixture_names:

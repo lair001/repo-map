@@ -27,6 +27,12 @@ from repomap_kg.documents import (
     extract_document_file_observations,
     extract_odf_file_observations,
 )
+from repomap_kg.email_extractor import (
+    MAX_EML_BYTES,
+    MAX_HEADER_BYTES,
+    MAX_MIME_PARTS,
+    extract_eml_file_observations,
+)
 from repomap_kg.discovery import (
     discover_observations,
     extract_css_file_observations_from_file,
@@ -39,6 +45,7 @@ from repomap_kg.graph_keys import (
     config_document_key,
     config_path_key,
     dynamic_key,
+    email_message_key,
     env_key,
     external_key,
     external_url_key,
@@ -132,6 +139,7 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
             "yaml_basic",
             "ruby_basic",
             "js_basic",
+            "mail_basic",
             "xml_plist_chrome_policy_basic",
             "xml_java_spring_maven_basic",
             "html_static_basic",
@@ -923,6 +931,369 @@ class CanonicalContractIntegrationTests(unittest.TestCase):
         self.assertTrue(javascript_module._looks_like_non_method("if (ready) {"))
         self.assertTrue(javascript_module._looks_like_component("Widget", "react", "jsx", ""))
         self.assertFalse(javascript_module._looks_like_component("TOKEN", "react", "jsx", ""))
+
+    def test_static_eml_extraction_and_canonicalization_contract(self):
+        observations = []
+        observations.extend(
+            extract_eml_file_observations(
+                "reply.eml",
+                (
+                    "Message-ID: <reply@example.invalid>\n"
+                    "Date: Fri, 02 Jan 2026 03:04:05 +0000\n"
+                    "From: Alice Person <alice@example.invalid>\n"
+                    "To: Bob Person <bob@example.invalid>\n"
+                    "Cc: Team Person <team@example.invalid>\n"
+                    "Reply-To: Replies Person <replies@example.invalid>\n"
+                    "Sender: Sender Person <sender@example.invalid>\n"
+                    "Return-Path: <bounce@example.invalid>\n"
+                    "Subject: Quarterly planning code fake-mail-token\n"
+                    "In-Reply-To: <root@example.invalid>\n"
+                    "References: <root@example.invalid> <prior@example.invalid>\n"
+                    "List-Id: <updates.example.invalid>\n"
+                    "List-Unsubscribe: <https://example.invalid/unsub?token=fake-mail-token&ok=1>\n"
+                    "MIME-Version: 1.0\n"
+                    "Content-Type: text/plain; charset=utf-8\n"
+                    "\n"
+                    "Fixture body fake-mail-token should not be serialized.\n"
+                ).encode("utf-8"),
+            )
+        )
+        observations.extend(
+            extract_eml_file_observations(
+                "multipart.eml",
+                (
+                    "Message-ID: <multipart@example.invalid>\n"
+                    "Date: Fri, 02 Jan 2026 04:04:05 +0000\n"
+                    "From: Alice Person <alice@example.invalid>\n"
+                    "To: Bob Person <bob@example.invalid>\n"
+                    "Subject: Attachment invoice-secret-code.txt\n"
+                    "MIME-Version: 1.0\n"
+                    "Content-Type: multipart/mixed; boundary=\"outer\"\n"
+                    "\n"
+                    "--outer\n"
+                    "Content-Type: text/html; charset=utf-8\n"
+                    "\n"
+                    "<html><script>evil()</script><body>HTML body secret</body></html>\n"
+                    "--outer\n"
+                    "Content-Type: image/png\n"
+                    "Content-Disposition: attachment; filename=\"invoice-secret-code.txt\"\n"
+                    "Content-ID: <image-1@example.invalid>\n"
+                    "\n"
+                    "not-real-image-bytes\n"
+                    "--outer--\n"
+                ).encode("utf-8"),
+            )
+        )
+        observations.extend(
+            extract_eml_file_observations(
+                "fallback.eml",
+                (
+                    "Message-ID: not-a-valid-message-id\n"
+                    "Date: not-a-real-date\n"
+                    "From: No Name <missing@example.invalid>\n"
+                    "Subject: Reset code fake-mail-reset-code\n"
+                    "Content-Type: text/plain\n"
+                    "\n"
+                    "Fallback identity body should not leak.\n"
+                ).encode("utf-8"),
+            )
+        )
+        observations.extend(
+            extract_eml_file_observations(
+                "header-limit.eml",
+                (
+                    "Message-ID: <header-limit@example.invalid>\n"
+                    f"X-Long: {'x' * (MAX_HEADER_BYTES + 1)}\n"
+                    "Content-Type: text/plain\n"
+                    "\n"
+                    "Header limit body should not leak.\n"
+                ).encode("utf-8"),
+            )
+        )
+        many_parts = [
+            "Message-ID: <many-parts@example.invalid>\n",
+            "MIME-Version: 1.0\n",
+            "Content-Type: multipart/mixed; boundary=\"many\"\n",
+            "\n",
+        ]
+        for index in range(MAX_MIME_PARTS + 2):
+            many_parts.extend(
+                (
+                    "--many\n",
+                    "Content-Type: text/plain\n",
+                    "\n",
+                    f"Part {index} body should not leak.\n",
+                )
+            )
+        many_parts.append("--many--\n")
+        observations.extend(
+            extract_eml_file_observations(
+                "many-parts.eml",
+                "".join(many_parts).encode("utf-8"),
+            )
+        )
+        observations.extend(
+            extract_eml_file_observations(
+                "filename-and-mailto.eml",
+                (
+                    "Message-ID: <filename-mailto@example.invalid>\n"
+                    "List-Unsubscribe: <mailto:unsubscribe@example.invalid>\n"
+                    "MIME-Version: 1.0\n"
+                    "Content-Type: multipart/mixed; boundary=\"files\"\n"
+                    "\n"
+                    "--files\n"
+                    "Content-Type: application/octet-stream\n"
+                    "Content-Disposition: attachment; filename=\"SECRETFILE\"\n"
+                    "\n"
+                    "attachment bytes should not leak\n"
+                    "--files--\n"
+                ).encode("utf-8"),
+            )
+        )
+        observations.extend(
+            extract_eml_file_observations(
+                "defect.eml",
+                b"Bad header\n\nParser defect body should not leak.\n",
+            )
+        )
+        observations.extend(
+            extract_eml_file_observations(
+                "large.eml",
+                b"x" * (MAX_EML_BYTES + 1),
+            )
+        )
+
+        result = canonicalize_observations(observations)
+        kinds = {observation.kind for observation in observations}
+        parse_error_kinds = {
+            observation.metadata.get("error_kind")
+            for observation in observations
+            if observation.kind == "email.parse_error"
+        }
+        reference_targets = {
+            observation.target
+            for observation in observations
+            if observation.kind == "email.reference"
+        }
+        node_kinds = {node.kind for node in result.graph.nodes}
+        edge_kinds = {edge.kind for edge in result.graph.edges}
+        payload = "\n".join(observation.to_json_line() for observation in observations)
+        payload += result.to_json()
+
+        self.assertIn("email.message", kinds)
+        self.assertIn("email.header", kinds)
+        self.assertIn("email.address", kinds)
+        self.assertIn("email.part", kinds)
+        self.assertIn("email.attachment_stub", kinds)
+        self.assertIn("email.thread_hint", kinds)
+        self.assertIn("email.reference", kinds)
+        self.assertIn("missing-or-invalid-message-id", parse_error_kinds)
+        self.assertIn("header-size-limit", parse_error_kinds)
+        self.assertIn("mime-part-count-limit", parse_error_kinds)
+        self.assertIn("parser-defect", parse_error_kinds)
+        self.assertIn("file-size-limit", parse_error_kinds)
+        self.assertTrue(
+            any(target.startswith("unknown:email-message:") for target in reference_targets)
+        )
+        self.assertIn(
+            "external.url:https%3A%2F%2Fexample.invalid%2Funsub%3Ftoken%3DREDACTED%26ok%3D1",
+            reference_targets,
+        )
+        self.assertIn("email.message", node_kinds)
+        self.assertIn("email.address", node_kinds)
+        self.assertIn("email.part", node_kinds)
+        self.assertIn("email.attachment_stub", node_kinds)
+        self.assertIn("email.thread_hint", node_kinds)
+        self.assertIn("defines", edge_kinds)
+        self.assertIn("references", edge_kinds)
+        self.assertNotIn("alice@example.invalid", payload)
+        self.assertNotIn("bob@example.invalid", payload)
+        self.assertNotIn("Alice Person", payload)
+        self.assertNotIn("Bob Person", payload)
+        self.assertNotIn("Quarterly planning code", payload)
+        self.assertNotIn("Fixture body", payload)
+        self.assertNotIn("HTML body secret", payload)
+        self.assertNotIn("evil()", payload)
+        self.assertNotIn("invoice-secret-code.txt", payload)
+        self.assertNotIn("SECRETFILE", payload)
+        self.assertNotIn("Header limit body", payload)
+        self.assertNotIn("Parser defect body", payload)
+        self.assertNotIn("unsubscribe@example.invalid", payload)
+        self.assertNotIn("fake-mail-token", payload)
+        self.assertNotIn("fake-mail-reset-code", payload)
+
+    def test_email_canonicalization_diagnostic_contracts(self):
+        message_hash = "a" * 64
+        address_hash = "b" * 64
+        message_key = email_message_key("diag.eml", f"structural:{message_hash}")
+        result = canonicalize_observations(
+            [
+                RawObservation(
+                    kind="email.message",
+                    source_id="diag.eml#email-message",
+                    path="diag.eml",
+                    confidence="extracted",
+                    extractor="repo-email",
+                    extractor_version="0.1.0",
+                    metadata={
+                        "format": "eml",
+                        "message_id_hash": message_hash,
+                        "identity_strength": "structural",
+                    },
+                ),
+                RawObservation(
+                    kind="email.part",
+                    source_id="diag.eml#email-part:1",
+                    path="diag.eml",
+                    confidence="extracted",
+                    extractor="repo-email",
+                    extractor_version="0.1.0",
+                    metadata={
+                        "format": "eml",
+                        "source_key": message_key,
+                        "part_path": "/parts/1",
+                        "content_type": "text/plain",
+                    },
+                ),
+                RawObservation(
+                    kind="email.attachment_stub",
+                    source_id="diag.eml#email-attachment:1",
+                    path="diag.eml",
+                    confidence="extracted",
+                    extractor="repo-email",
+                    extractor_version="0.1.0",
+                    metadata={
+                        "format": "eml",
+                        "source_key": message_key,
+                        "part_path": "/parts/2",
+                        "attachment_mime_type": "text/plain",
+                    },
+                ),
+                RawObservation(
+                    kind="email.thread_hint",
+                    source_id="diag.eml#email-thread-hint:1",
+                    path="diag.eml",
+                    confidence="extracted",
+                    extractor="repo-email",
+                    extractor_version="0.1.0",
+                    metadata={
+                        "format": "eml",
+                        "source_key": message_key,
+                        "part_path": "/thread/in-reply-to/1",
+                        "thread_hint_kind": "in_reply_to",
+                    },
+                ),
+                RawObservation(
+                    kind="email.address",
+                    source_id="diag.eml#email-address:from",
+                    path="diag.eml",
+                    confidence="extracted",
+                    extractor="repo-email",
+                    extractor_version="0.1.0",
+                    metadata={
+                        "format": "eml",
+                        "source_key": message_key,
+                        "address_hash": address_hash,
+                        "address_role": "from",
+                    },
+                ),
+                RawObservation(
+                    kind="email.reference",
+                    source_id="diag.eml#email-reference:missing",
+                    path="diag.eml",
+                    confidence="extracted",
+                    extractor="repo-email",
+                    extractor_version="0.1.0",
+                    metadata={
+                        "format": "eml",
+                        "source_key": message_key,
+                        "reference_kind": "missing-target",
+                    },
+                ),
+                RawObservation(
+                    kind="email.reference",
+                    source_id="diag.eml#email-reference:malformed",
+                    path="diag.eml",
+                    confidence="extracted",
+                    extractor="repo-email",
+                    extractor_version="0.1.0",
+                    target="not-a-canonical-key",
+                    metadata={
+                        "format": "eml",
+                        "source_key": message_key,
+                        "reference_kind": "malformed-target",
+                    },
+                ),
+                RawObservation(
+                    kind="email.part",
+                    source_id="diag.eml#email-part:missing-source",
+                    path="diag.eml",
+                    confidence="extracted",
+                    extractor="repo-email",
+                    extractor_version="0.1.0",
+                    metadata={"format": "eml", "part_path": "/parts/bad"},
+                ),
+                RawObservation(
+                    kind="email.part",
+                    source_id="diag.eml#email-part:bad-target",
+                    path="diag.eml",
+                    confidence="extracted",
+                    extractor="repo-email",
+                    extractor_version="0.1.0",
+                    target="file:diag.eml",
+                    metadata={"format": "eml", "source_key": message_key},
+                ),
+                RawObservation(
+                    kind="email.address",
+                    source_id="diag.eml#email-address:bad-target",
+                    path="diag.eml",
+                    confidence="extracted",
+                    extractor="repo-email",
+                    extractor_version="0.1.0",
+                    target="file:diag.eml",
+                    metadata={
+                        "format": "eml",
+                        "source_key": message_key,
+                        "address_hash": address_hash,
+                    },
+                ),
+                RawObservation(
+                    kind="email.reference",
+                    source_id="diag.eml#email-reference:bad-source",
+                    path="diag.eml",
+                    confidence="extracted",
+                    extractor="repo-email",
+                    extractor_version="0.1.0",
+                    target="unknown:email-message:missing",
+                    metadata={"format": "eml", "source_key": "file:diag.eml"},
+                ),
+            ]
+        )
+
+        categories = {diagnostic.category for diagnostic in result.diagnostics}
+        messages = {diagnostic.message for diagnostic in result.diagnostics}
+        node_kinds = {node.kind for node in result.graph.nodes}
+        placeholder_targets = {
+            edge.target_key
+            for edge in result.graph.edges
+            if edge.target_key.startswith("unknown:email.reference:")
+        }
+
+        self.assertFalse(result.ok)
+        self.assertIn("email.message", node_kinds)
+        self.assertIn("email.part", node_kinds)
+        self.assertIn("email.attachment_stub", node_kinds)
+        self.assertIn("email.thread_hint", node_kinds)
+        self.assertIn("email.address", node_kinds)
+        self.assertIn("missing_required_metadata", categories)
+        self.assertIn("invalid_canonical_key", categories)
+        self.assertIn("email.reference observation requires target", messages)
+        self.assertIn("email.part observation requires source_key", messages)
+        self.assertIn("email.part target has unsupported namespace", messages)
+        self.assertIn("email.address target must be email.address", messages)
+        self.assertIn("email.reference source_key has unsupported namespace", messages)
+        self.assertIn("unknown:email.reference:missing-target", placeholder_targets)
+        self.assertIn("unknown:email.reference:malformed-target", placeholder_targets)
 
     def test_result_serialization_sorts_records_and_counts_diagnostics(self):
         edge_key = canonical_edge_key(

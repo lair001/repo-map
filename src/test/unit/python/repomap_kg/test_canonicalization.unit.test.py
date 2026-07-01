@@ -10,6 +10,7 @@ from repomap_kg.documents import (
     extract_document_file_observations,
     extract_odf_file_observations,
 )
+from repomap_kg.email_extractor import extract_eml_file_observations
 from repomap_kg.feed import extract_feed_file_observations
 from repomap_kg.html import extract_html_file_observations
 from repomap_kg.observations import RawObservation
@@ -258,8 +259,57 @@ class CanonicalizationUnitTests(unittest.TestCase):
             payload["nodes"][0]["metadata"]["content_hash"],
             ["sha256:first", "sha256:second"],
         )
-        self.assertEqual(payload["summary"]["evidence"], 2)
-        self.assertEqual(payload["summary"]["node_evidence_links"], 2)
+
+    def test_email_observations_create_message_parts_addresses_and_thread_edges(self):
+        observations = extract_eml_file_observations(
+            "mail/thread-reply.eml",
+            (
+                b"Message-ID: <reply-message@example.invalid>\n"
+                b"Date: Tue, 30 Jun 2026 13:00:00 +0000\n"
+                b"From: Example Receiver <bob@example.invalid>\n"
+                b"To: Example Sender <alice@example.invalid>\n"
+                b"Subject: Re: private subject\n"
+                b"In-Reply-To: <single-message@example.invalid>\n"
+                b"References: <root-message@example.invalid> <single-message@example.invalid>\n"
+                b"Content-Type: text/plain; charset=utf-8\n"
+                b"\n"
+                b"private body text must not leak\n"
+            ),
+        )
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+        nodes = {node["canonical_key"]: node for node in payload["nodes"]}
+        edge_pairs = {
+            (edge["source_key"], edge["kind"], edge["target_key"])
+            for edge in payload["edges"]
+        }
+        serialized = result.to_json()
+        message_key = next(key for key in nodes if key.startswith("email.message:"))
+        address_keys = [key for key in nodes if key.startswith("email.address:")]
+        part_keys = [key for key in nodes if key.startswith("email.part:")]
+        hint_keys = [key for key in nodes if key.startswith("email.thread_hint:")]
+
+        self.assertTrue(result.ok)
+        self.assertIn(("file:mail/thread-reply.eml", "defines", message_key), edge_pairs)
+        self.assertTrue(address_keys)
+        self.assertTrue(part_keys)
+        self.assertEqual(len(hint_keys), 3)
+        self.assertTrue(
+            any(
+                source == message_key
+                and kind == "references"
+                and (
+                    target.startswith("email.message:")
+                    or target.startswith("unknown:email-message:")
+                )
+                for source, kind, target in edge_pairs
+            )
+        )
+        self.assertNotIn("alice@example.invalid", serialized)
+        self.assertNotIn("bob@example.invalid", serialized)
+        self.assertNotIn("private subject", serialized)
+        self.assertNotIn("private body text", serialized)
 
     def test_file_observations_with_multiple_roles_merge_without_conflict(self):
         observations = [

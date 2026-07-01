@@ -934,6 +934,145 @@ FROM canonical_edges;
         self.assertNotIn("placeholder", readback_payload)
         self.assertNotIn("Bearer ${apiToken}", readback_payload)
 
+    def test_storage_loads_eml_discovery_into_canonical_readback(self):
+        require_postgres_binaries()
+        fixture_root = discovery_fixture("mail_basic")
+
+        discover_exit_code, discover_stdout, discover_stderr = (
+            run_repo_map_in_process(
+                "discover",
+                str(fixture_root),
+                "--jsonl",
+            )
+        )
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as jsonl_file:
+            jsonl_file.write(discover_stdout)
+            jsonl_file.flush()
+
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                storage_args = (
+                    "--root-path",
+                    str(fixture_root),
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                )
+                load_exit_code, _load_stdout, load_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "load-files",
+                        jsonl_file.name,
+                        "--repository-name",
+                        "mail-fixture",
+                        *storage_args,
+                        "--json",
+                    )
+                )
+                messages = query_canonical_node_records(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    kind="email.message",
+                    psql_command=postgres.psql_command,
+                )
+                addresses = query_canonical_node_records(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    kind="email.address",
+                    psql_command=postgres.psql_command,
+                )
+                parts = query_canonical_node_records(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    kind="email.part",
+                    psql_command=postgres.psql_command,
+                )
+                attachment_stubs = query_canonical_node_records(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    kind="email.attachment_stub",
+                    psql_command=postgres.psql_command,
+                )
+                thread_hints = query_canonical_node_records(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    kind="email.thread_hint",
+                    psql_command=postgres.psql_command,
+                )
+                references = query_canonical_edge_records(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    kind="references",
+                    psql_command=postgres.psql_command,
+                )
+                thread_reference = next(
+                    edge
+                    for edge in references
+                    if edge.source_key.startswith("email.message:")
+                    and edge.target_key.startswith("unknown:email-message:")
+                )
+                explanation = query_canonical_edge_explanation(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    source_key=thread_reference.source_key,
+                    kind=thread_reference.edge_kind,
+                    target_key=thread_reference.target_key,
+                    identity_metadata_hash=thread_reference.identity_metadata_hash,
+                    psql_command=postgres.psql_command,
+                )
+
+        self.assertEqual(discover_exit_code, 0, discover_stderr)
+        discovered = [
+            json.loads(line)
+            for line in discover_stdout.splitlines()
+            if line.strip()
+        ]
+        self.assertIn("email.message", {record["kind"] for record in discovered})
+        self.assertEqual(load_exit_code, 0, load_stderr)
+        self.assertGreaterEqual(len(messages), 8)
+        self.assertGreaterEqual(len(addresses), 2)
+        self.assertTrue(parts)
+        self.assertTrue(attachment_stubs)
+        self.assertTrue(thread_hints)
+        self.assertIsNotNone(explanation.edge)
+        self.assertEqual(
+            explanation.evidence[0].raw_observation["kind"],
+            "email.reference",
+        )
+        readback_payload = "\n".join(
+            (
+                discover_stdout,
+                *(str(node.to_dict()) for node in messages),
+                *(str(node.to_dict()) for node in addresses),
+                *(str(node.to_dict()) for node in parts),
+                *(str(node.to_dict()) for node in attachment_stubs),
+                *(str(node.to_dict()) for node in thread_hints),
+                *(str(edge.to_dict()) for edge in references),
+                str(explanation.to_dict()),
+            )
+        )
+        self.assertNotIn("alice@example.invalid", readback_payload)
+        self.assertNotIn("bob@example.invalid", readback_payload)
+        self.assertNotIn("Example Sender", readback_payload)
+        self.assertNotIn("Example Recipient", readback_payload)
+        self.assertNotIn("Quarterly planning code", readback_payload)
+        self.assertNotIn("Fixture body", readback_payload)
+        self.assertNotIn("fixture body", readback_payload)
+        self.assertNotIn("invoice-secret-code.txt", readback_payload)
+        self.assertNotIn("fake-mail-reset-code", readback_payload)
+        self.assertNotIn("fake-mail-token", readback_payload)
+
     def test_storage_canonical_nodes_cli_reads_c2_loaded_rows_and_filters(self):
         require_postgres_binaries()
         raw_jsonl = canonicalization_fixture(

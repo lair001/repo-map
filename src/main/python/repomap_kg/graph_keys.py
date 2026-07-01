@@ -74,6 +74,11 @@ _SEGMENT_COUNTS = {
     "js.test_suite": 2,
     "js.test_case": 2,
     "js.route": 2,
+    "email.message": 2,
+    "email.address": 1,
+    "email.part": 2,
+    "email.attachment_stub": 2,
+    "email.thread_hint": 2,
     "dynamic": 2,
     "external": 2,
     "unknown": 2,
@@ -414,6 +419,40 @@ def js_test_case_key(owner_canonical_key: str, pointer: str) -> str:
 
 def js_route_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
     return _key("js.route", _coerce_file_key(path_or_file_key), _coerce_pointer(pointer))
+
+
+def email_message_key(path_or_file_key: str | os.PathLike[str], identity: str) -> str:
+    return _key("email.message", _coerce_file_key(path_or_file_key), identity)
+
+
+def email_address_key(address_identity: str) -> str:
+    return _key("email.address", address_identity)
+
+
+def email_part_key(email_message_canonical_key: str, pointer: str) -> str:
+    return _key(
+        "email.part",
+        _coerce_namespace_key(email_message_canonical_key, "email.message"),
+        _coerce_pointer(pointer),
+    )
+
+
+def email_attachment_stub_key(
+    email_message_canonical_key: str, pointer: str
+) -> str:
+    return _key(
+        "email.attachment_stub",
+        _coerce_namespace_key(email_message_canonical_key, "email.message"),
+        _coerce_pointer(pointer),
+    )
+
+
+def email_thread_hint_key(email_message_canonical_key: str, pointer: str) -> str:
+    return _key(
+        "email.thread_hint",
+        _coerce_namespace_key(email_message_canonical_key, "email.message"),
+        _coerce_pointer(pointer),
+    )
 
 
 def dynamic_key(domain: str, reason: str) -> str:
