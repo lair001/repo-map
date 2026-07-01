@@ -3319,6 +3319,62 @@ class CanonicalizationUnitTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["node_evidence_links"], 0)
         self.assertEqual(payload["summary"]["edge_evidence_links"], 0)
 
+    def test_tfjson_profile_observations_are_evidence_only(self):
+        observations = [
+            RawObservation(
+                kind="npm.package",
+                source_id="package.json#npm-package",
+                path="package.json",
+                confidence="extracted",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={
+                    "format": "json",
+                    "profile": "package_json",
+                    "package_name": "example",
+                },
+            ),
+            RawObservation(
+                kind="terraform.resource",
+                source_id="infra/main.tf.json#terraform-resource:aws_s3_bucket:app",
+                path="infra/main.tf.json",
+                confidence="extracted",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={
+                    "format": "json",
+                    "profile": "terraform_json",
+                    "resource_type": "aws_s3_bucket",
+                    "resource_name": "app",
+                },
+            ),
+            RawObservation(
+                kind="kubernetes.resource",
+                source_id="deploy/app.json#kubernetes-resource:Deployment:app",
+                path="deploy/app.json",
+                confidence="extracted",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={
+                    "format": "json",
+                    "profile": "kubernetes_json",
+                    "kind": "Deployment",
+                    "name": "app",
+                },
+            ),
+        ]
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["diagnostics"], [])
+        self.assertEqual(payload["summary"]["nodes"], 0)
+        self.assertEqual(payload["summary"]["edges"], 0)
+        self.assertEqual(payload["summary"]["evidence"], 3)
+        self.assertEqual(payload["summary"]["node_evidence_links"], 0)
+        self.assertEqual(payload["summary"]["edge_evidence_links"], 0)
+
     def test_document_text_and_table_observations_define_document_nodes(self):
         observations = (
             *extract_document_file_observations(

@@ -86,6 +86,49 @@ from repomap_kg.graph_keys import (
 from repomap_kg.observations import RawObservation
 
 
+TFJSON_PROFILE_RAW_OBSERVATION_KINDS = frozenset(
+    {
+        "ecosystem.config_profile",
+        "ecosystem.package",
+        "ecosystem.script",
+        "ecosystem.dependency",
+        "ecosystem.tool",
+        "ecosystem.framework_hint",
+        "ecosystem.reference",
+        "ecosystem.redaction",
+        "ecosystem.parse_error",
+        "npm.package",
+        "npm.script",
+        "npm.dependency",
+        "typescript.config",
+        "typescript.reference",
+        "angular.project",
+        "angular.target",
+        "jest.config",
+        "nest.config",
+        "playwright.config",
+        "terraform.file",
+        "terraform.provider",
+        "terraform.resource",
+        "terraform.data_source",
+        "terraform.module",
+        "terraform.variable",
+        "terraform.output",
+        "terraform.local",
+        "terraform.backend",
+        "terraform.required_provider",
+        "terraform.required_version",
+        "terraform.reference",
+        "terraform.redaction",
+        "kubernetes.resource",
+        "argocd.application",
+        "liquibase.changelog",
+        "liquibase.changeset",
+        "docker.reference",
+    }
+)
+
+
 FILE_METADATA_KEYS = (
     "language",
     "role",
@@ -458,6 +501,9 @@ def canonicalize_observations(
             )
             continue
         if observation.kind in ("config.jsonl_record", "config.parse_error"):
+            evidence.append(_evidence_from_observation(observation, ordinal))
+            continue
+        if observation.kind in TFJSON_PROFILE_RAW_OBSERVATION_KINDS:
             evidence.append(_evidence_from_observation(observation, ordinal))
             continue
         if observation.kind in ("html.document", "html.element", "html.heading"):

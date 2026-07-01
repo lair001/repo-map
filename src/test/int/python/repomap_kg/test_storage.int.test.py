@@ -3589,6 +3589,138 @@ FROM canonical_edges;
         )
         self.assertNotIn("fixture-secret-placeholder", explain_stdout)
 
+    def test_storage_loads_tfjson_profile_observations_as_raw_evidence(self):
+        require_postgres_binaries()
+        fixture_root = discovery_fixture("tfjson1_ecosystem_config")
+
+        discover_exit_code, discover_stdout, discover_stderr = (
+            run_repo_map_in_process(
+                "discover",
+                str(fixture_root),
+                "--jsonl",
+            )
+        )
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as jsonl_file:
+            jsonl_file.write(discover_stdout)
+            jsonl_file.flush()
+
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                storage_args = (
+                    "--root-path",
+                    str(fixture_root),
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                )
+                load_exit_code, _load_stdout, load_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "load-files",
+                        jsonl_file.name,
+                        "--repository-name",
+                        "tfjson-fixture",
+                        *storage_args,
+                        "--json",
+                    )
+                )
+                raw_kinds_json = postgres.psql_scalar(
+                    """
+SELECT COALESCE(jsonb_agg(payload_json->>'kind' ORDER BY ordinal)::text, '[]')
+FROM raw_observations;
+"""
+                )
+                raw_payload = postgres.psql_scalar(
+                    """
+SELECT COALESCE(jsonb_agg(payload_json ORDER BY ordinal)::text, '[]')
+FROM raw_observations;
+"""
+                )
+                canonical_kinds = {
+                    record.kind
+                    for record in query_canonical_node_records(
+                        postgres.psql_args,
+                        root_path=str(fixture_root),
+                        psql_command=postgres.psql_command,
+                    )
+                }
+                canonical_edges = query_canonical_edge_records(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    psql_command=postgres.psql_command,
+                )
+
+        self.assertEqual(discover_exit_code, 0, discover_stderr)
+        discovered = [
+            json.loads(line)
+            for line in discover_stdout.splitlines()
+            if line.strip()
+        ]
+        discovered_kinds = {record["kind"] for record in discovered}
+        self.assertTrue(
+            {
+                "ecosystem.config_profile",
+                "npm.package",
+                "npm.script",
+                "npm.dependency",
+                "typescript.config",
+                "typescript.reference",
+                "angular.project",
+                "angular.target",
+                "jest.config",
+                "nest.config",
+                "playwright.config",
+                "terraform.file",
+                "terraform.required_provider",
+                "terraform.resource",
+                "terraform.module",
+                "terraform.variable",
+                "terraform.output",
+                "terraform.reference",
+                "kubernetes.resource",
+                "argocd.application",
+                "liquibase.changelog",
+                "liquibase.changeset",
+                "docker.reference",
+            }.issubset(discovered_kinds)
+        )
+        self.assertNotIn("fake-tfjson-package-secret", discover_stdout)
+        self.assertNotIn("fake-tfjson-terraform-secret", discover_stdout)
+        self.assertNotIn("fake-tfjson-tfvars-secret", discover_stdout)
+        self.assertNotIn("fake-tfjson-k8s-secret", discover_stdout)
+
+        self.assertEqual(load_exit_code, 0, load_stderr)
+        raw_kinds = set(json.loads(raw_kinds_json))
+        self.assertTrue(
+            {"npm.package", "terraform.resource", "kubernetes.resource"}.issubset(
+                raw_kinds
+            )
+        )
+        self.assertNotIn("fake-tfjson-package-secret", raw_payload)
+        self.assertNotIn("fake-tfjson-terraform-secret", raw_payload)
+        self.assertNotIn("fake-tfjson-tfvars-secret", raw_payload)
+        self.assertNotIn("fake-tfjson-k8s-secret", raw_payload)
+        self.assertIn("config.document", canonical_kinds)
+        self.assertIn("config.path", canonical_kinds)
+        self.assertNotIn("terraform.resource", canonical_kinds)
+        self.assertNotIn("npm.package", canonical_kinds)
+        self.assertNotIn("kubernetes.resource", canonical_kinds)
+        self.assertEqual(
+            {edge.edge_kind for edge in canonical_edges} - {"defines", "references"},
+            set(),
+        )
+
     def test_storage_loads_feed_discovery_into_canonical_readback(self):
         require_postgres_binaries()
         fixture_root = discovery_fixture("feed_static_basic")

@@ -93,6 +93,23 @@ YAML_ALIAS_PATTERN = re.compile(r"^\*[A-Za-z0-9_.-]+$")
 YAML_SIMPLE_IMAGE_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)?(?:@[A-Za-z0-9:_-]+)?$"
 )
+TFJSON_PROFILE_FORMATS = frozenset({"json", "jsonc"})
+TFJSON_PACKAGE_DEPENDENCY_GROUPS = (
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+)
+TFJSON_FRAMEWORK_DEPENDENCY_HINTS = {
+    "@angular/core": "angular",
+    "@nestjs/core": "nestjs",
+    "express": "express",
+    "jest": "jest",
+    "jquery": "jquery",
+    "next": "next",
+    "react": "react",
+    "vue": "vue",
+}
 
 
 class JsoncNormalizationError(ValueError):
@@ -198,11 +215,26 @@ def _extract_json_observations(
                 recovered=False,
             ),
         )
+    profile = _tfjson_profile(relative_path, parsed, format_name="json")
+    metadata_overrides = _tfjson_metadata_overrides(
+        relative_path,
+        parsed,
+        profile=profile,
+    )
     path_observations, reference_observations = _structure_observations(
         relative_path,
         parsed,
         format_name="json",
         confidence="extracted",
+        content=content,
+        metadata_overrides=metadata_overrides,
+    )
+    profile_observations = _tfjson_profile_observations(
+        relative_path,
+        parsed,
+        format_name="json",
+        confidence="extracted",
+        profile=profile,
         content=content,
     )
     document = _document_observation(
@@ -214,8 +246,9 @@ def _extract_json_observations(
         path_count=len(path_observations),
         record_count=None,
         parse_error_count=0,
+        extra_metadata=_tfjson_document_metadata(profile),
     )
-    return (document, *path_observations, *reference_observations)
+    return (document, *profile_observations, *path_observations, *reference_observations)
 
 
 def _extract_jsonc_observations(
@@ -245,11 +278,26 @@ def _extract_jsonc_observations(
                 recovered=False,
             ),
         )
+    profile = _tfjson_profile(relative_path, parsed, format_name="jsonc")
+    metadata_overrides = _tfjson_metadata_overrides(
+        relative_path,
+        parsed,
+        profile=profile,
+    )
     path_observations, reference_observations = _structure_observations(
         relative_path,
         parsed,
         format_name="jsonc",
         confidence="heuristic",
+        content=content,
+        metadata_overrides=metadata_overrides,
+    )
+    profile_observations = _tfjson_profile_observations(
+        relative_path,
+        parsed,
+        format_name="jsonc",
+        confidence="heuristic",
+        profile=profile,
         content=content,
     )
     document = _document_observation(
@@ -261,8 +309,9 @@ def _extract_jsonc_observations(
         path_count=len(path_observations),
         record_count=None,
         parse_error_count=0,
+        extra_metadata=_tfjson_document_metadata(profile),
     )
-    return (document, *path_observations, *reference_observations)
+    return (document, *profile_observations, *path_observations, *reference_observations)
 
 
 def _extract_jsonl_observations(
@@ -1068,6 +1117,1397 @@ def _yaml_profile(
     if any(_is_grafana_document(document) for document in documents):
         return "grafana"
     return "generic_yaml"
+
+
+def _tfjson_profile(
+    relative_path: str,
+    value: Any,
+    *,
+    format_name: str,
+) -> str | None:
+    if format_name not in TFJSON_PROFILE_FORMATS or not isinstance(value, dict):
+        return None
+    path = PurePosixPath(relative_path)
+    name = path.name
+    normalized_name = _normalized_key(name)
+    lower_path = relative_path.lower()
+    if lower_path.endswith(".tfvars.json") or normalized_name == "terraform.tfvars.json":
+        return "terraform_tfvars_json"
+    if lower_path.endswith(".tf.json"):
+        return "terraform_json"
+    if normalized_name == "package.json":
+        return "package_json"
+    if normalized_name in ("package_lock.json", "npm_shrinkwrap.json"):
+        return "package_lock_json"
+    if normalized_name == "tsconfig.json" or (
+        normalized_name.startswith("tsconfig.")
+        and normalized_name.endswith(".json")
+    ):
+        return "typescript_config"
+    if normalized_name == "jsconfig.json":
+        return "javascript_config"
+    if normalized_name in ("angular.json", ".angular_cli.json"):
+        return "angular_workspace"
+    if normalized_name in ("project.json", "workspace.json", "nx.json"):
+        return "workspace_config"
+    if normalized_name == "nest_cli.json":
+        return "nest_config"
+    if normalized_name == "jest.config.json":
+        return "jest_config"
+    if normalized_name in ("babel.config.json", ".babelrc", ".babelrc.json"):
+        return "babel_config"
+    if normalized_name in (".eslintrc", ".eslintrc.json"):
+        return "eslint_config"
+    if normalized_name in (".prettierrc", ".prettierrc.json"):
+        return "prettier_config"
+    if normalized_name == "playwright.config.json":
+        return "playwright_config"
+    if _is_argocd_json_document(value):
+        return "argocd_json"
+    if _is_kubernetes_document(value):
+        return "kubernetes_json"
+    if _is_liquibase_json_document(value):
+        return "liquibase_json"
+    if _is_docker_compose_document(value):
+        return "docker_compose_json"
+    return None
+
+
+def _tfjson_document_metadata(profile: str | None) -> dict[str, Any] | None:
+    if profile is None:
+        return None
+    return {"profile": profile}
+
+
+def _tfjson_metadata_overrides(
+    relative_path: str,
+    value: Any,
+    *,
+    profile: str | None,
+) -> dict[str, dict[str, Any]]:
+    overrides: dict[str, dict[str, Any]] = {}
+    if profile == "terraform_tfvars_json":
+        for pointer, _path_value in _json_pointer_values(value):
+            overrides.setdefault(pointer, {}).update(
+                {
+                    "profile": profile,
+                    "redacted": True,
+                    "redaction_reason": "tfvars-sensitive-by-default",
+                }
+            )
+        return overrides
+    if profile is not None:
+        for pointer, path_value in _json_pointer_values(value):
+            metadata = overrides.setdefault(pointer, {})
+            metadata["profile"] = profile
+            if _tfjson_pointer_is_redacted(pointer, path_value, value, profile=profile):
+                metadata["redacted"] = True
+                metadata.setdefault(
+                    "redaction_reason",
+                    _tfjson_redaction_reason(pointer, profile),
+                )
+    return overrides
+
+
+def _tfjson_pointer_is_redacted(
+    pointer: str,
+    path_value: Any,
+    root_value: Any,
+    *,
+    profile: str,
+) -> bool:
+    if _is_secret_pointer(pointer):
+        return True
+    if _looks_like_secret_scalar(path_value):
+        return True
+    segments = _pointer_segments(pointer)
+    normalized_segments = tuple(_normalized_key(segment) for segment in segments)
+    if profile == "package_json" and len(segments) >= 2 and segments[0] == "scripts":
+        return _script_is_secret_prone(path_value)
+    if profile == "kubernetes_json" and _json_pointer_is_kubernetes_secret_data(
+        pointer,
+        root_value,
+    ):
+        return True
+    if "securejsondata" in normalized_segments:
+        return True
+    return False
+
+
+def _tfjson_redaction_reason(pointer: str, profile: str) -> str:
+    if profile == "package_json" and pointer.startswith("/scripts/"):
+        return "secret-prone-script"
+    if profile == "kubernetes_json" and (
+        "/data/" in pointer or "/stringData/" in pointer
+    ):
+        return "secret-prone-json-path"
+    if _is_secret_pointer(pointer):
+        return "secret-prone-key"
+    return "secret-prone-config-context"
+
+
+def _json_pointer_is_kubernetes_secret_data(pointer: str, root_value: Any) -> bool:
+    segments = _pointer_segments(pointer)
+    if "data" not in segments and "stringData" not in segments:
+        return False
+    return isinstance(root_value, dict) and root_value.get("kind") == "Secret"
+
+
+def _json_pointer_values(value: Any) -> tuple[tuple[str, Any], ...]:
+    result: list[tuple[str, Any]] = []
+
+    def walk(current: Any, segments: tuple[str, ...]) -> None:
+        if segments:
+            result.append((json_pointer(segments), current))
+        if isinstance(current, dict):
+            for key, child in current.items():
+                walk(child, (*segments, str(key)))
+        elif isinstance(current, list):
+            for index, child in enumerate(current):
+                walk(child, (*segments, str(index)))
+
+    walk(value, ())
+    return tuple(result)
+
+
+def _tfjson_profile_observations(
+    relative_path: str,
+    value: Any,
+    *,
+    format_name: str,
+    confidence: str,
+    profile: str | None,
+    content: str,
+) -> tuple[RawObservation, ...]:
+    if profile is None or not isinstance(value, dict):
+        return ()
+    observations: list[RawObservation] = [
+        _profile_observation(
+            "ecosystem.config_profile",
+            relative_path,
+            profile=profile,
+            format_name=format_name,
+            confidence=confidence,
+            metadata={
+                "profile": profile,
+                "profile_family": _tfjson_profile_family(profile),
+                "source_document_key": config_document_key(relative_path),
+            },
+        )
+    ]
+    if profile == "package_json":
+        observations.extend(
+            _package_json_observations(
+                relative_path,
+                value,
+                format_name=format_name,
+                confidence=confidence,
+                content=content,
+            )
+        )
+    elif profile == "package_lock_json":
+        observations.extend(
+            _package_lock_observations(
+                relative_path,
+                value,
+                format_name=format_name,
+                confidence=confidence,
+            )
+        )
+    elif profile in ("typescript_config", "javascript_config"):
+        observations.extend(
+            _typescript_config_observations(
+                relative_path,
+                value,
+                format_name=format_name,
+                confidence=confidence,
+                profile=profile,
+                content=content,
+            )
+        )
+    elif profile == "angular_workspace":
+        observations.extend(
+            _angular_observations(
+                relative_path,
+                value,
+                format_name=format_name,
+                confidence=confidence,
+                content=content,
+            )
+        )
+    elif profile == "nest_config":
+        observations.append(
+            _profile_observation(
+                "nest.config",
+                relative_path,
+                profile=profile,
+                format_name=format_name,
+                confidence=confidence,
+                metadata=_safe_selected_metadata(
+                    value,
+                    ("sourceRoot", "entryFile", "collection", "compilerOptions"),
+                ),
+            )
+        )
+    elif profile == "jest_config":
+        observations.append(
+            _profile_observation(
+                "jest.config",
+                relative_path,
+                profile=profile,
+                format_name=format_name,
+                confidence=confidence,
+                metadata=_safe_selected_metadata(
+                    value,
+                    ("testEnvironment", "preset", "rootDir", "testMatch", "setupFilesAfterEnv"),
+                ),
+            )
+        )
+    elif profile == "playwright_config":
+        observations.append(
+            _playwright_observation(
+                relative_path,
+                value,
+                format_name=format_name,
+                confidence=confidence,
+                profile=profile,
+            )
+        )
+    elif profile == "terraform_json":
+        observations.extend(
+            _terraform_json_observations(
+                relative_path,
+                value,
+                format_name=format_name,
+                confidence=confidence,
+            )
+        )
+    elif profile == "terraform_tfvars_json":
+        observations.extend(
+            _terraform_tfvars_observations(
+                relative_path,
+                value,
+                format_name=format_name,
+                confidence=confidence,
+            )
+        )
+    elif profile == "kubernetes_json":
+        observations.extend(
+            _kubernetes_json_observations(
+                relative_path,
+                value,
+                format_name=format_name,
+                confidence=confidence,
+            )
+        )
+    elif profile == "argocd_json":
+        observations.extend(
+            _argocd_observations(
+                relative_path,
+                value,
+                format_name=format_name,
+                confidence=confidence,
+            )
+        )
+    elif profile == "liquibase_json":
+        observations.extend(
+            _liquibase_observations(
+                relative_path,
+                value,
+                format_name=format_name,
+                confidence=confidence,
+            )
+        )
+    elif profile == "docker_compose_json":
+        observations.extend(
+            _docker_json_observations(
+                relative_path,
+                value,
+                format_name=format_name,
+                confidence=confidence,
+                profile=profile,
+            )
+        )
+    return tuple(observations)
+
+
+def _tfjson_profile_family(profile: str) -> str:
+    if profile.startswith("terraform_"):
+        return "terraform"
+    if profile in ("package_json", "package_lock_json"):
+        return "npm"
+    if profile in ("typescript_config", "javascript_config"):
+        return "typescript"
+    if profile.endswith("_json"):
+        return profile.removesuffix("_json")
+    return profile
+
+
+def _profile_observation(
+    kind: str,
+    relative_path: str,
+    *,
+    profile: str,
+    format_name: str,
+    confidence: str,
+    metadata: dict[str, Any],
+    name: str | None = None,
+    target: str | None = None,
+    source_suffix: str | None = None,
+) -> RawObservation:
+    full_metadata = {
+        "format": format_name,
+        "profile": profile,
+        **metadata,
+    }
+    source_segment = source_suffix or kind.replace(".", "-")
+    return RawObservation(
+        kind=kind,
+        source_id=f"{relative_path}#{source_segment}",
+        path=relative_path,
+        name=name,
+        target=target,
+        confidence=confidence,
+        extractor=EXTRACTOR_NAME,
+        extractor_version=__version__,
+        metadata=full_metadata,
+    )
+
+
+def _package_json_observations(
+    relative_path: str,
+    value: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+    content: str,
+) -> list[RawObservation]:
+    observations: list[RawObservation] = []
+    declared_sections = sorted(
+        key
+        for key in (
+            "scripts",
+            *TFJSON_PACKAGE_DEPENDENCY_GROUPS,
+            "workspaces",
+            "bin",
+            "exports",
+            "imports",
+            "engines",
+        )
+        if key in value
+    )
+    package_metadata: dict[str, Any] = {
+        "declared_sections": declared_sections,
+        "source_document_key": config_document_key(relative_path),
+    }
+    for source_key, target_key in (
+        ("name", "package_name"),
+        ("version", "package_version"),
+        ("type", "package_type"),
+        ("packageManager", "package_manager"),
+    ):
+        summary = _safe_value_summary(value.get(source_key))
+        if isinstance(summary, str):
+            package_metadata[target_key] = summary
+    if isinstance(value.get("private"), bool):
+        package_metadata["private"] = value["private"]
+    observations.append(
+        _profile_observation(
+            "npm.package",
+            relative_path,
+            profile="package_json",
+            format_name=format_name,
+            confidence=confidence,
+            metadata=package_metadata,
+            name=str(value.get("name") or "package.json"),
+            source_suffix="npm-package",
+        )
+    )
+    scripts = value.get("scripts")
+    if isinstance(scripts, dict):
+        for script_name in sorted(str(key) for key in scripts):
+            script_value = scripts.get(script_name)
+            if not isinstance(script_value, str):
+                continue
+            redacted = _script_is_secret_prone(script_value)
+            metadata = {
+                "script_name": script_name,
+                "redacted": redacted,
+                "source_path_key": config_path_key(
+                    relative_path,
+                    json_pointer(("scripts", script_name)),
+                ),
+            }
+            if redacted:
+                metadata["redaction_reason"] = "secret-prone-script"
+                metadata["command_summary"] = "<redacted-script>"
+            else:
+                metadata["command_summary"] = _script_command_summary(script_value)
+            observations.append(
+                _profile_observation(
+                    "npm.script",
+                    relative_path,
+                    profile="package_json",
+                    format_name=format_name,
+                    confidence=confidence,
+                    metadata=metadata,
+                    name=script_name,
+                    source_suffix=f"npm-script:{script_name}",
+                )
+            )
+    observations.extend(
+        _package_dependency_observations(
+            relative_path,
+            value,
+            format_name=format_name,
+            confidence=confidence,
+        )
+    )
+    observations.extend(
+        _package_framework_hints(
+            relative_path,
+            value,
+            format_name=format_name,
+            confidence=confidence,
+        )
+    )
+    observations.extend(
+        _package_reference_observations(
+            relative_path,
+            value,
+            format_name=format_name,
+            confidence=confidence,
+        )
+    )
+    return observations
+
+
+def _package_dependency_observations(
+    relative_path: str,
+    value: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+) -> list[RawObservation]:
+    observations: list[RawObservation] = []
+    for group in TFJSON_PACKAGE_DEPENDENCY_GROUPS:
+        dependencies = value.get(group)
+        if not isinstance(dependencies, dict):
+            continue
+        for dependency_name in sorted(str(key) for key in dependencies):
+            version_summary = _safe_value_summary(dependencies.get(dependency_name))
+            metadata = {
+                "dependency_name": dependency_name,
+                "dependency_group": group,
+                "target_reference": external_key("npm.package", dependency_name),
+                "source_path_key": config_path_key(
+                    relative_path,
+                    json_pointer((group, dependency_name)),
+                ),
+            }
+            if isinstance(version_summary, str):
+                metadata["version_constraint"] = version_summary
+            observations.append(
+                _profile_observation(
+                    "npm.dependency",
+                    relative_path,
+                    profile="package_json",
+                    format_name=format_name,
+                    confidence=confidence,
+                    metadata=metadata,
+                    name=dependency_name,
+                    target=external_key("npm.package", dependency_name),
+                    source_suffix=f"npm-dependency:{group}:{dependency_name}",
+                )
+            )
+    return observations
+
+
+def _package_framework_hints(
+    relative_path: str,
+    value: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+) -> list[RawObservation]:
+    observations: list[RawObservation] = []
+    dependency_names: set[str] = set()
+    for group in TFJSON_PACKAGE_DEPENDENCY_GROUPS:
+        dependencies = value.get(group)
+        if isinstance(dependencies, dict):
+            dependency_names.update(str(key) for key in dependencies)
+    for dependency_name in sorted(dependency_names):
+        framework = TFJSON_FRAMEWORK_DEPENDENCY_HINTS.get(dependency_name)
+        if framework is None:
+            continue
+        observations.append(
+            _profile_observation(
+                "ecosystem.framework_hint",
+                relative_path,
+                profile="package_json",
+                format_name=format_name,
+                confidence="heuristic",
+                metadata={
+                    "framework": framework,
+                    "hint_reason": "package-dependency",
+                    "dependency_name": dependency_name,
+                },
+                name=framework,
+                source_suffix=f"ecosystem-framework:{framework}:{dependency_name}",
+            )
+        )
+    scripts = value.get("scripts")
+    if isinstance(scripts, dict):
+        for script_name, script_value in sorted((str(k), v) for k, v in scripts.items()):
+            if not isinstance(script_value, str) or _script_is_secret_prone(script_value):
+                continue
+            command = _script_command_summary(script_value)
+            if command in ("jest", "next", "ng", "nest", "playwright"):
+                observations.append(
+                    _profile_observation(
+                        "ecosystem.framework_hint",
+                        relative_path,
+                        profile="package_json",
+                        format_name=format_name,
+                        confidence="heuristic",
+                        metadata={
+                            "framework": command,
+                            "hint_reason": "package-script",
+                            "script_name": script_name,
+                        },
+                        name=command,
+                        source_suffix=f"ecosystem-framework:script:{script_name}",
+                    )
+                )
+    return observations
+
+
+def _package_reference_observations(
+    relative_path: str,
+    value: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+) -> list[RawObservation]:
+    observations: list[RawObservation] = []
+    for pointer, raw_value in (
+        ("/repository/url", value.get("repository", {}).get("url") if isinstance(value.get("repository"), dict) else value.get("repository")),
+        ("/homepage", value.get("homepage")),
+        ("/bugs/url", value.get("bugs", {}).get("url") if isinstance(value.get("bugs"), dict) else value.get("bugs")),
+    ):
+        if not isinstance(raw_value, str) or not _is_url(raw_value):
+            continue
+        observations.append(
+            _profile_observation(
+                "ecosystem.reference",
+                relative_path,
+                profile="package_json",
+                format_name=format_name,
+                confidence="heuristic",
+                metadata={
+                    "reference_kind": "external.url",
+                    "pointer": pointer,
+                    "resolution_reason": "package-url-field",
+                    "raw_value_summary": _safe_value_summary(raw_value),
+                },
+                target=external_url_key(raw_value),
+                source_suffix=f"ecosystem-reference:{pointer}",
+            )
+        )
+    return observations
+
+
+def _package_lock_observations(
+    relative_path: str,
+    value: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+) -> list[RawObservation]:
+    package_count = 0
+    packages = value.get("packages")
+    dependencies = value.get("dependencies")
+    if isinstance(packages, dict):
+        package_count = len(packages)
+    elif isinstance(dependencies, dict):
+        package_count = len(dependencies)
+    return [
+        _profile_observation(
+            "ecosystem.package",
+            relative_path,
+            profile="package_lock_json",
+            format_name=format_name,
+            confidence=confidence,
+            metadata={
+                "lockfile": True,
+                "lockfile_version": _safe_value_summary(value.get("lockfileVersion")),
+                "package_count": package_count,
+            },
+            source_suffix="ecosystem-package-lock",
+        )
+    ]
+
+
+def _typescript_config_observations(
+    relative_path: str,
+    value: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+    profile: str,
+    content: str,
+) -> list[RawObservation]:
+    compiler_options = value.get("compilerOptions")
+    metadata = {
+        "source_document_key": config_document_key(relative_path),
+        "has_compiler_options": isinstance(compiler_options, dict),
+        "extends": _safe_value_summary(value.get("extends")),
+        "jsx": (
+            _safe_value_summary(compiler_options.get("jsx"))
+            if isinstance(compiler_options, dict)
+            else None
+        ),
+    }
+    path_aliases = compiler_options.get("paths") if isinstance(compiler_options, dict) else None
+    if isinstance(path_aliases, dict):
+        metadata["path_alias_count"] = len(path_aliases)
+        metadata["path_aliases"] = sorted(str(key) for key in path_aliases)[:20]
+    references = value.get("references")
+    if isinstance(references, list):
+        metadata["project_reference_count"] = len(references)
+    observations = [
+        _profile_observation(
+            "typescript.config",
+            relative_path,
+            profile=profile,
+            format_name=format_name,
+            confidence=confidence,
+            metadata={key: item for key, item in metadata.items() if item is not None},
+            source_suffix="typescript-config",
+        )
+    ]
+    if isinstance(value.get("extends"), str):
+        observations.append(
+            _typescript_reference_observation(
+                relative_path,
+                value["extends"],
+                pointer="/extends",
+                reference_kind="extends",
+                format_name=format_name,
+                confidence="heuristic",
+                profile=profile,
+                content=content,
+            )
+        )
+    if isinstance(references, list):
+        for index, item in enumerate(references):
+            if isinstance(item, dict) and isinstance(item.get("path"), str):
+                observations.append(
+                    _typescript_reference_observation(
+                        relative_path,
+                        item["path"],
+                        pointer=f"/references/{index}/path",
+                        reference_kind="project-reference",
+                        format_name=format_name,
+                        confidence="heuristic",
+                        profile=profile,
+                        content=content,
+                    )
+                )
+    return observations
+
+
+def _typescript_reference_observation(
+    relative_path: str,
+    value: str,
+    *,
+    pointer: str,
+    reference_kind: str,
+    format_name: str,
+    confidence: str,
+    profile: str,
+    content: str,
+) -> RawObservation:
+    reference = _file_reference(relative_path, value, redacted=False)
+    line_number = _line_for_pointer(content, pointer)
+    return RawObservation(
+        kind="typescript.reference",
+        source_id=f"{relative_path}#typescript-reference:{pointer}",
+        path=relative_path,
+        start_line=line_number,
+        end_line=line_number,
+        name=pointer,
+        target=reference["target"],
+        confidence=confidence,
+        extractor=EXTRACTOR_NAME,
+        extractor_version=__version__,
+        metadata={
+            "format": format_name,
+            "profile": profile,
+            "pointer": pointer,
+            "reference_kind": reference_kind,
+            "resolution_reason": reference["reason"],
+            "raw_value_summary": _safe_value_summary(value),
+            "source_document_key": config_document_key(relative_path),
+        },
+    )
+
+
+def _angular_observations(
+    relative_path: str,
+    value: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+    content: str,
+) -> list[RawObservation]:
+    observations: list[RawObservation] = []
+    projects = value.get("projects")
+    if not isinstance(projects, dict):
+        return observations
+    for project_name in sorted(str(key) for key in projects):
+        project = projects.get(project_name)
+        if not isinstance(project, dict):
+            continue
+        metadata = {
+            "project_name": project_name,
+            "root": _safe_value_summary(project.get("root")),
+            "source_root": _safe_value_summary(project.get("sourceRoot")),
+            "source_path_key": config_path_key(
+                relative_path,
+                json_pointer(("projects", project_name)),
+            ),
+        }
+        observations.append(
+            _profile_observation(
+                "angular.project",
+                relative_path,
+                profile="angular_workspace",
+                format_name=format_name,
+                confidence=confidence,
+                metadata={key: item for key, item in metadata.items() if item is not None},
+                name=project_name,
+                source_suffix=f"angular-project:{project_name}",
+            )
+        )
+        targets = project.get("architect") or project.get("targets")
+        if not isinstance(targets, dict):
+            continue
+        for target_name in sorted(str(key) for key in targets):
+            target_value = targets.get(target_name)
+            builder = (
+                target_value.get("builder")
+                if isinstance(target_value, dict)
+                else None
+            )
+            observations.append(
+                _profile_observation(
+                    "angular.target",
+                    relative_path,
+                    profile="angular_workspace",
+                    format_name=format_name,
+                    confidence=confidence,
+                    metadata={
+                        "project_name": project_name,
+                        "target_name": target_name,
+                        "builder": _safe_value_summary(builder),
+                        "source_path_key": config_path_key(
+                            relative_path,
+                            json_pointer(("projects", project_name, "architect", target_name)),
+                        ),
+                    },
+                    name=f"{project_name}:{target_name}",
+                    source_suffix=f"angular-target:{project_name}:{target_name}",
+                )
+            )
+    return observations
+
+
+def _playwright_observation(
+    relative_path: str,
+    value: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+    profile: str,
+) -> RawObservation:
+    project_names: list[str] = []
+    projects = value.get("projects")
+    if isinstance(projects, list):
+        for project in projects:
+            if isinstance(project, dict):
+                name = _safe_value_summary(project.get("name"))
+                if isinstance(name, str):
+                    project_names.append(name)
+    return _profile_observation(
+        "playwright.config",
+        relative_path,
+        profile=profile,
+        format_name=format_name,
+        confidence=confidence,
+        metadata={
+            "test_dir": _safe_value_summary(value.get("testDir")),
+            "project_names": project_names,
+            "project_count": len(project_names),
+        },
+        source_suffix="playwright-config",
+    )
+
+
+def _terraform_json_observations(
+    relative_path: str,
+    value: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+) -> list[RawObservation]:
+    observations: list[RawObservation] = [
+        _profile_observation(
+            "terraform.file",
+            relative_path,
+            profile="terraform_json",
+            format_name=format_name,
+            confidence=confidence,
+            metadata={
+                "variant": "tf.json",
+                "declared_sections": sorted(str(key) for key in value),
+            },
+            source_suffix="terraform-file",
+        )
+    ]
+    terraform = value.get("terraform")
+    if isinstance(terraform, dict):
+        required_version = _safe_value_summary(terraform.get("required_version"))
+        if isinstance(required_version, str):
+            observations.append(
+                _profile_observation(
+                    "terraform.required_version",
+                    relative_path,
+                    profile="terraform_json",
+                    format_name=format_name,
+                    confidence=confidence,
+                    metadata={"version_constraint": required_version},
+                    source_suffix="terraform-required-version",
+                )
+            )
+        required_providers = terraform.get("required_providers")
+        if isinstance(required_providers, dict):
+            for provider_name in sorted(str(key) for key in required_providers):
+                provider_config = required_providers.get(provider_name)
+                source = provider_name
+                version = None
+                if isinstance(provider_config, dict):
+                    source = str(provider_config.get("source") or provider_name)
+                    version = _safe_value_summary(provider_config.get("version"))
+                observations.append(
+                    _profile_observation(
+                        "terraform.required_provider",
+                        relative_path,
+                        profile="terraform_json",
+                        format_name=format_name,
+                        confidence=confidence,
+                        metadata={
+                            "provider_name": provider_name,
+                            "provider_source": source,
+                            "version_constraint": version,
+                        },
+                        name=provider_name,
+                        target=external_key("terraform.provider", source),
+                        source_suffix=f"terraform-required-provider:{provider_name}",
+                    )
+                )
+                observations.append(
+                    _terraform_reference_observation(
+                        relative_path,
+                        "provider_source",
+                        source,
+                        target=external_key("terraform.provider", source),
+                        confidence="heuristic",
+                        format_name=format_name,
+                    )
+                )
+        backend = terraform.get("backend")
+        if isinstance(backend, dict):
+            for backend_type in sorted(str(key) for key in backend):
+                observations.append(
+                    _profile_observation(
+                        "terraform.backend",
+                        relative_path,
+                        profile="terraform_json",
+                        format_name=format_name,
+                        confidence=confidence,
+                        metadata={"backend_type": backend_type},
+                        name=backend_type,
+                        source_suffix=f"terraform-backend:{backend_type}",
+                    )
+                )
+    observations.extend(
+        _terraform_named_block_observations(
+            relative_path,
+            value,
+            format_name=format_name,
+            confidence=confidence,
+        )
+    )
+    return observations
+
+
+def _terraform_named_block_observations(
+    relative_path: str,
+    value: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+) -> list[RawObservation]:
+    observations: list[RawObservation] = []
+    for provider_name in _terraform_block_names(value.get("provider")):
+        observations.append(
+            _profile_observation(
+                "terraform.provider",
+                relative_path,
+                profile="terraform_json",
+                format_name=format_name,
+                confidence=confidence,
+                metadata={"provider_name": provider_name},
+                name=provider_name,
+                source_suffix=f"terraform-provider:{provider_name}",
+            )
+        )
+    for kind, raw_kind, type_key, name_key in (
+        ("resource", "terraform.resource", "resource_type", "resource_name"),
+        ("data", "terraform.data_source", "data_source_type", "data_source_name"),
+    ):
+        section = value.get(kind)
+        if not isinstance(section, dict):
+            continue
+        for block_type in sorted(str(key) for key in section):
+            instances = section.get(block_type)
+            if not isinstance(instances, dict):
+                continue
+            for block_name in sorted(str(key) for key in instances):
+                observations.append(
+                    _profile_observation(
+                        raw_kind,
+                        relative_path,
+                        profile="terraform_json",
+                        format_name=format_name,
+                        confidence=confidence,
+                        metadata={type_key: block_type, name_key: block_name},
+                        name=f"{block_type}.{block_name}",
+                        source_suffix=f"{raw_kind.replace('.', '-')}:{block_type}:{block_name}",
+                    )
+                )
+    modules = value.get("module")
+    if isinstance(modules, dict):
+        for module_name in sorted(str(key) for key in modules):
+            module_config = modules.get(module_name)
+            source = None
+            if isinstance(module_config, dict) and isinstance(module_config.get("source"), str):
+                source = module_config["source"]
+            metadata = {"module_name": module_name}
+            if source is not None:
+                metadata["source_summary"] = _safe_value_summary(source)
+            observations.append(
+                _profile_observation(
+                    "terraform.module",
+                    relative_path,
+                    profile="terraform_json",
+                    format_name=format_name,
+                    confidence=confidence,
+                    metadata=metadata,
+                    name=module_name,
+                    source_suffix=f"terraform-module:{module_name}",
+                )
+            )
+            if source is not None:
+                observations.append(
+                    _terraform_reference_observation(
+                        relative_path,
+                        "module_source",
+                        source,
+                        target=external_key("terraform.module", source),
+                        confidence="heuristic",
+                        format_name=format_name,
+                    )
+                )
+    for section_name, observation_kind, metadata_key in (
+        ("variable", "terraform.variable", "variable_name"),
+        ("output", "terraform.output", "output_name"),
+    ):
+        section = value.get(section_name)
+        if isinstance(section, dict):
+            for item_name in sorted(str(key) for key in section):
+                observations.append(
+                    _profile_observation(
+                        observation_kind,
+                        relative_path,
+                        profile="terraform_json",
+                        format_name=format_name,
+                        confidence=confidence,
+                        metadata={metadata_key: item_name},
+                        name=item_name,
+                        source_suffix=f"{observation_kind.replace('.', '-')}:{item_name}",
+                    )
+                )
+    locals_section = value.get("locals")
+    if isinstance(locals_section, dict):
+        for local_name in sorted(str(key) for key in locals_section):
+            observations.append(
+                _profile_observation(
+                    "terraform.local",
+                    relative_path,
+                    profile="terraform_json",
+                    format_name=format_name,
+                    confidence=confidence,
+                    metadata={"local_name": local_name},
+                    name=local_name,
+                    source_suffix=f"terraform-local:{local_name}",
+                )
+            )
+    return observations
+
+
+def _terraform_block_names(value: Any) -> tuple[str, ...]:
+    if isinstance(value, dict):
+        return tuple(sorted(str(key) for key in value))
+    if isinstance(value, list):
+        names = []
+        for item in value:
+            if isinstance(item, dict):
+                names.extend(str(key) for key in item)
+        return tuple(sorted(set(names)))
+    return ()
+
+
+def _terraform_reference_observation(
+    relative_path: str,
+    reference_kind: str,
+    raw_value: str,
+    *,
+    target: str,
+    confidence: str,
+    format_name: str,
+) -> RawObservation:
+    return _profile_observation(
+        "terraform.reference",
+        relative_path,
+        profile="terraform_json",
+        format_name=format_name,
+        confidence=confidence,
+        metadata={
+            "reference_kind": reference_kind,
+            "raw_value_summary": _safe_value_summary(raw_value),
+            "not_fetched": True,
+        },
+        target=target,
+        source_suffix=f"terraform-reference:{reference_kind}:{raw_value}",
+    )
+
+
+def _terraform_tfvars_observations(
+    relative_path: str,
+    value: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+) -> list[RawObservation]:
+    observations = [
+        _profile_observation(
+            "terraform.file",
+            relative_path,
+            profile="terraform_tfvars_json",
+            format_name=format_name,
+            confidence=confidence,
+            metadata={
+                "variant": "tfvars.json",
+                "all_values_sensitive": True,
+                "variable_count": len(value),
+            },
+            source_suffix="terraform-file",
+        )
+    ]
+    for variable_name in sorted(str(key) for key in value):
+        variable_value = value[variable_name]
+        observations.append(
+            _profile_observation(
+                "terraform.variable",
+                relative_path,
+                profile="terraform_tfvars_json",
+                format_name=format_name,
+                confidence=confidence,
+                metadata={
+                    "variable_name": variable_name,
+                    "value_type": _value_type(variable_value),
+                    "value_shape": _value_shape(variable_value),
+                    "redacted": True,
+                    "redaction_reason": "tfvars-sensitive-by-default",
+                },
+                name=variable_name,
+                source_suffix=f"terraform-variable:{variable_name}",
+            )
+        )
+    return observations
+
+
+def _kubernetes_json_observations(
+    relative_path: str,
+    value: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+) -> list[RawObservation]:
+    metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+    observations = [
+        _profile_observation(
+            "kubernetes.resource",
+            relative_path,
+            profile="kubernetes_json",
+            format_name=format_name,
+            confidence=confidence,
+            metadata={
+                "api_version": _safe_value_summary(value.get("apiVersion")),
+                "kind": _safe_value_summary(value.get("kind")),
+                "name": _safe_value_summary(metadata.get("name")),
+                "namespace": _safe_value_summary(metadata.get("namespace")),
+            },
+            name=str(metadata.get("name") or value.get("kind") or "resource"),
+            source_suffix=(
+                f"kubernetes-resource:{value.get('kind')}:"
+                f"{metadata.get('name') or 'unnamed'}"
+            ),
+        )
+    ]
+    observations.extend(
+        _docker_image_observations(
+            relative_path,
+            value,
+            format_name=format_name,
+            confidence="heuristic",
+            profile="kubernetes_json",
+        )
+    )
+    return observations
+
+
+def _argocd_observations(
+    relative_path: str,
+    value: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+) -> list[RawObservation]:
+    metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+    spec = value.get("spec") if isinstance(value.get("spec"), dict) else {}
+    source = spec.get("source") if isinstance(spec.get("source"), dict) else {}
+    return [
+        _profile_observation(
+            "argocd.application",
+            relative_path,
+            profile="argocd_json",
+            format_name=format_name,
+            confidence=confidence,
+            metadata={
+                "kind": _safe_value_summary(value.get("kind")),
+                "name": _safe_value_summary(metadata.get("name")),
+                "repo_url_summary": _safe_value_summary(source.get("repoURL")),
+                "path_summary": _safe_value_summary(source.get("path")),
+                "target_revision_summary": _safe_value_summary(
+                    source.get("targetRevision")
+                ),
+                "not_fetched": True,
+            },
+            name=str(metadata.get("name") or "argocd-application"),
+            target=(
+                external_url_key(source["repoURL"])
+                if isinstance(source.get("repoURL"), str) and _is_url(source["repoURL"])
+                else None
+            ),
+            source_suffix=f"argocd-application:{metadata.get('name') or 'unnamed'}",
+        )
+    ]
+
+
+def _liquibase_observations(
+    relative_path: str,
+    value: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+) -> list[RawObservation]:
+    changelog = value.get("databaseChangeLog")
+    entries = changelog if isinstance(changelog, list) else []
+    observations = [
+        _profile_observation(
+            "liquibase.changelog",
+            relative_path,
+            profile="liquibase_json",
+            format_name=format_name,
+            confidence=confidence,
+            metadata={"changeset_count": _liquibase_changeset_count(entries)},
+            source_suffix="liquibase-changelog",
+        )
+    ]
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict) or not isinstance(entry.get("changeSet"), dict):
+            continue
+        changeset = entry["changeSet"]
+        observations.append(
+            _profile_observation(
+                "liquibase.changeset",
+                relative_path,
+                profile="liquibase_json",
+                format_name=format_name,
+                confidence=confidence,
+                metadata={
+                    "changeset_id": _safe_value_summary(changeset.get("id")),
+                    "author": _safe_value_summary(changeset.get("author")),
+                    "context": _safe_value_summary(changeset.get("context")),
+                    "labels": _safe_value_summary(changeset.get("labels")),
+                },
+                name=str(changeset.get("id") or index),
+                source_suffix=f"liquibase-changeset:{index}",
+            )
+        )
+    return observations
+
+
+def _liquibase_changeset_count(entries: list[Any]) -> int:
+    return sum(
+        1
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("changeSet"), dict)
+    )
+
+
+def _docker_json_observations(
+    relative_path: str,
+    value: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+    profile: str,
+) -> list[RawObservation]:
+    return list(
+        _docker_image_observations(
+            relative_path,
+            value,
+            format_name=format_name,
+            confidence=confidence,
+            profile=profile,
+        )
+    )
+
+
+def _docker_image_observations(
+    relative_path: str,
+    value: Any,
+    *,
+    format_name: str,
+    confidence: str,
+    profile: str,
+) -> tuple[RawObservation, ...]:
+    observations: list[RawObservation] = []
+    for pointer, image in _json_image_values(value):
+        observations.append(
+            _profile_observation(
+                "docker.reference",
+                relative_path,
+                profile=profile,
+                format_name=format_name,
+                confidence=confidence,
+                metadata={
+                    "reference_kind": "docker.image",
+                    "pointer": pointer,
+                    "image_summary": _safe_value_summary(image),
+                    "not_fetched": True,
+                },
+                target=external_key("docker.image", image),
+                source_suffix=f"docker-reference:{pointer}",
+            )
+        )
+    return tuple(observations)
+
+
+def _json_image_values(value: Any) -> tuple[tuple[str, str], ...]:
+    result: list[tuple[str, str]] = []
+
+    def walk(current: Any, segments: tuple[str, ...]) -> None:
+        if isinstance(current, dict):
+            for key, child in current.items():
+                child_segments = (*segments, str(key))
+                if (
+                    _normalized_key(str(key)) == "image"
+                    and isinstance(child, str)
+                    and _looks_like_container_image(child)
+                ):
+                    result.append((json_pointer(child_segments), child))
+                walk(child, child_segments)
+        elif isinstance(current, list):
+            for index, child in enumerate(current):
+                walk(child, (*segments, str(index)))
+
+    walk(value, ())
+    return tuple(result)
+
+
+def _is_argocd_json_document(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and str(value.get("apiVersion", "")).startswith("argoproj.io/")
+        and value.get("kind") in ("Application", "ApplicationSet")
+    )
+
+
+def _is_liquibase_json_document(value: Any) -> bool:
+    return isinstance(value, dict) and "databaseChangeLog" in value
+
+
+def _safe_selected_metadata(
+    value: dict[str, Any],
+    keys: tuple[str, ...],
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for key in keys:
+        item = value.get(key)
+        if _is_secret_key(key):
+            metadata[f"{key}_redacted"] = True
+            continue
+        summary = _safe_value_summary(item)
+        if summary is not None:
+            metadata[key] = summary
+        elif isinstance(item, (dict, list)):
+            metadata[f"{key}_type"] = _value_type(item)
+            metadata[f"{key}_shape"] = _value_shape(item)
+    return metadata
+
+
+def _script_is_secret_prone(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = _normalized_key(value)
+    if any(marker in normalized for marker in ("token", "secret", "password", "credential")):
+        return True
+    return bool(re.search(r"\b[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|KEY)=", value))
+
+
+def _script_command_summary(value: str) -> str:
+    stripped = value.strip()
+    if not stripped:
+        return "<empty-script>"
+    first = stripped.split()[0]
+    if "=" in first and len(stripped.split()) > 1:
+        first = stripped.split()[1]
+    if _is_clear_command_name(first):
+        return first
+    return "<script-command>"
+
+
+def _value_shape(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return {"type": "object", "key_count": len(value)}
+    if isinstance(value, list):
+        return {"type": "array", "item_count": len(value)}
+    return {"type": _value_type(value)}
 
 
 def _yaml_documents(value: Any, *, document_count: int) -> tuple[Any, ...]:

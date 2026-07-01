@@ -12,6 +12,362 @@ def observations_format(observations):
 
 
 class ConfigExtractorUnitTests(unittest.TestCase):
+    def test_package_json_emits_ecosystem_profile_observations_and_redacts_scripts(self):
+        observations = extract_config_file_observations(
+            "package.json",
+            json.dumps(
+                {
+                    "name": "@example/app",
+                    "version": "1.2.3",
+                    "private": True,
+                    "type": "module",
+                    "packageManager": "pnpm@9.1.0",
+                    "scripts": {
+                        "test": "jest --runInBand",
+                        "deploy": "TOKEN=fake-package-secret npm publish",
+                    },
+                    "dependencies": {
+                        "express": "^4.18.0",
+                        "next": "14.0.0",
+                        "react": "18.2.0",
+                    },
+                    "devDependencies": {"jest": "^29.0.0"},
+                    "peerDependencies": {"jquery": "^3.7.0"},
+                    "optionalDependencies": {"fsevents": "^2.3.0"},
+                    "engines": {"node": ">=20"},
+                    "workspaces": ["packages/*"],
+                    "bin": {"example": "bin/example.js"},
+                    "main": "dist/index.js",
+                    "module": "dist/index.mjs",
+                    "types": "dist/index.d.ts",
+                    "exports": {"." : "./dist/index.js"},
+                    "imports": {"#config": "./src/config.js"},
+                    "repository": {"url": "https://example.invalid/repo.git"},
+                    "homepage": "https://example.invalid/app",
+                    "bugs": {"url": "https://example.invalid/issues"},
+                }
+            ),
+        )
+
+        payload = json.dumps(
+            [observation.to_dict() for observation in observations],
+            sort_keys=True,
+        )
+        kinds = {observation.kind for observation in observations}
+        package = next(item for item in observations if item.kind == "npm.package")
+        scripts = [item for item in observations if item.kind == "npm.script"]
+        dependencies = [item for item in observations if item.kind == "npm.dependency"]
+        hints = [item for item in observations if item.kind == "ecosystem.framework_hint"]
+        paths = {item.metadata["pointer"]: item for item in observations if item.kind == "config.path"}
+
+        self.assertIn("config.document", kinds)
+        self.assertIn("ecosystem.config_profile", kinds)
+        self.assertEqual(package.metadata["package_name"], "@example/app")
+        self.assertEqual(package.metadata["package_version"], "1.2.3")
+        self.assertTrue(package.metadata["private"])
+        self.assertEqual(package.metadata["package_manager"], "pnpm@9.1.0")
+        self.assertIn("scripts", package.metadata["declared_sections"])
+        self.assertIn("workspaces", package.metadata["declared_sections"])
+        self.assertIn(
+            ("express", "dependencies"),
+            {
+                (item.metadata["dependency_name"], item.metadata["dependency_group"])
+                for item in dependencies
+            },
+        )
+        self.assertIn(
+            ("jquery", "peerDependencies"),
+            {
+                (item.metadata["dependency_name"], item.metadata["dependency_group"])
+                for item in dependencies
+            },
+        )
+        self.assertIn(
+            ("next", "package-dependency"),
+            {
+                (item.metadata["framework"], item.metadata["hint_reason"])
+                for item in hints
+            },
+        )
+        self.assertIn(
+            ("test", "jest"),
+            {
+                (item.metadata["script_name"], item.metadata["command_summary"])
+                for item in scripts
+            },
+        )
+        deploy = next(item for item in scripts if item.metadata["script_name"] == "deploy")
+        self.assertTrue(deploy.metadata["redacted"])
+        self.assertEqual(deploy.metadata["redaction_reason"], "secret-prone-script")
+        self.assertTrue(paths["/scripts/deploy"].metadata["redacted"])
+        self.assertNotIn("fake-package-secret", payload)
+        self.assertNotIn("TOKEN=", payload)
+
+    def test_typescript_angular_jest_nest_and_playwright_json_profiles(self):
+        cases = [
+            (
+                "tsconfig.json",
+                {
+                    "extends": "./tsconfig.base.json",
+                    "compilerOptions": {
+                        "baseUrl": ".",
+                        "paths": {"@app/*": ["src/app/*"]},
+                        "jsx": "react-jsx",
+                    },
+                    "references": [{"path": "./packages/app"}],
+                },
+                {"typescript.config", "typescript.reference"},
+            ),
+            (
+                "angular.json",
+                {
+                    "projects": {
+                        "web": {
+                            "root": "apps/web",
+                            "sourceRoot": "apps/web/src",
+                            "architect": {"build": {"builder": "@angular/build:application"}},
+                        }
+                    }
+                },
+                {"angular.project", "angular.target"},
+            ),
+            (
+                "nest-cli.json",
+                {"sourceRoot": "src", "collection": "@nestjs/schematics"},
+                {"nest.config"},
+            ),
+            (
+                "jest.config.json",
+                {
+                    "testEnvironment": "node",
+                    "testMatch": ["**/*.test.ts"],
+                    "setupFilesAfterEnv": ["./test/setup.ts"],
+                },
+                {"jest.config"},
+            ),
+            (
+                "playwright.config.json",
+                {
+                    "testDir": "./tests/e2e",
+                    "projects": [{"name": "chromium"}, {"name": "webkit"}],
+                    "reporter": [["html", {"outputFolder": "playwright-report"}]],
+                },
+                {"playwright.config"},
+            ),
+        ]
+
+        for path, document, expected_kinds in cases:
+            with self.subTest(path=path):
+                observations = extract_config_file_observations(path, json.dumps(document))
+                kinds = {observation.kind for observation in observations}
+                profiles = [
+                    item
+                    for item in observations
+                    if item.kind == "ecosystem.config_profile"
+                ]
+
+                self.assertTrue(expected_kinds.issubset(kinds))
+                self.assertEqual(len(profiles), 1)
+                self.assertEqual(profiles[0].metadata["format"], "json")
+                self.assertIn("profile", profiles[0].metadata)
+                self.assertIn("config.document", kinds)
+                self.assertIn("config.path", kinds)
+
+    def test_terraform_json_emits_static_profile_observations_and_references(self):
+        observations = extract_config_file_observations(
+            "infra/main.tf.json",
+            json.dumps(
+                {
+                    "terraform": {
+                        "required_version": ">= 1.6.0",
+                        "required_providers": {
+                            "aws": {
+                                "source": "hashicorp/aws",
+                                "version": "~> 5.0",
+                            }
+                        },
+                        "backend": {
+                            "s3": {
+                                "bucket": "example-state",
+                                "key": "state/app.tfstate",
+                            }
+                        },
+                    },
+                    "provider": {"aws": {"region": "us-east-1"}},
+                    "resource": {
+                        "aws_s3_bucket": {
+                            "app": {
+                                "bucket": "example-app",
+                                "secret_key": "fake-terraform-secret",
+                            }
+                        }
+                    },
+                    "data": {"aws_caller_identity": {"current": {}}},
+                    "module": {"vpc": {"source": "terraform-aws-modules/vpc/aws"}},
+                    "variable": {"region": {"type": "string"}},
+                    "output": {"bucket_name": {"value": "${aws_s3_bucket.app.id}"}},
+                    "locals": {"name": "app"},
+                }
+            ),
+        )
+
+        payload = json.dumps(
+            [observation.to_dict() for observation in observations],
+            sort_keys=True,
+        )
+        kinds = {observation.kind for observation in observations}
+        references = [item for item in observations if item.kind == "terraform.reference"]
+        resource = next(item for item in observations if item.kind == "terraform.resource")
+        required_provider = next(
+            item for item in observations if item.kind == "terraform.required_provider"
+        )
+
+        self.assertTrue(
+            {
+                "terraform.file",
+                "terraform.required_version",
+                "terraform.required_provider",
+                "terraform.backend",
+                "terraform.provider",
+                "terraform.resource",
+                "terraform.data_source",
+                "terraform.module",
+                "terraform.variable",
+                "terraform.output",
+                "terraform.local",
+                "terraform.reference",
+            }.issubset(kinds)
+        )
+        self.assertEqual(resource.metadata["resource_type"], "aws_s3_bucket")
+        self.assertEqual(resource.metadata["resource_name"], "app")
+        self.assertEqual(required_provider.metadata["provider_source"], "hashicorp/aws")
+        self.assertIn(
+            ("provider_source", "external:terraform.provider:hashicorp%2Faws"),
+            {
+                (item.metadata["reference_kind"], item.target)
+                for item in references
+            },
+        )
+        self.assertIn(
+            ("module_source", "external:terraform.module:terraform-aws-modules%2Fvpc%2Faws"),
+            {
+                (item.metadata["reference_kind"], item.target)
+                for item in references
+            },
+        )
+        self.assertNotIn("fake-terraform-secret", payload)
+
+    def test_terraform_tfvars_json_redacts_all_values_by_default(self):
+        observations = extract_config_file_observations(
+            "terraform.tfvars.json",
+            json.dumps(
+                {
+                    "region": "us-east-1",
+                    "replicas": 3,
+                    "tags": {"service": "api"},
+                    "db_password": "fake-tfvars-secret",
+                }
+            ),
+        )
+
+        payload = json.dumps(
+            [observation.to_dict() for observation in observations],
+            sort_keys=True,
+        )
+        variables = [item for item in observations if item.kind == "terraform.variable"]
+        paths = {item.metadata["pointer"]: item for item in observations if item.kind == "config.path"}
+
+        self.assertEqual({item.metadata["variable_name"] for item in variables}, {"region", "replicas", "tags", "db_password"})
+        self.assertTrue(all(item.metadata["redacted"] for item in variables))
+        self.assertEqual(
+            {item.metadata["value_type"] for item in variables},
+            {"string", "number", "object"},
+        )
+        self.assertTrue(paths["/region"].metadata["redacted"])
+        self.assertTrue(paths["/tags"].metadata["redacted"])
+        self.assertNotIn("us-east-1", payload)
+        self.assertNotIn("api", payload)
+        self.assertNotIn("fake-tfvars-secret", payload)
+
+    def test_infrastructure_json_profiles_emit_raw_observations_and_redact_secrets(self):
+        cases = [
+            (
+                "k8s/deployment.json",
+                {
+                    "apiVersion": "apps/v1",
+                    "kind": "Deployment",
+                    "metadata": {"name": "app", "namespace": "default"},
+                    "spec": {
+                        "template": {
+                            "spec": {
+                                "containers": [
+                                    {"name": "app", "image": "example/app:1.0"}
+                                ]
+                            }
+                        }
+                    },
+                },
+                "kubernetes.resource",
+            ),
+            (
+                "argocd/application.json",
+                {
+                    "apiVersion": "argoproj.io/v1alpha1",
+                    "kind": "Application",
+                    "metadata": {"name": "app"},
+                    "spec": {
+                        "source": {
+                            "repoURL": "https://example.invalid/repo.git",
+                            "path": "deploy/app",
+                            "targetRevision": "main",
+                        },
+                        "destination": {"namespace": "default", "server": "https://kubernetes.default.svc"},
+                    },
+                },
+                "argocd.application",
+            ),
+            (
+                "db/changelog.json",
+                {
+                    "databaseChangeLog": [
+                        {
+                            "changeSet": {
+                                "id": "1",
+                                "author": "fixture",
+                                "changes": [{"createTable": {"tableName": "example"}}],
+                            }
+                        }
+                    ]
+                },
+                "liquibase.changelog",
+            ),
+        ]
+
+        for path, document, expected_kind in cases:
+            with self.subTest(path=path):
+                observations = extract_config_file_observations(path, json.dumps(document))
+                self.assertIn(expected_kind, {item.kind for item in observations})
+                self.assertIn("ecosystem.config_profile", {item.kind for item in observations})
+
+        secret_observations = extract_config_file_observations(
+            "k8s/secret.json",
+            json.dumps(
+                {
+                    "apiVersion": "v1",
+                    "kind": "Secret",
+                    "metadata": {"name": "app-secret"},
+                    "data": {"password": "fake-k8s-secret-value"},
+                }
+            ),
+        )
+        payload = json.dumps(
+            [observation.to_dict() for observation in secret_observations],
+            sort_keys=True,
+        )
+
+        self.assertIn("kubernetes.resource", {item.kind for item in secret_observations})
+        self.assertNotIn("fake-k8s-secret-value", payload)
+
     def test_extracts_json_paths_references_and_redacts_secret_values(self):
         observations = extract_config_file_observations(
             "mcp/repo-map/config.json",
