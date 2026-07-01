@@ -6,6 +6,13 @@ import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
+from repomap_kg.api_ingestion import (
+    ApiPolicyError,
+    FixtureApiTransport,
+    acquire_api_source,
+    build_api_plan_from_config,
+    load_api_source_config,
+)
 from repomap_kg.bulk_ingestion import (
     BulkPolicyError,
     bulk_observations_from_plan,
@@ -33,6 +40,102 @@ from repomap_kg.storage import LoadSummary
 
 
 class SourceIngestionIntegrationTests(unittest.TestCase):
+    def test_api_fixture_policy_plan_and_fail_closed_configs(self):
+        config = load_api_source_config(
+            api_fixture_root() / "readonly_fixture_api" / "api-source.toml"
+        )
+        manifest = build_api_plan_from_config(
+            api_fixture_root() / "readonly_fixture_api" / "api-source.toml"
+        )
+
+        self.assertEqual(config.source_id, "fixture-readonly-api")
+        self.assertEqual(config.source_type, "api.rest")
+        self.assertEqual(config.api_source_class, "api.custom_documented_api")
+        self.assertEqual(config.credentials_ref, "local_secret_ref:fixture-api-token")
+        self.assertEqual(manifest.request_count, 1)
+        self.assertEqual(manifest.requests[0].method, "GET")
+        self.assertEqual(manifest.requests[0].path, "/v1/items")
+        payload = json.dumps(manifest.to_jsonable(), sort_keys=True)
+        self.assertIn('"no_network": true', payload)
+        self.assertIn('"no_mutation": true', payload)
+        self.assertNotIn("fixture-api-token", payload)
+        self.assertNotIn(str(api_fixture_root()), payload)
+        for fixture_name in (
+            "blocked_policy",
+            "missing_consent",
+            "mutation_attempt",
+            "missing_credentials",
+            "non_allowlisted_endpoint",
+        ):
+            with self.subTest(fixture_name=fixture_name):
+                with self.assertRaises(ApiPolicyError):
+                    load_api_source_config(
+                        api_fixture_root() / fixture_name / "api-source.toml"
+                    )
+
+    def test_api_acquire_uses_fixture_transport_owned_artifacts_and_provenance(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shutil.copytree(
+                api_fixture_root() / "readonly_fixture_api",
+                root / "readonly_fixture_api",
+            )
+            config_path = root / "readonly_fixture_api" / "api-source.toml"
+            source_text = (
+                root / "readonly_fixture_api" / "responses" / "items.json"
+            ).read_text(encoding="utf-8")
+            captured = {}
+
+            def loader(_psql_args, observations, **kwargs):
+                captured["observations"] = tuple(observations)
+                captured["kwargs"] = dict(kwargs)
+                return LoadSummary(repository_id=42, run_id=43, files=1)
+
+            summary = acquire_api_source(
+                config_path,
+                repository_name="fixture",
+                root_path=root,
+                psql_args=("--no-network-placeholder",),
+                psql_command="psql",
+                loader=loader,
+                transport=FixtureApiTransport(),
+            )
+            manifest_exists = (summary.output_path / "manifest.json").is_file()
+            response_records_exist = (
+                summary.output_path / "redacted-responses.jsonl"
+            ).is_file()
+            artifact_exists = (summary.output_path / "artifacts" / "items.json").is_file()
+
+        self.assertEqual(summary.source_id, "fixture-readonly-api")
+        self.assertEqual(summary.requests, 1)
+        self.assertEqual(summary.responses, 1)
+        self.assertEqual(summary.load_summary.repository_id, 42)
+        self.assertTrue(manifest_exists)
+        self.assertTrue(response_records_exist)
+        self.assertTrue(artifact_exists)
+        self.assertEqual(captured["kwargs"]["repository_name"], "fixture")
+        kinds = {observation.kind for observation in captured["observations"]}
+        self.assertIn("api.source", kinds)
+        self.assertIn("api.run", kinds)
+        self.assertIn("api.response", kinds)
+        self.assertIn("config.document", kinds)
+        payload = json.dumps(
+            [observation.to_dict() for observation in captured["observations"]],
+            sort_keys=True,
+        )
+        self.assertIn('"api_run_id"', payload)
+        self.assertIn('"endpoint_name": "items"', payload)
+        self.assertIn('"api_retention_policy": "local_user_controlled"', payload)
+        self.assertNotIn(str(root), payload)
+        self.assertNotIn("fixture-secret-value", payload)
+        self.assertNotIn("fixture-api-token", payload)
+        summary_payload = json.dumps(summary.to_jsonable(), sort_keys=True)
+        self.assertIn('"no_network": true', summary_payload)
+        self.assertIn('"no_mutation": true', summary_payload)
+        self.assertNotIn(str(root), summary_payload)
+        self.assertNotIn("fixture-secret-value", summary_payload)
+        self.assertIn("fixture-secret-value", source_text)
+
     def test_bulk_fixture_policy_plan_and_observations(self):
         config = load_bulk_source_config(bulk_fixture_root() / "mixed_corpus" / "bulk.toml")
         manifest = build_bulk_plan(config, repository_root=bulk_fixture_root() / "mixed_corpus")
@@ -1016,6 +1119,10 @@ def source_ingestion_fixture_root() -> Path:
 
 def bulk_fixture_root() -> Path:
     return Path(__file__).parents[3] / "fixtures" / "bulk"
+
+
+def api_fixture_root() -> Path:
+    return Path(__file__).parents[3] / "fixtures" / "api"
 
 
 if __name__ == "__main__":

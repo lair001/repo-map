@@ -7,6 +7,11 @@ import json
 import sys
 
 from repomap_kg import __version__
+from repomap_kg.api_ingestion import (
+    ApiPolicyError,
+    acquire_api_source,
+    build_api_plan_from_config,
+)
 from repomap_kg.bulk_ingestion import (
     BulkPolicyError,
     build_bulk_plan_from_config,
@@ -348,6 +353,44 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit bulk import summary as JSON",
+    )
+
+    api = subparsers.add_parser(
+        "api",
+        help="plan and acquire explicitly configured documented API sources",
+    )
+    api_subcommands = api.add_subparsers(dest="api_command")
+    api_plan = api_subcommands.add_parser(
+        "plan",
+        help="plan one explicitly configured documented API acquisition",
+    )
+    api_plan.add_argument(
+        "--config",
+        required=True,
+        help="path to a documented API source TOML config",
+    )
+    api_plan.add_argument(
+        "--json",
+        action="store_true",
+        help="emit API request plan as JSON",
+    )
+    api_acquire = api_subcommands.add_parser(
+        "acquire",
+        help="acquire one explicitly configured documented API fixture source",
+    )
+    api_acquire.add_argument(
+        "--config",
+        required=True,
+        help="path to a documented API source TOML config",
+    )
+    api_acquire.add_argument("--repository-name", required=True)
+    add_storage_root_argument(api_acquire)
+    api_acquire.add_argument("--git-commit")
+    add_storage_connection_arguments(api_acquire)
+    api_acquire.add_argument(
+        "--json",
+        action="store_true",
+        help="emit API acquisition summary as JSON",
     )
 
     storage = subparsers.add_parser(
@@ -1088,6 +1131,47 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(
                 "imported bulk source "
+                f"{summary.source_id} into repository "
+                f"{summary.load_summary.repository_id} run "
+                f"{summary.load_summary.run_id} "
+                f"({summary.observations} observations)"
+            )
+        return 0
+
+    if args.command == "api" and args.api_command == "plan":
+        try:
+            manifest = build_api_plan_from_config(args.config)
+        except ApiPolicyError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(manifest.to_jsonable(), sort_keys=True))
+        else:
+            print(
+                "planned API source "
+                f"{manifest.source_id} "
+                f"({manifest.request_count} GET requests)"
+            )
+        return 0
+
+    if args.command == "api" and args.api_command == "acquire":
+        try:
+            summary = acquire_api_source(
+                config_path=args.config,
+                repository_name=args.repository_name,
+                root_path=args.root_path,
+                psql_args=psql_args_from_args(args),
+                git_commit=args.git_commit,
+                psql_command=args.psql_command,
+            )
+        except (ApiPolicyError, StorageSchemaError) as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(summary.to_jsonable(), sort_keys=True))
+        else:
+            print(
+                "acquired API source "
                 f"{summary.source_id} into repository "
                 f"{summary.load_summary.repository_id} run "
                 f"{summary.load_summary.run_id} "

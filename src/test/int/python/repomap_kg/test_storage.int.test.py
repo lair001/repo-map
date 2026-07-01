@@ -616,6 +616,98 @@ WHERE payload_json->'metadata' ? 'bulk_run_id';
         self.assertNotIn(str(corpus), table_stdout)
         self.assertNotIn("mixed-corpus-secret-value", table_stdout)
 
+    def test_api_acquire_cli_loads_fixture_response_through_storage(self):
+        require_postgres_binaries()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shutil.copytree(
+                api_fixture_root() / "readonly_fixture_api",
+                root / "readonly_fixture_api",
+            )
+            config_path = root / "readonly_fixture_api" / "api-source.toml"
+            source_text = (
+                root / "readonly_fixture_api" / "responses" / "items.json"
+            ).read_text(encoding="utf-8")
+            root_path = str(root.resolve())
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                exit_code, stdout, stderr = run_repo_map_in_process(
+                    "api",
+                    "acquire",
+                    "--config",
+                    str(config_path),
+                    "--repository-name",
+                    "fixture-api",
+                    "--root-path",
+                    root_path,
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                    "--json",
+                )
+                kinds = {
+                    record.kind
+                    for record in query_canonical_node_records(
+                        postgres.psql_args,
+                        root_path=root_path,
+                        psql_command=postgres.psql_command,
+                    )
+                }
+                raw_payload = postgres.psql_scalar(
+                    """
+SELECT COALESCE(jsonb_agg(payload_json ORDER BY ordinal)::text, '[]')
+FROM raw_observations;
+"""
+                )
+                api_canonical_count = postgres.psql_scalar(
+                    """
+SELECT count(*)::text
+FROM canonical_nodes
+WHERE kind LIKE 'api.%';
+"""
+                )
+                provenance_count = postgres.psql_scalar(
+                    """
+SELECT count(*)::text
+FROM raw_observations
+WHERE payload_json->'metadata' ? 'api_run_id';
+"""
+                )
+                manifest_dir_exists = (root / ".repomap" / "api-runs").is_dir()
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["source_id"], "fixture-readonly-api")
+        self.assertEqual(payload["repository_id"], 1)
+        self.assertTrue(payload["no_network"])
+        self.assertTrue(payload["no_mutation"])
+        self.assertTrue(manifest_dir_exists)
+        self.assertIn("file", kinds)
+        self.assertIn("config.document", kinds)
+        self.assertEqual(api_canonical_count, "0")
+        self.assertNotEqual(provenance_count, "0")
+        self.assertIn("api.response", raw_payload)
+        self.assertIn("api_retention_policy", raw_payload)
+        self.assertIn("config.document", raw_payload)
+        self.assertNotIn(str(root), raw_payload)
+        self.assertNotIn("fixture-secret-value", raw_payload)
+        self.assertNotIn("fixture-api-token", raw_payload)
+        self.assertIn("fixture-secret-value", source_text)
+        self.assertNotIn(str(root), stdout)
+        self.assertNotIn("fixture-secret-value", stdout)
+
     def test_storage_load_files_dual_writes_canonical_shell_collapse_fixture(self):
         require_postgres_binaries()
         raw_jsonl = canonicalization_fixture(
@@ -8061,6 +8153,10 @@ def source_ingestion_fixture_root() -> Path:
 
 def bulk_fixture_root() -> Path:
     return Path(__file__).parents[3] / "fixtures" / "bulk"
+
+
+def api_fixture_root() -> Path:
+    return Path(__file__).parents[3] / "fixtures" / "api"
 
 
 def fixed_source_clock() -> datetime:
