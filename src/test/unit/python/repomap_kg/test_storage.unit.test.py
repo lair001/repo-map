@@ -21,10 +21,12 @@ from repomap_kg.storage import (
     FileNeighborhoodRecord,
     NeighborhoodRecord,
     NodeRecord,
+    RubySummaryRecord,
     StorageSummaryRecord,
     StorageSchemaError,
     build_canonical_storage_summary_query_sql,
     build_ingested_source_query_sql,
+    build_ruby_summary_query_sql,
     build_source_feed_item_query_sql,
     build_source_reference_query_sql,
     build_source_run_query_sql,
@@ -50,6 +52,7 @@ from repomap_kg.storage import (
     format_file_neighborhood_table,
     format_neighborhood_table,
     format_node_table,
+    format_ruby_summary_table,
     format_storage_summary_table,
     file_rows_from_observations,
     query_edge_records,
@@ -58,6 +61,7 @@ from repomap_kg.storage import (
     query_file_neighborhood,
     query_neighborhood,
     query_node_records,
+    query_ruby_summary,
     query_storage_summary,
     query_host_mutator_records,
     relationship_rows_from_observations,
@@ -81,6 +85,7 @@ from repomap_kg.storage import (
     source_reference_record_from_storage_payload,
     source_run_record_from_storage_payload,
     source_summary_from_storage_payload,
+    ruby_summary_from_storage_payload,
     format_canonical_edge_table,
     format_canonical_edge_explanation_table,
     format_canonical_neighborhood_table,
@@ -92,6 +97,7 @@ from repomap_kg.storage import (
     query_canonical_node_records,
     query_canonical_storage_summary,
     query_ingested_source_records,
+    ruby_summary_to_jsonable,
     query_source_feed_item_records,
     query_source_reference_records,
     query_source_run_records,
@@ -2146,6 +2152,99 @@ SELECT 1;
                     root_path="/tmp/fixture",
                 )
 
+    def test_query_ruby_summary_returns_profile_counts(self):
+        completed = SimpleNamespace(
+            stdout=(
+                '{"root_path":"/tmp/fixture",'
+                '"repository_name":"fixture",'
+                '"ruby_files":8,'
+                '"modules":2,'
+                '"classes":4,'
+                '"methods":9,'
+                '"singleton_methods":1,'
+                '"constants":3,'
+                '"routes":5,'
+                '"test_cases":2,'
+                '"test_methods":4,'
+                '"references":12,'
+                '"gem_dependencies":5,'
+                '"vagrant_configs":6,'
+                '"rake_tasks":3,'
+                '"rake_namespaces":1,'
+                '"dynamic_diagnostics":4,'
+                '"parse_errors":0,'
+                '"profile_counts":{'
+                '"gemfile":1,'
+                '"gemspec":1,'
+                '"hanami":2,'
+                '"minitest":2,'
+                '"rake":1,'
+                '"sinatra":1,'
+                '"vagrantfile":1'
+                '},'
+                '"no_execution":true}\n'
+            )
+        )
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+            summary = query_ruby_summary(
+                ["-d", "postgres"],
+                root_path="/tmp/fixture",
+                psql_command="/bin/psql",
+            )
+
+        self.assertEqual(summary.repository_name, "fixture")
+        self.assertEqual(summary.ruby_files, 8)
+        self.assertEqual(summary.routes, 5)
+        self.assertEqual(summary.test_methods, 4)
+        self.assertEqual(summary.gem_dependencies, 5)
+        self.assertEqual(summary.vagrant_configs, 6)
+        self.assertEqual(summary.rake_tasks, 3)
+        self.assertEqual(summary.dynamic_diagnostics, 4)
+        self.assertEqual(summary.profile_counts["sinatra"], 1)
+        self.assertTrue(summary.no_execution)
+        self.assertIn("-qAt", run.call_args.args[0])
+        self.assertIn("canonical_nodes.kind LIKE 'ruby.%'", run.call_args.kwargs["input"])
+
+    def test_query_ruby_summary_rejects_malformed_json(self):
+        completed = SimpleNamespace(stdout='{"root_path": "/tmp/fixture"}\n')
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(StorageSchemaError, "ruby summary"):
+                query_ruby_summary(["-d", "postgres"], root_path="/tmp/fixture")
+
+    def test_ruby_summary_payload_parser_preserves_safe_counts(self):
+        summary = ruby_summary_from_storage_payload(
+            {
+                "root_path": "/tmp/fixture",
+                "repository_name": "fixture",
+                "ruby_files": 3,
+                "modules": 1,
+                "classes": 2,
+                "methods": 4,
+                "singleton_methods": 1,
+                "constants": 2,
+                "routes": 3,
+                "test_cases": 1,
+                "test_methods": 2,
+                "references": 5,
+                "gem_dependencies": 4,
+                "vagrant_configs": 3,
+                "rake_tasks": 2,
+                "rake_namespaces": 1,
+                "dynamic_diagnostics": 2,
+                "parse_errors": 0,
+                "profile_counts": {"minitest": 1, "sinatra": 1},
+                "no_execution": True,
+            }
+        )
+
+        self.assertEqual(summary.root_path, "/tmp/fixture")
+        self.assertEqual(summary.profile_counts, {"minitest": 1, "sinatra": 1})
+        self.assertEqual(summary.test_methods, 2)
+        self.assertTrue(summary.no_execution)
+        self.assertEqual(ruby_summary_to_jsonable(summary), summary.to_dict())
+
     def test_build_source_feed_queries_use_read_only_metadata_filters(self):
         sources_sql = build_ingested_source_query_sql(
             "/tmp/fixture",
@@ -2576,6 +2675,21 @@ SELECT 1;
         self.assertIn("COUNT(*) FROM canonical_edges", sql)
         self.assertIn("COUNT(*) FROM canonical_evidence", sql)
 
+    def test_build_ruby_summary_query_sql_counts_ruby_profiles_and_evidence(self):
+        sql = build_ruby_summary_query_sql("/tmp/fixture's repo")
+
+        self.assertIn("fixture''s repo", sql)
+        self.assertIn("COUNT(*) FILTER (WHERE kind = 'ruby.file')", sql)
+        self.assertIn("COUNT(*) FILTER (WHERE kind = 'ruby.route')", sql)
+        self.assertIn("COUNT(*) FILTER (WHERE kind = 'ruby.test_method')", sql)
+        self.assertIn("canonical_edges.edge_kind = 'references'", sql)
+        self.assertIn("raw_observations.kind = 'ruby.gem_dependency'", sql)
+        self.assertIn("raw_observations.kind = 'ruby.vagrant_config'", sql)
+        self.assertIn("raw_observations.kind = 'ruby.dsl'", sql)
+        self.assertIn("raw_observations.kind = 'ruby.parse_error'", sql)
+        self.assertIn("profile_counts", sql)
+        self.assertIn("'no_execution', true", sql)
+
     def test_format_edge_table_uses_edge_columns(self):
         table = format_edge_table(
             [
@@ -2645,6 +2759,40 @@ SELECT 1;
         self.assertIn("canonical_nodes", table)
         self.assertIn("canonical_edges", table)
         self.assertIn("/tmp/fixture", table)
+
+    def test_format_ruby_summary_table_uses_profile_and_readback_columns(self):
+        table = format_ruby_summary_table(
+            RubySummaryRecord(
+                root_path="/tmp/fixture",
+                repository_name="fixture",
+                ruby_files=8,
+                modules=2,
+                classes=4,
+                methods=9,
+                singleton_methods=1,
+                constants=3,
+                routes=5,
+                test_cases=2,
+                test_methods=4,
+                references=12,
+                gem_dependencies=5,
+                vagrant_configs=6,
+                rake_tasks=3,
+                rake_namespaces=1,
+                dynamic_diagnostics=4,
+                parse_errors=0,
+                profile_counts={"minitest": 2, "sinatra": 1},
+                no_execution=True,
+            )
+        )
+
+        self.assertIn("ruby_files", table)
+        self.assertIn("routes", table)
+        self.assertIn("test_methods", table)
+        self.assertIn("gem_dependencies", table)
+        self.assertIn("profile_counts", table)
+        self.assertIn("minitest=2", table)
+        self.assertIn("no_execution", table)
 
     def test_format_node_table_uses_node_columns(self):
         table = format_node_table(

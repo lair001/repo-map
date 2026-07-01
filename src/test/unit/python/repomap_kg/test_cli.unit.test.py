@@ -25,6 +25,7 @@ from repomap_kg.storage import (
     LoadSummary,
     NeighborhoodRecord,
     NodeRecord,
+    RubySummaryRecord,
     StorageSchemaError,
     StorageSummaryRecord,
     identity_metadata_hash,
@@ -127,6 +128,7 @@ class CliUnitTests(unittest.TestCase):
             ("host-mutators", ["--root-path", "/tmp/fixture"]),
             ("host-mutators-summary", ["--root-path", "/tmp/fixture"]),
             ("summary", ["--root-path", "/tmp/fixture"]),
+            ("ruby-summary", ["--root-path", "/tmp/fixture"]),
         )
 
         for subcommand, required_args in cases:
@@ -3463,6 +3465,79 @@ class CliUnitTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertIn("psql did not return canonical storage summary", stderr.getvalue())
+
+    def test_storage_ruby_summary_prints_json_record(self):
+        summary = RubySummaryRecord(
+            root_path="/tmp/fixture",
+            repository_name="fixture",
+            ruby_files=8,
+            modules=2,
+            classes=4,
+            methods=9,
+            singleton_methods=1,
+            constants=3,
+            routes=5,
+            test_cases=2,
+            test_methods=4,
+            references=12,
+            gem_dependencies=5,
+            vagrant_configs=6,
+            rake_tasks=3,
+            rake_namespaces=1,
+            dynamic_diagnostics=4,
+            parse_errors=0,
+            profile_counts={"minitest": 2, "sinatra": 1},
+            no_execution=True,
+        )
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_ruby_summary",
+            return_value=summary,
+        ) as query:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "ruby-summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--pg-database",
+                        "postgres",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["root_path"], "/tmp/fixture")
+        self.assertEqual(payload["routes"], 5)
+        self.assertEqual(payload["test_methods"], 4)
+        self.assertEqual(payload["gem_dependencies"], 5)
+        self.assertEqual(payload["profile_counts"]["minitest"], 2)
+        self.assertTrue(payload["no_execution"])
+        self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
+        self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+
+    def test_storage_ruby_summary_reports_query_errors(self):
+        stderr = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_ruby_summary",
+            side_effect=StorageSchemaError("psql did not return ruby summary"),
+        ):
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "storage",
+                        "ruby-summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("psql did not return ruby summary", stderr.getvalue())
 
     def test_discover_prints_text_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
