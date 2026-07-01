@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import tomllib
@@ -110,6 +111,19 @@ TFJSON_FRAMEWORK_DEPENDENCY_HINTS = {
     "react": "react",
     "vue": "vue",
 }
+OPENAPI_HTTP_METHODS = frozenset(
+    ("get", "post", "put", "patch", "delete", "options", "head", "trace")
+)
+OPENAPI_MAX_PATHS = 128
+OPENAPI_MAX_OPERATIONS = 256
+OPENAPI_MAX_PARAMETERS_PER_OPERATION = 64
+OPENAPI_MAX_RESPONSES_PER_OPERATION = 64
+OPENAPI_MAX_SCHEMAS = 256
+OPENAPI_MAX_REFERENCES = 512
+OPENAPI_MAX_EXAMPLES = 128
+OPENAPI_MAX_METADATA_STRING = 160
+OPENAPI_TEXT_KEYS = frozenset(("description", "summary"))
+OPENAPI_EXAMPLE_KEYS = frozenset(("example", "examples", "default"))
 
 
 class JsoncNormalizationError(ValueError):
@@ -206,14 +220,26 @@ def _extract_json_observations(
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError as error:
+        parse_error = _parse_error_observation(
+            relative_path,
+            format_name="json",
+            error_kind="malformed-json",
+            error=error,
+            recovered=False,
+        )
+        if _is_openapi_file_name(relative_path):
+            return (
+                parse_error,
+                _openapi_parse_error_observation(
+                    relative_path,
+                    format_name="json",
+                    error_kind="malformed-openapi-json",
+                    message=str(error),
+                    start_line=error.lineno,
+                ),
+            )
         return (
-            _parse_error_observation(
-                relative_path,
-                format_name="json",
-                error_kind="malformed-json",
-                error=error,
-                recovered=False,
-            ),
+            parse_error,
         )
     profile = _tfjson_profile(relative_path, parsed, format_name="json")
     metadata_overrides = _tfjson_metadata_overrides(
@@ -437,6 +463,17 @@ def _extract_yaml_observations(
         )
         if error.error_kind == "duplicate-yaml-key":
             observation.metadata["duplicate_key_policy"] = "parse-error"
+        if _is_openapi_file_name(relative_path):
+            return (
+                observation,
+                _openapi_parse_error_observation(
+                    relative_path,
+                    format_name=YAML_FORMAT,
+                    error_kind="malformed-openapi-yaml",
+                    message=str(error),
+                    start_line=error.line_number,
+                ),
+            )
         return (observation,)
 
     profile = _yaml_profile(relative_path, parsed, document_count=document_count)
@@ -469,7 +506,17 @@ def _extract_yaml_observations(
             "duplicate_key_policy": "parse-error",
         },
     )
-    return (document, *path_observations, *reference_observations)
+    profile_observations = ()
+    if profile == "openapi":
+        profile_observations = _openapi_profile_observations(
+            relative_path,
+            parsed,
+            format_name=YAML_FORMAT,
+            confidence="extracted",
+            profile=profile,
+            document_count=document_count,
+        )
+    return (document, *profile_observations, *path_observations, *reference_observations)
 
 
 def _parse_yaml_documents(
@@ -1106,7 +1153,9 @@ def _yaml_profile(
     if "arq" in normalized_name or "arq" in path_parts:
         return "arq_backup"
     documents = _yaml_documents(value, document_count=document_count)
-    if any(_is_openapi_document(document) for document in documents):
+    if _is_openapi_file_name(relative_path) or any(
+        _is_openapi_document(document) for document in documents
+    ):
         return "openapi"
     if any(_is_kubernetes_document(document) for document in documents):
         return "kubernetes"
@@ -1131,6 +1180,8 @@ def _tfjson_profile(
     name = path.name
     normalized_name = _normalized_key(name)
     lower_path = relative_path.lower()
+    if _is_openapi_file_name(relative_path) or _is_openapi_document(value):
+        return "openapi_json"
     if lower_path.endswith(".tfvars.json") or normalized_name == "terraform.tfvars.json":
         return "terraform_tfvars_json"
     if lower_path.endswith(".tf.json"):
@@ -1228,6 +1279,8 @@ def _tfjson_pointer_is_redacted(
         pointer,
         root_value,
     ):
+        return True
+    if profile == "openapi_json" and _openapi_pointer_is_redacted(pointer, path_value):
         return True
     if "securejsondata" in normalized_segments:
         return True
@@ -1373,6 +1426,16 @@ def _tfjson_profile_observations(
                 profile=profile,
             )
         )
+    elif profile == "openapi_json":
+        observations.extend(
+            _openapi_profile_observations(
+                relative_path,
+                value,
+                format_name=format_name,
+                confidence=confidence,
+                profile=profile,
+            )
+        )
     elif profile == "terraform_json":
         observations.extend(
             _terraform_json_observations(
@@ -1438,6 +1501,8 @@ def _tfjson_profile_family(profile: str) -> str:
         return "npm"
     if profile in ("typescript_config", "javascript_config"):
         return "typescript"
+    if profile == "openapi_json":
+        return "openapi"
     if profile.endswith("_json"):
         return profile.removesuffix("_json")
     return profile
@@ -1951,6 +2016,1155 @@ def _playwright_observation(
             "project_count": len(project_names),
         },
         source_suffix="playwright-config",
+    )
+
+
+def _openapi_profile_observations(
+    relative_path: str,
+    value: Any,
+    *,
+    format_name: str,
+    confidence: str,
+    profile: str,
+    document_count: int = 1,
+) -> list[RawObservation]:
+    observations: list[RawObservation] = []
+    for document_index, document in enumerate(
+        _yaml_documents(value, document_count=document_count)
+        if format_name == YAML_FORMAT
+        else (value,)
+    ):
+        document_pointer_prefix = (
+            ("documents", str(document_index))
+            if format_name == YAML_FORMAT and document_count > 1
+            else ()
+        )
+        if not isinstance(document, dict) or not _is_openapi_document(document):
+            observations.append(
+                _openapi_parse_error_observation(
+                    relative_path,
+                    format_name=format_name,
+                    error_kind="unsupported-openapi-document",
+                    message="OpenAPI profile file lacks a supported OpenAPI/Swagger object",
+                    document_index=(
+                        document_index if document_count > 1 else None
+                    ),
+                )
+            )
+            continue
+
+        spec_metadata = _openapi_spec_metadata(document)
+        if spec_metadata is None:
+            observations.append(
+                _openapi_parse_error_observation(
+                    relative_path,
+                    format_name=format_name,
+                    error_kind="unsupported-openapi-version",
+                    message="OpenAPI/Swagger version is unsupported",
+                    document_index=(
+                        document_index if document_count > 1 else None
+                    ),
+                )
+            )
+            continue
+
+        paths = document.get("paths")
+        paths_dict = paths if isinstance(paths, dict) else {}
+        if len(paths_dict) > OPENAPI_MAX_PATHS:
+            observations.append(
+                _openapi_parse_error_observation(
+                    relative_path,
+                    format_name=format_name,
+                    error_kind="openapi-path-limit",
+                    message="OpenAPI path count exceeds OPENAPI1 limit",
+                    document_index=(
+                        document_index if document_count > 1 else None
+                    ),
+                )
+            )
+            continue
+
+        operation_count = _openapi_operation_count(paths_dict)
+        if operation_count > OPENAPI_MAX_OPERATIONS:
+            observations.append(
+                _openapi_parse_error_observation(
+                    relative_path,
+                    format_name=format_name,
+                    error_kind="openapi-operation-limit",
+                    message="OpenAPI operation count exceeds OPENAPI1 limit",
+                    document_index=(
+                        document_index if document_count > 1 else None
+                    ),
+                )
+            )
+            continue
+
+        components = _openapi_components(document, spec_metadata["spec_family"])
+        schema_count = len(components.get("schemas", {}))
+        if schema_count > OPENAPI_MAX_SCHEMAS:
+            observations.append(
+                _openapi_parse_error_observation(
+                    relative_path,
+                    format_name=format_name,
+                    error_kind="openapi-schema-limit",
+                    message="OpenAPI schema count exceeds OPENAPI1 limit",
+                    document_index=(
+                        document_index if document_count > 1 else None
+                    ),
+                )
+            )
+            continue
+
+        observations.append(
+            _profile_observation(
+                "openapi.document",
+                relative_path,
+                profile=profile,
+                format_name=format_name,
+                confidence=confidence,
+                metadata={
+                    **spec_metadata,
+                    "source_document_key": config_document_key(relative_path),
+                    "document_index": (
+                        document_index if document_count > 1 else None
+                    ),
+                    "path_count": len(paths_dict),
+                    "operation_count": operation_count,
+                    "schema_count": schema_count,
+                    "server_count": _openapi_server_count(document, spec_metadata["spec_family"]),
+                    "raw_profile_only": True,
+                },
+                source_suffix=_openapi_source_suffix(
+                    "document", json_pointer(document_pointer_prefix)
+                ),
+            )
+        )
+        observations.extend(
+            _openapi_info_observations(
+                relative_path,
+                document,
+                format_name=format_name,
+                confidence=confidence,
+                profile=profile,
+                spec_metadata=spec_metadata,
+                pointer_prefix=document_pointer_prefix,
+            )
+        )
+        observations.extend(
+            _openapi_server_observations(
+                relative_path,
+                document,
+                format_name=format_name,
+                confidence=confidence,
+                profile=profile,
+                spec_metadata=spec_metadata,
+                pointer_prefix=document_pointer_prefix,
+            )
+        )
+        observations.extend(
+            _openapi_path_operation_observations(
+                relative_path,
+                paths_dict,
+                format_name=format_name,
+                confidence=confidence,
+                profile=profile,
+                spec_metadata=spec_metadata,
+                pointer_prefix=(*document_pointer_prefix, "paths"),
+            )
+        )
+        observations.extend(
+            _openapi_component_observations(
+                relative_path,
+                components,
+                format_name=format_name,
+                confidence=confidence,
+                profile=profile,
+                spec_metadata=spec_metadata,
+                pointer_prefix=document_pointer_prefix,
+            )
+        )
+        observations.extend(
+            _openapi_reference_observations(
+                relative_path,
+                document,
+                format_name=format_name,
+                confidence=confidence,
+                profile=profile,
+                spec_metadata=spec_metadata,
+                pointer_prefix=document_pointer_prefix,
+            )
+        )
+        observations.extend(
+            _openapi_example_and_redaction_observations(
+                relative_path,
+                document,
+                format_name=format_name,
+                confidence=confidence,
+                profile=profile,
+                spec_metadata=spec_metadata,
+                pointer_prefix=document_pointer_prefix,
+            )
+        )
+    return observations
+
+
+def _openapi_spec_metadata(value: dict[str, Any]) -> dict[str, str] | None:
+    openapi_version = value.get("openapi")
+    if isinstance(openapi_version, str) and openapi_version.startswith("3."):
+        return {"spec_family": "openapi3", "spec_version": openapi_version}
+    swagger_version = value.get("swagger")
+    if str(swagger_version) == "2.0":
+        return {"spec_family": "swagger2", "spec_version": "2.0"}
+    return None
+
+
+def _openapi_info_observations(
+    relative_path: str,
+    value: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+    profile: str,
+    spec_metadata: dict[str, str],
+    pointer_prefix: tuple[str, ...],
+) -> list[RawObservation]:
+    info = value.get("info")
+    if not isinstance(info, dict):
+        return []
+    description = info.get("description")
+    metadata: dict[str, Any] = {
+        **spec_metadata,
+        "source_document_key": config_document_key(relative_path),
+        "title": _openapi_safe_string(info.get("title")),
+        "version": _openapi_safe_string(info.get("version")),
+        **_openapi_text_metadata(description, "description"),
+    }
+    pointer = json_pointer((*pointer_prefix, "info"))
+    return [
+        _profile_observation(
+            "openapi.info",
+            relative_path,
+            profile=profile,
+            format_name=format_name,
+            confidence=confidence,
+            metadata={key: item for key, item in metadata.items() if item is not None},
+            name=_openapi_safe_string(info.get("title")),
+            source_suffix=_openapi_source_suffix("info", pointer),
+        )
+    ]
+
+
+def _openapi_server_observations(
+    relative_path: str,
+    value: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+    profile: str,
+    spec_metadata: dict[str, str],
+    pointer_prefix: tuple[str, ...],
+) -> list[RawObservation]:
+    observations: list[RawObservation] = []
+    if spec_metadata["spec_family"] == "openapi3":
+        servers = value.get("servers")
+        if not isinstance(servers, list):
+            return observations
+        for index, server in enumerate(servers):
+            if not isinstance(server, dict):
+                continue
+            url = server.get("url")
+            metadata = {
+                **spec_metadata,
+                "server_index": index,
+                "not_fetched": True,
+                **_openapi_url_metadata(url),
+            }
+            pointer = json_pointer((*pointer_prefix, "servers", str(index), "url"))
+            observations.append(
+                _profile_observation(
+                    "openapi.server",
+                    relative_path,
+                    profile=profile,
+                    format_name=format_name,
+                    confidence=confidence,
+                    metadata=metadata,
+                    source_suffix=_openapi_source_suffix("server", pointer),
+                )
+            )
+        return observations
+
+    host = value.get("host")
+    base_path = value.get("basePath")
+    schemes = value.get("schemes")
+    metadata = {
+        **spec_metadata,
+        "not_fetched": True,
+        "host": _openapi_safe_string(host),
+        "base_path_present": isinstance(base_path, str),
+        "schemes": [
+            scheme
+            for scheme in schemes
+            if isinstance(scheme, str) and len(scheme) <= 16
+        ]
+        if isinstance(schemes, list)
+        else [],
+    }
+    observations.append(
+        _profile_observation(
+            "openapi.server",
+            relative_path,
+            profile=profile,
+            format_name=format_name,
+            confidence=confidence,
+            metadata=metadata,
+            source_suffix=_openapi_source_suffix(
+                "server", json_pointer((*pointer_prefix, "host"))
+            ),
+        )
+    )
+    return observations
+
+
+def _openapi_path_operation_observations(
+    relative_path: str,
+    paths: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+    profile: str,
+    spec_metadata: dict[str, str],
+    pointer_prefix: tuple[str, ...],
+) -> list[RawObservation]:
+    observations: list[RawObservation] = []
+    for path_template in sorted(str(key) for key in paths):
+        path_item = paths.get(path_template)
+        if not isinstance(path_item, dict):
+            continue
+        path_pointer = json_pointer((*pointer_prefix, path_template))
+        observations.append(
+            _profile_observation(
+                "openapi.path",
+                relative_path,
+                profile=profile,
+                format_name=format_name,
+                confidence=confidence,
+                metadata={
+                    **spec_metadata,
+                    "path_template": _openapi_bounded_string(path_template),
+                    "method_count": sum(
+                        1
+                        for method in path_item
+                        if _normalized_key(str(method)) in OPENAPI_HTTP_METHODS
+                    ),
+                    "source_path_key": config_path_key(relative_path, path_pointer),
+                },
+                name=_openapi_bounded_string(path_template),
+                source_suffix=_openapi_source_suffix("path", path_pointer),
+            )
+        )
+        path_parameters = path_item.get("parameters")
+        for method_name in sorted(str(key) for key in path_item):
+            method = _normalized_key(method_name)
+            if method not in OPENAPI_HTTP_METHODS:
+                continue
+            operation = path_item.get(method_name)
+            if not isinstance(operation, dict):
+                continue
+            operation_pointer_segments = (*pointer_prefix, path_template, method_name)
+            operation_pointer = json_pointer(operation_pointer_segments)
+            operation_id = _openapi_safe_string(operation.get("operationId"))
+            observations.append(
+                _profile_observation(
+                    "openapi.operation",
+                    relative_path,
+                    profile=profile,
+                    format_name=format_name,
+                    confidence=confidence,
+                    metadata={
+                        **spec_metadata,
+                        "path_template": _openapi_bounded_string(path_template),
+                        "method": method.upper(),
+                        "operation_id": operation_id,
+                        "tags": _openapi_string_list(operation.get("tags")),
+                        **_openapi_text_metadata(operation.get("summary"), "summary"),
+                        **_openapi_text_metadata(
+                            operation.get("description"), "description"
+                        ),
+                        "source_path_key": config_path_key(relative_path, operation_pointer),
+                    },
+                    name=operation_id or f"{method.upper()} {path_template}",
+                    source_suffix=_openapi_source_suffix("operation", operation_pointer),
+                )
+            )
+            parameters = _openapi_parameters(operation, path_parameters)
+            if len(parameters) > OPENAPI_MAX_PARAMETERS_PER_OPERATION:
+                observations.append(
+                    _openapi_parse_error_observation(
+                        relative_path,
+                        format_name=format_name,
+                        error_kind="openapi-parameter-limit",
+                        message="OpenAPI parameter count exceeds OPENAPI1 limit",
+                    )
+                )
+            else:
+                for index, parameter in enumerate(parameters):
+                    observations.extend(
+                        _openapi_parameter_observation(
+                            relative_path,
+                            parameter,
+                            format_name=format_name,
+                            confidence=confidence,
+                            profile=profile,
+                            spec_metadata=spec_metadata,
+                            pointer_segments=(
+                                *operation_pointer_segments,
+                                "parameters",
+                                str(index),
+                            ),
+                        )
+                    )
+            observations.extend(
+                _openapi_request_body_observations(
+                    relative_path,
+                    operation,
+                    format_name=format_name,
+                    confidence=confidence,
+                    profile=profile,
+                    spec_metadata=spec_metadata,
+                    pointer_segments=operation_pointer_segments,
+                )
+            )
+            observations.extend(
+                _openapi_response_observations(
+                    relative_path,
+                    operation,
+                    format_name=format_name,
+                    confidence=confidence,
+                    profile=profile,
+                    spec_metadata=spec_metadata,
+                    pointer_segments=operation_pointer_segments,
+                )
+            )
+            observations.extend(
+                _openapi_tag_observations(
+                    relative_path,
+                    operation,
+                    format_name=format_name,
+                    confidence=confidence,
+                    profile=profile,
+                    spec_metadata=spec_metadata,
+                    pointer_segments=operation_pointer_segments,
+                )
+            )
+    return observations
+
+
+def _openapi_parameter_observation(
+    relative_path: str,
+    parameter: Any,
+    *,
+    format_name: str,
+    confidence: str,
+    profile: str,
+    spec_metadata: dict[str, str],
+    pointer_segments: tuple[str, ...],
+) -> list[RawObservation]:
+    if not isinstance(parameter, dict):
+        return []
+    pointer = json_pointer(pointer_segments)
+    return [
+        _profile_observation(
+            "openapi.parameter",
+            relative_path,
+            profile=profile,
+            format_name=format_name,
+            confidence=confidence,
+            metadata={
+                **spec_metadata,
+                "parameter_name": _openapi_safe_string(parameter.get("name")),
+                "parameter_in": _openapi_safe_string(parameter.get("in")),
+                "required": bool(parameter.get("required", False)),
+                "source_path_key": config_path_key(relative_path, pointer),
+            },
+            name=_openapi_safe_string(parameter.get("name")),
+            source_suffix=_openapi_source_suffix("parameter", pointer),
+        )
+    ]
+
+
+def _openapi_request_body_observations(
+    relative_path: str,
+    operation: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+    profile: str,
+    spec_metadata: dict[str, str],
+    pointer_segments: tuple[str, ...],
+) -> list[RawObservation]:
+    request_body = operation.get("requestBody")
+    if not isinstance(request_body, dict):
+        return []
+    pointer = json_pointer((*pointer_segments, "requestBody"))
+    return [
+        _profile_observation(
+            "openapi.request_body",
+            relative_path,
+            profile=profile,
+            format_name=format_name,
+            confidence=confidence,
+            metadata={
+                **spec_metadata,
+                "media_types": _openapi_media_types(request_body),
+                "source_path_key": config_path_key(relative_path, pointer),
+            },
+            source_suffix=_openapi_source_suffix("request-body", pointer),
+        )
+    ]
+
+
+def _openapi_response_observations(
+    relative_path: str,
+    operation: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+    profile: str,
+    spec_metadata: dict[str, str],
+    pointer_segments: tuple[str, ...],
+) -> list[RawObservation]:
+    responses = operation.get("responses")
+    if not isinstance(responses, dict):
+        return []
+    observations: list[RawObservation] = []
+    if len(responses) > OPENAPI_MAX_RESPONSES_PER_OPERATION:
+        return [
+            _openapi_parse_error_observation(
+                relative_path,
+                format_name=format_name,
+                error_kind="openapi-response-limit",
+                message="OpenAPI response count exceeds OPENAPI1 limit",
+            )
+        ]
+    for status_code in sorted(str(key) for key in responses):
+        response = responses.get(status_code)
+        if not isinstance(response, dict):
+            continue
+        pointer = json_pointer((*pointer_segments, "responses", status_code))
+        observations.append(
+            _profile_observation(
+                "openapi.response",
+                relative_path,
+                profile=profile,
+                format_name=format_name,
+                confidence=confidence,
+                metadata={
+                    **spec_metadata,
+                    "status_code": status_code,
+                    "media_types": _openapi_media_types(response),
+                    "description_present": isinstance(response.get("description"), str),
+                    "source_path_key": config_path_key(relative_path, pointer),
+                },
+                name=status_code,
+                source_suffix=_openapi_source_suffix("response", pointer),
+            )
+        )
+    return observations
+
+
+def _openapi_tag_observations(
+    relative_path: str,
+    operation: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+    profile: str,
+    spec_metadata: dict[str, str],
+    pointer_segments: tuple[str, ...],
+) -> list[RawObservation]:
+    observations: list[RawObservation] = []
+    for tag in _openapi_string_list(operation.get("tags")):
+        pointer = json_pointer((*pointer_segments, "tags", tag))
+        observations.append(
+            _profile_observation(
+                "openapi.tag",
+                relative_path,
+                profile=profile,
+                format_name=format_name,
+                confidence=confidence,
+                metadata={**spec_metadata, "tag_name": tag},
+                name=tag,
+                source_suffix=_openapi_source_suffix("tag", pointer),
+            )
+        )
+    return observations
+
+
+def _openapi_component_observations(
+    relative_path: str,
+    components: dict[str, dict[str, Any]],
+    *,
+    format_name: str,
+    confidence: str,
+    profile: str,
+    spec_metadata: dict[str, str],
+    pointer_prefix: tuple[str, ...],
+) -> list[RawObservation]:
+    observations: list[RawObservation] = []
+    for component_type in sorted(components):
+        entries = components[component_type]
+        if not isinstance(entries, dict):
+            continue
+        for component_name in sorted(str(key) for key in entries):
+            component = entries.get(component_name)
+            if not isinstance(component, dict):
+                continue
+            pointer_segments = (
+                (*pointer_prefix, component_type, component_name)
+                if spec_metadata["spec_family"] == "swagger2"
+                else (*pointer_prefix, "components", component_type, component_name)
+            )
+            pointer = json_pointer(pointer_segments)
+            metadata = {
+                **spec_metadata,
+                "component_type": component_type,
+                "component_name": _openapi_safe_string(component_name),
+                "source_path_key": config_path_key(relative_path, pointer),
+            }
+            observations.append(
+                _profile_observation(
+                    "openapi.component",
+                    relative_path,
+                    profile=profile,
+                    format_name=format_name,
+                    confidence=confidence,
+                    metadata=metadata,
+                    name=_openapi_safe_string(component_name),
+                    source_suffix=_openapi_source_suffix("component", pointer),
+                )
+            )
+            if component_type in ("schemas", "definitions"):
+                observations.append(
+                    _profile_observation(
+                        "openapi.schema",
+                        relative_path,
+                        profile=profile,
+                        format_name=format_name,
+                        confidence=confidence,
+                        metadata={
+                            **metadata,
+                            "schema_name": _openapi_safe_string(component_name),
+                            "schema_type": _openapi_safe_string(component.get("type")),
+                            "property_count": len(component.get("properties", {}))
+                            if isinstance(component.get("properties"), dict)
+                            else 0,
+                        },
+                        name=_openapi_safe_string(component_name),
+                        source_suffix=_openapi_source_suffix("schema", pointer),
+                    )
+                )
+            if component_type in ("securitySchemes", "securityDefinitions"):
+                observations.append(
+                    _profile_observation(
+                        "openapi.security_scheme",
+                        relative_path,
+                        profile=profile,
+                        format_name=format_name,
+                        confidence=confidence,
+                        metadata={
+                            **metadata,
+                            "scheme_name": _openapi_safe_string(component_name),
+                            "type": _openapi_safe_string(component.get("type")),
+                            "in": _openapi_safe_string(component.get("in")),
+                            "name_present": isinstance(component.get("name"), str),
+                            "scheme": _openapi_safe_string(component.get("scheme")),
+                            "bearer_format": _openapi_safe_string(
+                                component.get("bearerFormat")
+                            ),
+                            "oauth_flow_names": _openapi_oauth_flow_names(component),
+                            "scope_names": _openapi_scope_names(component),
+                        },
+                        name=_openapi_safe_string(component_name),
+                        source_suffix=_openapi_source_suffix("security", pointer),
+                    )
+                )
+    return observations
+
+
+def _openapi_reference_observations(
+    relative_path: str,
+    value: Any,
+    *,
+    format_name: str,
+    confidence: str,
+    profile: str,
+    spec_metadata: dict[str, str],
+    pointer_prefix: tuple[str, ...],
+) -> list[RawObservation]:
+    observations: list[RawObservation] = []
+    for pointer_segments, ref_value in _openapi_ref_values(value):
+        if len(observations) >= OPENAPI_MAX_REFERENCES:
+            observations.append(
+                _openapi_parse_error_observation(
+                    relative_path,
+                    format_name=format_name,
+                    error_kind="openapi-reference-limit",
+                    message="OpenAPI reference count exceeds OPENAPI1 limit",
+                )
+            )
+            break
+        pointer = json_pointer((*pointer_prefix, *pointer_segments))
+        metadata, target = _openapi_reference_metadata(
+            relative_path,
+            ref_value,
+            spec_metadata=spec_metadata,
+            source_pointer=pointer,
+        )
+        observations.append(
+            _profile_observation(
+                "openapi.reference",
+                relative_path,
+                profile=profile,
+                format_name=format_name,
+                confidence=confidence,
+                metadata=metadata,
+                target=target,
+                source_suffix=_openapi_source_suffix("reference", pointer),
+            )
+        )
+        if metadata.get("reference_scope") == "local_file" and target.startswith(
+            "unknown:file:"
+        ):
+            observations.append(
+                _openapi_parse_error_observation(
+                    relative_path,
+                    format_name=format_name,
+                    error_kind="openapi-local-ref-outside-root",
+                    message="OpenAPI local file reference is outside the repository root",
+                )
+            )
+    external_docs = value.get("externalDocs") if isinstance(value, dict) else None
+    if isinstance(external_docs, dict) and isinstance(external_docs.get("url"), str):
+        pointer = json_pointer((*pointer_prefix, "externalDocs", "url"))
+        metadata, target = _openapi_reference_metadata(
+            relative_path,
+            external_docs["url"],
+            spec_metadata=spec_metadata,
+            source_pointer=pointer,
+            reference_scope_override="external_docs",
+        )
+        observations.append(
+            _profile_observation(
+                "openapi.reference",
+                relative_path,
+                profile=profile,
+                format_name=format_name,
+                confidence=confidence,
+                metadata=metadata,
+                target=target,
+                source_suffix=_openapi_source_suffix("external-docs", pointer),
+            )
+        )
+    return observations
+
+
+def _openapi_example_and_redaction_observations(
+    relative_path: str,
+    value: Any,
+    *,
+    format_name: str,
+    confidence: str,
+    profile: str,
+    spec_metadata: dict[str, str],
+    pointer_prefix: tuple[str, ...],
+) -> list[RawObservation]:
+    observations: list[RawObservation] = []
+    example_count = 0
+    for pointer_segments, path_value in _openapi_walk(value):
+        pointer = json_pointer((*pointer_prefix, *pointer_segments))
+        key = pointer_segments[-1] if pointer_segments else ""
+        if _normalized_key(key) in OPENAPI_EXAMPLE_KEYS:
+            if example_count < OPENAPI_MAX_EXAMPLES:
+                observations.append(
+                    _profile_observation(
+                        "openapi.example",
+                        relative_path,
+                        profile=profile,
+                        format_name=format_name,
+                        confidence=confidence,
+                        metadata={
+                            **spec_metadata,
+                            "pointer": pointer,
+                            "value_type": _value_type(path_value),
+                            "value_shape": _value_shape(path_value),
+                            "value_sha256": _stable_value_sha256(path_value),
+                            "redacted": _openapi_pointer_is_redacted(
+                                pointer, path_value
+                            ),
+                        },
+                        source_suffix=_openapi_source_suffix("example", pointer),
+                    )
+                )
+                example_count += 1
+        if _openapi_pointer_is_redacted(pointer, path_value):
+            observations.append(
+                _profile_observation(
+                    "openapi.redaction",
+                    relative_path,
+                    profile=profile,
+                    format_name=format_name,
+                    confidence=confidence,
+                    metadata={
+                        **spec_metadata,
+                        "pointer": pointer,
+                        "value_type": _value_type(path_value),
+                        "value_sha256": _stable_value_sha256(path_value),
+                        "redaction_reason": _openapi_redaction_reason(
+                            pointer, path_value
+                        ),
+                    },
+                    source_suffix=_openapi_source_suffix("redaction", pointer),
+                )
+            )
+    return observations
+
+
+def _openapi_components(
+    value: dict[str, Any],
+    spec_family: str,
+) -> dict[str, dict[str, Any]]:
+    if spec_family == "swagger2":
+        components: dict[str, dict[str, Any]] = {}
+        definitions = value.get("definitions")
+        if isinstance(definitions, dict):
+            components["definitions"] = definitions
+        security_definitions = value.get("securityDefinitions")
+        if isinstance(security_definitions, dict):
+            components["securityDefinitions"] = security_definitions
+        return components
+    raw_components = value.get("components")
+    if not isinstance(raw_components, dict):
+        return {}
+    components = {}
+    for key in ("schemas", "responses", "parameters", "securitySchemes"):
+        item = raw_components.get(key)
+        if isinstance(item, dict):
+            components[key] = item
+    return components
+
+
+def _openapi_parameters(
+    operation: dict[str, Any],
+    path_parameters: Any,
+) -> list[Any]:
+    parameters: list[Any] = []
+    if isinstance(path_parameters, list):
+        parameters.extend(path_parameters)
+    operation_parameters = operation.get("parameters")
+    if isinstance(operation_parameters, list):
+        parameters.extend(operation_parameters)
+    return parameters
+
+
+def _openapi_media_types(value: dict[str, Any]) -> list[str]:
+    content = value.get("content")
+    if not isinstance(content, dict):
+        return []
+    return sorted(
+        media_type
+        for media_type in (str(key) for key in content)
+        if len(media_type) <= 120 and "/" in media_type
+    )
+
+
+def _openapi_operation_count(paths: dict[str, Any]) -> int:
+    count = 0
+    for path_item in paths.values():
+        if not isinstance(path_item, dict):
+            continue
+        count += sum(
+            1
+            for method in path_item
+            if _normalized_key(str(method)) in OPENAPI_HTTP_METHODS
+        )
+    return count
+
+
+def _openapi_server_count(value: dict[str, Any], spec_family: str) -> int:
+    if spec_family == "openapi3":
+        servers = value.get("servers")
+        return len(servers) if isinstance(servers, list) else 0
+    return 1 if value.get("host") is not None or value.get("basePath") is not None else 0
+
+
+def _openapi_ref_values(value: Any) -> tuple[tuple[tuple[str, ...], str], ...]:
+    refs: list[tuple[tuple[str, ...], str]] = []
+    for pointer_segments, path_value in _openapi_walk(value):
+        if pointer_segments and pointer_segments[-1] == "$ref" and isinstance(path_value, str):
+            refs.append((pointer_segments, path_value))
+    return tuple(refs)
+
+
+def _openapi_walk(value: Any, pointer_segments: tuple[str, ...] = ()) -> tuple[tuple[tuple[str, ...], Any], ...]:
+    items: list[tuple[tuple[str, ...], Any]] = [(pointer_segments, value)]
+    if isinstance(value, dict):
+        for key, item in value.items():
+            items.extend(_openapi_walk(item, (*pointer_segments, str(key))))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            items.extend(_openapi_walk(item, (*pointer_segments, str(index))))
+    return tuple(items)
+
+
+def _openapi_reference_metadata(
+    relative_path: str,
+    ref_value: str,
+    *,
+    spec_metadata: dict[str, str],
+    source_pointer: str,
+    reference_scope_override: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    credentialed = _url_has_credentials(ref_value)
+    scope = reference_scope_override or _openapi_reference_scope(ref_value)
+    target: str
+    if scope == "internal" and ref_value.startswith("#/"):
+        target = config_path_key(relative_path, ref_value[1:])
+    elif scope == "local_file":
+        path_part = ref_value.split("#", 1)[0]
+        target = _file_reference(relative_path, path_part, redacted=False)["target"]
+    elif _is_url(ref_value) and not credentialed:
+        target = external_url_key(ref_value)
+    elif _is_url(ref_value):
+        target = external_key("url", "credentialed-openapi-reference")
+    else:
+        target = unknown_key("openapi.reference", "unsupported-ref")
+    local_ref_outside_root = scope == "local_file" and target.startswith(
+        "unknown:file:"
+    )
+    metadata = {
+        **spec_metadata,
+        "pointer": source_pointer,
+        "reference_scope": scope,
+        "not_fetched": True,
+        "redacted": credentialed or local_ref_outside_root,
+        "target_kind": target.split(":", 1)[0],
+        "ref_summary": "<redacted-url>"
+        if credentialed
+        else "<redacted-local-ref>"
+        if local_ref_outside_root
+        else _openapi_bounded_string(ref_value),
+        "ref_sha256": _stable_text_sha256(ref_value),
+    }
+    if credentialed:
+        metadata["redaction_reason"] = "credentialed-url"
+    if local_ref_outside_root:
+        metadata["redaction_reason"] = "local-ref-outside-root"
+    return metadata, target
+
+
+def _openapi_reference_scope(ref_value: str) -> str:
+    if ref_value.startswith("#/"):
+        return "internal"
+    if _is_url(ref_value):
+        return "remote"
+    return "local_file"
+
+
+def _openapi_oauth_flow_names(value: dict[str, Any]) -> list[str]:
+    flows = value.get("flows")
+    if not isinstance(flows, dict):
+        return []
+    return sorted(
+        str(name)
+        for name in flows
+        if len(str(name)) <= OPENAPI_MAX_METADATA_STRING
+    )
+
+
+def _openapi_scope_names(value: dict[str, Any]) -> list[str]:
+    scope_names: set[str] = set()
+    flows = value.get("flows")
+    if not isinstance(flows, dict):
+        return []
+    for flow in flows.values():
+        if not isinstance(flow, dict):
+            continue
+        scopes = flow.get("scopes")
+        if isinstance(scopes, dict):
+            scope_names.update(
+                str(name)
+                for name in scopes
+                if len(str(name)) <= OPENAPI_MAX_METADATA_STRING
+                and not _openapi_sensitive_key(str(name))
+            )
+    return sorted(scope_names)
+
+
+def _openapi_text_metadata(value: Any, key: str) -> dict[str, Any]:
+    if not isinstance(value, str):
+        return {f"{key}_present": False}
+    return {
+        f"{key}_present": True,
+        f"{key}_length": len(value),
+        f"{key}_sha256": _stable_text_sha256(value),
+    }
+
+
+def _openapi_url_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, str):
+        return {"url_present": False}
+    parsed = urlsplit(value)
+    credentialed = _url_has_credentials(value)
+    metadata: dict[str, Any] = {
+        "url_present": True,
+        "url_length": len(value),
+        "url_sha256": _stable_text_sha256(value),
+        "redacted": credentialed,
+    }
+    if parsed.scheme and len(parsed.scheme) <= 16:
+        metadata["scheme"] = parsed.scheme
+    if parsed.hostname and not credentialed:
+        metadata["host"] = _openapi_bounded_string(parsed.hostname)
+    if credentialed:
+        metadata["redaction_reason"] = "credentialed-url"
+    return metadata
+
+
+def _openapi_safe_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if _openapi_sensitive_key(value) or _looks_like_secret_scalar(value):
+        return None
+    return _openapi_bounded_string(value)
+
+
+def _openapi_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    strings: list[str] = []
+    for item in value:
+        safe = _openapi_safe_string(item)
+        if safe is not None:
+            strings.append(safe)
+    return strings[:32]
+
+
+def _openapi_bounded_string(value: str) -> str:
+    if len(value) <= OPENAPI_MAX_METADATA_STRING:
+        return value
+    return f"<string:{len(value)}>"
+
+
+def _openapi_pointer_is_redacted(pointer: str, value: Any) -> bool:
+    segments = _pointer_segments(pointer)
+    normalized_segments = tuple(_normalized_key(segment) for segment in segments)
+    if (
+        normalized_segments
+        and normalized_segments[-1] == "$ref"
+        and isinstance(value, str)
+        and value.startswith("../")
+    ):
+        return True
+    if any(_openapi_sensitive_key(segment) for segment in normalized_segments):
+        return True
+    if any(segment in OPENAPI_TEXT_KEYS for segment in normalized_segments):
+        return True
+    if any(segment in OPENAPI_EXAMPLE_KEYS for segment in normalized_segments):
+        return True
+    if isinstance(value, str) and _url_has_credentials(value):
+        return True
+    return _looks_like_secret_scalar(value)
+
+
+def _openapi_redaction_reason(pointer: str, value: Any) -> str:
+    if isinstance(value, str) and _url_has_credentials(value):
+        return "credentialed-url"
+    segments = tuple(_normalized_key(segment) for segment in _pointer_segments(pointer))
+    if (
+        segments
+        and segments[-1] == "$ref"
+        and isinstance(value, str)
+        and value.startswith("../")
+    ):
+        return "openapi-ref-summary-only"
+    if any(segment in OPENAPI_TEXT_KEYS for segment in segments):
+        return "openapi-text-summary-only"
+    if any(segment in OPENAPI_EXAMPLE_KEYS for segment in segments):
+        return "openapi-example-summary-only"
+    return "secret-prone-openapi-field"
+
+
+def _openapi_sensitive_key(value: str) -> bool:
+    normalized = _normalized_key(value)
+    squashed = re.sub(r"[^0-9a-z]", "", normalized)
+    markers = tuple(SECRET_PRONE_KEYS) + (
+        "key",
+        "authorization",
+        "jwt",
+        "database_url",
+        "webhook",
+        "oauth",
+        "openid",
+        "x_api_key",
+    )
+    return any(marker.replace("_", "") in squashed for marker in markers)
+
+
+def _url_has_credentials(value: str) -> bool:
+    parsed = urlsplit(value)
+    return parsed.username is not None or parsed.password is not None
+
+
+def _stable_text_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _stable_value_sha256(value: Any) -> str:
+    try:
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    except TypeError:
+        encoded = repr(value)
+    return _stable_text_sha256(encoded)
+
+
+def _openapi_source_suffix(kind: str, pointer: str) -> str:
+    return f"openapi-{kind}:{_stable_text_sha256(pointer)[:16]}"
+
+
+def _openapi_parse_error_observation(
+    relative_path: str,
+    *,
+    format_name: str,
+    error_kind: str,
+    message: str,
+    start_line: int | None = None,
+    document_index: int | None = None,
+) -> RawObservation:
+    metadata: dict[str, Any] = {
+        "format": format_name,
+        "profile": "openapi" if format_name == YAML_FORMAT else "openapi_json",
+        "error_kind": error_kind,
+        "message_summary": _safe_error_message(None, message),
+        "recovered": False,
+        "raw_profile_only": True,
+    }
+    if document_index is not None:
+        metadata["document_index"] = document_index
+    if start_line is not None:
+        metadata["line_number"] = start_line
+    return RawObservation(
+        kind="openapi.parse_error",
+        source_id=(
+            f"{relative_path}#openapi-parse-error:"
+            f"{_stable_text_sha256(error_kind + ':' + message)[:16]}"
+        ),
+        path=relative_path,
+        start_line=start_line,
+        end_line=start_line,
+        confidence="unknown",
+        extractor=EXTRACTOR_NAME,
+        extractor_version=__version__,
+        metadata=metadata,
     )
 
 
@@ -2529,6 +3743,27 @@ def _is_openapi_document(value: Any) -> bool:
     )
 
 
+def _is_openapi_file_name(relative_path: str) -> bool:
+    name = PurePosixPath(relative_path).name.lower()
+    return name in (
+        "openapi.json",
+        "openapi.yaml",
+        "openapi.yml",
+        "swagger.json",
+        "swagger.yaml",
+        "swagger.yml",
+    ) or name.endswith(
+        (
+            ".openapi.json",
+            ".openapi.yaml",
+            ".openapi.yml",
+            ".swagger.json",
+            ".swagger.yaml",
+            ".swagger.yml",
+        )
+    )
+
+
 def _is_kubernetes_document(value: Any) -> bool:
     return (
         isinstance(value, dict)
@@ -2646,6 +3881,8 @@ def _yaml_pointer_is_redacted(
     if profile == "github_actions" and "secrets" in normalized_segments:
         return True
     if profile == "grafana" and "securejsondata" in normalized_segments:
+        return True
+    if profile == "openapi" and _openapi_pointer_is_redacted(pointer, path_value):
         return True
     return _looks_like_secret_scalar(path_value)
 
