@@ -34,6 +34,7 @@ from repomap_kg.storage import (
     RubySummaryRecord,
     StorageSchemaError,
     StorageSummaryRecord,
+    TerraformSummaryRecord,
     identity_metadata_hash,
 )
 
@@ -137,6 +138,7 @@ class CliUnitTests(unittest.TestCase):
             ("ruby-summary", ["--root-path", "/tmp/fixture"]),
             ("js-summary", ["--root-path", "/tmp/fixture"]),
             ("js-framework-summary", ["--root-path", "/tmp/fixture"]),
+            ("terraform-summary", ["--root-path", "/tmp/fixture"]),
             ("email-summary", ["--root-path", "/tmp/fixture"]),
         )
 
@@ -4159,6 +4161,89 @@ class CliUnitTests(unittest.TestCase):
             stderr.getvalue(),
         )
 
+    def test_storage_terraform_summary_prints_json_record(self):
+        summary = terraform_summary_fixture()
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_terraform_summary",
+            return_value=summary,
+        ) as query:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "terraform-summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--pg-database",
+                        "postgres",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["root_path"], "/tmp/fixture")
+        self.assertEqual(payload["terraform_observations"], 120)
+        self.assertEqual(payload["file_families"]["tf"], 5)
+        self.assertEqual(payload["terraform"]["resources"], 12)
+        self.assertEqual(payload["references"]["remote_refs_not_fetched"], 2)
+        self.assertEqual(payload["tfvars"]["variables"], 8)
+        self.assertFalse(payload["tfvars"]["literal_values_exposed"])
+        self.assertTrue(payload["safety"]["no_terraform_cli"])
+        self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
+        self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+
+    def test_storage_terraform_summary_prints_table_record(self):
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_terraform_summary",
+            return_value=terraform_summary_fixture(),
+        ):
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "terraform-summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        table = stdout.getvalue()
+        self.assertIn("terraform_observations", table)
+        self.assertIn("resources=12", table)
+        self.assertIn("literal_values_exposed=false", table)
+        self.assertIn("no_terraform_cli=true", table)
+
+    def test_storage_terraform_summary_reports_query_errors(self):
+        stderr = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_terraform_summary",
+            side_effect=StorageSchemaError(
+                "psql did not return terraform summary"
+            ),
+        ):
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "storage",
+                        "terraform-summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn(
+            "psql did not return terraform summary",
+            stderr.getvalue(),
+        )
+
     def test_storage_email_summary_prints_json_record(self):
         summary = EmailSummaryRecord(
             root_path="/tmp/fixture",
@@ -4681,6 +4766,83 @@ def js_framework_summary_fixture() -> JSFrameworkSummaryRecord:
         safety={
             "no_execution": True,
             "no_fetch": True,
+            "raw_profile_only": True,
+            "no_new_canonical_namespaces": True,
+        },
+    )
+
+
+def terraform_summary_fixture() -> TerraformSummaryRecord:
+    return TerraformSummaryRecord(
+        root_path="/tmp/fixture",
+        repository_name="fixture",
+        terraform_observations=120,
+        terraform_files=8,
+        file_families={
+            "tf": 5,
+            "tfvars": 1,
+            "terraform.tfvars": 1,
+            "auto.tfvars": 1,
+        },
+        terraform={
+            "blocks": 35,
+            "providers": 2,
+            "required_providers": 2,
+            "required_versions": 1,
+            "backends": 1,
+            "resources": 12,
+            "data_sources": 2,
+            "modules": 3,
+            "variables": 10,
+            "outputs": 4,
+            "locals": 5,
+            "moved": 1,
+            "imports": 1,
+            "checks": 1,
+            "removed": 1,
+        },
+        references={
+            "total": 20,
+            "provider_sources": 2,
+            "version_constraints": 3,
+            "module_sources": 3,
+            "local_module_refs": 1,
+            "remote_refs_not_fetched": 2,
+            "depends_on": 4,
+            "provider_aliases": 1,
+            "repo_escape_diagnostics": 1,
+        },
+        tfvars={
+            "files": 3,
+            "variables": 8,
+            "literal_values_exposed": False,
+        },
+        redactions={
+            "tfvars_values": 8,
+            "secret_like_fields": 3,
+            "credentialed_urls": 1,
+            "import_ids": 1,
+            "backend_values": 1,
+        },
+        diagnostics={
+            "parse_errors": 1,
+            "limit_overflows": 1,
+            "malformed_hcl": 1,
+        },
+        generic_config={
+            "config_documents": 0,
+            "config_paths": 0,
+            "config_references": 0,
+            "file_nodes": 8,
+        },
+        safety={
+            "no_execution": True,
+            "no_fetch": True,
+            "no_terraform_cli": True,
+            "no_provider_download": True,
+            "no_module_download": True,
+            "no_state_access": True,
+            "tfvars_redacted": True,
             "raw_profile_only": True,
             "no_new_canonical_namespaces": True,
         },

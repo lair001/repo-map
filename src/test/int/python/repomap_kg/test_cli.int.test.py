@@ -833,10 +833,17 @@ class CliIntegrationTests(unittest.TestCase):
         ]
         self.assertEqual(
             [observation["path"] for observation in terraform_files],
-            ["broken.tf", "dev.auto.tfvars", "main.tf", "terraform.tfvars"],
+            [
+                "broken.tf",
+                "dev.auto.tfvars",
+                "main.tf",
+                "prod.tfvars",
+                "terraform.tfvars",
+            ],
         )
         self.assertNotIn("fake-tfhcl-provider-secret", stdout)
         self.assertNotIn("fake-tfhcl-module-secret", stdout)
+        self.assertNotIn("fake-tfhcl-prod-tfvars-secret", stdout)
         self.assertNotIn("fake-tfhcl-tfvars-secret", stdout)
         self.assertNotIn("fake-tfhcl-import-secret", stdout)
 

@@ -299,6 +299,7 @@ class DiscoveryUnitTests(unittest.TestCase):
         }
 
         self.assertEqual(languages["main.tf"], "terraform")
+        self.assertEqual(languages["prod.tfvars"], "terraform")
         self.assertEqual(languages["terraform.tfvars"], "terraform")
         self.assertEqual(languages["dev.auto.tfvars"], "terraform")
         self.assertIn("terraform.file", kinds)
@@ -313,6 +314,7 @@ class DiscoveryUnitTests(unittest.TestCase):
         self.assertIn("terraform.parse_error", kinds)
         self.assertNotIn("fake-tfhcl-provider-secret", payload)
         self.assertNotIn("fake-tfhcl-module-secret", payload)
+        self.assertNotIn("fake-tfhcl-prod-tfvars-secret", payload)
         self.assertNotIn("fake-tfhcl-tfvars-secret", payload)
         self.assertNotIn("fake-tfhcl-import-secret", payload)
 
@@ -324,6 +326,8 @@ class DiscoveryUnitTests(unittest.TestCase):
         by_path = {file_info.path: file_info for file_info in file_infos}
         self.assertEqual(by_path["main.tf"].language, "terraform")
         self.assertEqual(by_path["main.tf"].role, "config")
+        self.assertEqual(by_path["prod.tfvars"].language, "terraform")
+        self.assertEqual(by_path["prod.tfvars"].role, "config")
         self.assertEqual(by_path["terraform.tfvars"].language, "terraform")
         self.assertEqual(by_path["terraform.tfvars"].role, "config")
         self.assertEqual(by_path["dev.auto.tfvars"].language, "terraform")

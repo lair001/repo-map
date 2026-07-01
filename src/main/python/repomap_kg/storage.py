@@ -555,6 +555,25 @@ class OpenAPISummaryRecord:
 
 
 @dataclass(frozen=True)
+class TerraformSummaryRecord:
+    root_path: str
+    repository_name: str | None
+    terraform_observations: int
+    terraform_files: int
+    file_families: dict[str, int]
+    terraform: dict[str, int]
+    references: dict[str, int]
+    tfvars: dict[str, int | bool]
+    redactions: dict[str, int]
+    diagnostics: dict[str, int]
+    generic_config: dict[str, int]
+    safety: dict[str, bool]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class EmailSummaryRecord:
     root_path: str
     repository_name: str | None
@@ -1360,6 +1379,21 @@ def query_openapi_summary(
     )
     return openapi_summary_from_storage_payload(
         parse_psql_json(result.stdout, "openapi summary")
+    )
+
+
+def query_terraform_summary(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    psql_command: str = "psql",
+) -> TerraformSummaryRecord:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_terraform_summary_query_sql(root_path),
+    )
+    return terraform_summary_from_storage_payload(
+        parse_psql_json(result.stdout, "terraform summary")
     )
 
 
@@ -3013,6 +3047,170 @@ def build_openapi_summary_query_sql(root_path: str) -> str:
         "'no_fetch', true, "
         "'no_api_calls', true, "
         "'no_tool_execution', true, "
+        "'raw_profile_only', true, "
+        "'no_new_canonical_namespaces', true)"
+        ")::text;"
+    )
+
+
+def build_terraform_summary_query_sql(root_path: str) -> str:
+    quoted_root = sql_literal(root_path)
+    return (
+        "WITH repo AS ("
+        "SELECT id, name, root_path FROM repositories "
+        f"WHERE repositories.root_path = {quoted_root}"
+        "), "
+        "raw AS ("
+        "SELECT raw_observations.* FROM raw_observations "
+        "JOIN repo ON repo.id = raw_observations.repository_id"
+        "), "
+        "terraform_raw AS ("
+        "SELECT * FROM raw WHERE kind LIKE 'terraform.%'"
+        "), "
+        "terraform_files AS ("
+        "SELECT * FROM terraform_raw WHERE kind = 'terraform.file'"
+        "), "
+        "terraform_refs AS ("
+        "SELECT * FROM terraform_raw WHERE kind = 'terraform.reference'"
+        "), "
+        "terraform_redactions AS ("
+        "SELECT * FROM terraform_raw WHERE kind = 'terraform.redaction'"
+        "), "
+        "canonical_config AS ("
+        "SELECT canonical_nodes.* FROM canonical_nodes "
+        "JOIN repo ON repo.id = canonical_nodes.repository_id "
+        "WHERE canonical_nodes.graph_key_version = 1 "
+        "AND canonical_nodes.kind IN ('config.document', 'config.path')"
+        ") "
+        "SELECT json_build_object("
+        f"'root_path', {quoted_root}, "
+        "'repository_name', (SELECT name FROM repo), "
+        "'terraform_observations', (SELECT COUNT(*) FROM terraform_raw), "
+        "'terraform_files', (SELECT COUNT(*) FROM terraform_files), "
+        "'file_families', json_build_object("
+        "'tf', (SELECT COUNT(*) FROM terraform_files "
+        "WHERE payload_json->'metadata'->>'file_family' = 'tf'), "
+        "'tfvars', (SELECT COUNT(*) FROM terraform_files "
+        "WHERE payload_json->'metadata'->>'file_family' = 'tfvars' "
+        "AND payload_json->>'path' NOT LIKE '%/terraform.tfvars' "
+        "AND payload_json->>'path' <> 'terraform.tfvars' "
+        "AND payload_json->>'path' NOT LIKE '%.auto.tfvars'), "
+        "'terraform.tfvars', (SELECT COUNT(*) FROM terraform_files "
+        "WHERE payload_json->>'path' = 'terraform.tfvars' "
+        "OR payload_json->>'path' LIKE '%/terraform.tfvars'), "
+        "'auto.tfvars', (SELECT COUNT(*) FROM terraform_files "
+        "WHERE payload_json->>'path' LIKE '%.auto.tfvars')), "
+        "'terraform', json_build_object("
+        "'blocks', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.block'), "
+        "'providers', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.provider'), "
+        "'required_providers', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.required_provider'), "
+        "'required_versions', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.required_version'), "
+        "'backends', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.backend'), "
+        "'resources', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.resource'), "
+        "'data_sources', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.data_source'), "
+        "'modules', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.module'), "
+        "'variables', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.variable'), "
+        "'outputs', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.output'), "
+        "'locals', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.local'), "
+        "'moved', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.moved'), "
+        "'imports', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.import'), "
+        "'checks', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.check'), "
+        "'removed', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.removed')), "
+        "'references', json_build_object("
+        "'total', (SELECT COUNT(*) FROM terraform_refs), "
+        "'provider_sources', (SELECT COUNT(*) FROM terraform_refs "
+        "WHERE payload_json->'metadata'->>'reference_kind' = 'provider_source'), "
+        "'version_constraints', (SELECT COUNT(*) FROM terraform_refs "
+        "WHERE payload_json->'metadata'->>'reference_kind' = 'required_version') "
+        "+ (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.required_provider' "
+        "AND payload_json->'metadata'->>'version_constraint' IS NOT NULL), "
+        "'module_sources', (SELECT COUNT(*) FROM terraform_refs "
+        "WHERE payload_json->'metadata'->>'reference_kind' IN ("
+        "'module_source', 'module_source_local')), "
+        "'local_module_refs', (SELECT COUNT(*) FROM terraform_refs "
+        "WHERE payload_json->'metadata'->>'reference_kind' = 'module_source_local'), "
+        "'remote_refs_not_fetched', (SELECT COUNT(*) FROM terraform_refs "
+        "WHERE COALESCE((payload_json->'metadata'->>'not_fetched')::boolean, false) "
+        "AND payload_json->'metadata'->>'reference_kind' <> 'module_source_local'), "
+        "'depends_on', (SELECT COUNT(*) FROM terraform_refs "
+        "WHERE payload_json->'metadata'->>'reference_kind' = 'depends_on'), "
+        "'provider_aliases', (SELECT COUNT(*) FROM terraform_refs "
+        "WHERE payload_json->'metadata'->>'reference_kind' = 'provider_alias'), "
+        "'repo_escape_diagnostics', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.parse_error' "
+        "AND payload_json->'metadata'->>'error_kind' IN ("
+        "'terraform-local-path-outside-root', 'terraform-repo-escape'))), "
+        "'tfvars', json_build_object("
+        "'files', (SELECT COUNT(*) FROM terraform_files "
+        "WHERE payload_json->'metadata'->>'file_family' = 'tfvars'), "
+        "'variables', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.variable' "
+        "AND payload_json->'metadata'->>'profile' = 'terraform_tfvars'), "
+        "'literal_values_exposed', false), "
+        "'redactions', json_build_object("
+        "'tfvars_values', (SELECT COUNT(*) FROM terraform_redactions "
+        "WHERE payload_json->'metadata'->>'redaction_reason' = "
+        "'tfvars-sensitive-by-default'), "
+        "'secret_like_fields', (SELECT COUNT(*) FROM terraform_redactions "
+        "WHERE payload_json->'metadata'->>'redaction_reason' IN ("
+        "'secret-prone-terraform-attribute', "
+        "'secret-prone-terraform-local', "
+        "'secret-prone-key')), "
+        "'credentialed_urls', (SELECT COUNT(*) FROM terraform_redactions "
+        "WHERE payload_json->'metadata'->>'redaction_reason' IN ("
+        "'credentialed-terraform-url', "
+        "'credentialed-terraform-module-source')), "
+        "'import_ids', (SELECT COUNT(*) FROM terraform_redactions "
+        "WHERE payload_json->'metadata'->>'redaction_reason' = "
+        "'terraform-import-id-sensitive-by-default'), "
+        "'backend_values', (SELECT COUNT(*) FROM terraform_redactions "
+        "WHERE payload_json->'metadata'->>'redaction_reason' = "
+        "'secret-prone-terraform-attribute' "
+        "AND payload_json->'metadata'->>'field_name' IN ("
+        "'access_key', 'secret_key', 'token', 'password'))), "
+        "'diagnostics', json_build_object("
+        "'parse_errors', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.parse_error'), "
+        "'limit_overflows', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.parse_error' "
+        "AND payload_json->'metadata'->>'error_kind' LIKE '%limit%'), "
+        "'malformed_hcl', (SELECT COUNT(*) FROM terraform_raw "
+        "WHERE kind = 'terraform.parse_error' "
+        "AND payload_json->'metadata'->>'error_kind' NOT LIKE '%limit%')), "
+        "'generic_config', json_build_object("
+        "'config_documents', (SELECT COUNT(*) FROM canonical_config "
+        "WHERE kind = 'config.document'), "
+        "'config_paths', (SELECT COUNT(*) FROM canonical_config "
+        "WHERE kind = 'config.path'), "
+        "'config_references', (SELECT COUNT(*) FROM raw "
+        "WHERE kind = 'config.reference'), "
+        "'file_nodes', (SELECT COUNT(*) FROM raw "
+        "WHERE kind = 'file' "
+        "AND payload_json->'metadata'->>'language' = 'terraform')), "
+        "'safety', json_build_object("
+        "'no_execution', true, "
+        "'no_fetch', true, "
+        "'no_terraform_cli', true, "
+        "'no_provider_download', true, "
+        "'no_module_download', true, "
+        "'no_state_access', true, "
+        "'tfvars_redacted', true, "
         "'raw_profile_only', true, "
         "'no_new_canonical_namespaces', true)"
         ")::text;"
@@ -5440,6 +5638,125 @@ def openapi_summary_from_storage_payload(payload: Any) -> OpenAPISummaryRecord:
     )
 
 
+def terraform_summary_from_storage_payload(payload: Any) -> TerraformSummaryRecord:
+    label = "terraform summary"
+    if not isinstance(payload, dict):
+        raise StorageSchemaError(f"psql returned a malformed {label}")
+    tfvars_payload = payload_json_object(payload, "tfvars", label=label)
+    tfvars = {
+        "files": payload_int(tfvars_payload, "files", label=label),
+        "variables": payload_int(tfvars_payload, "variables", label=label),
+        "literal_values_exposed": payload_bool(
+            tfvars_payload,
+            "literal_values_exposed",
+            label=label,
+        ),
+    }
+    return TerraformSummaryRecord(
+        root_path=payload_text(payload, "root_path", label=label),
+        repository_name=payload_optional_text(
+            payload,
+            "repository_name",
+            label=label,
+        ),
+        terraform_observations=payload_int(
+            payload,
+            "terraform_observations",
+            label=label,
+        ),
+        terraform_files=payload_int(
+            payload,
+            "terraform_files",
+            label=label,
+        ),
+        file_families=payload_required_count_map(
+            payload,
+            "file_families",
+            ("tf", "tfvars", "terraform.tfvars", "auto.tfvars"),
+            label=label,
+        ),
+        terraform=payload_required_count_map(
+            payload,
+            "terraform",
+            (
+                "blocks",
+                "providers",
+                "required_providers",
+                "required_versions",
+                "backends",
+                "resources",
+                "data_sources",
+                "modules",
+                "variables",
+                "outputs",
+                "locals",
+                "moved",
+                "imports",
+                "checks",
+                "removed",
+            ),
+            label=label,
+        ),
+        references=payload_required_count_map(
+            payload,
+            "references",
+            (
+                "total",
+                "provider_sources",
+                "version_constraints",
+                "module_sources",
+                "local_module_refs",
+                "remote_refs_not_fetched",
+                "depends_on",
+                "provider_aliases",
+                "repo_escape_diagnostics",
+            ),
+            label=label,
+        ),
+        tfvars=tfvars,
+        redactions=payload_required_count_map(
+            payload,
+            "redactions",
+            (
+                "tfvars_values",
+                "secret_like_fields",
+                "credentialed_urls",
+                "import_ids",
+                "backend_values",
+            ),
+            label=label,
+        ),
+        diagnostics=payload_required_count_map(
+            payload,
+            "diagnostics",
+            ("parse_errors", "limit_overflows", "malformed_hcl"),
+            label=label,
+        ),
+        generic_config=payload_required_count_map(
+            payload,
+            "generic_config",
+            ("config_documents", "config_paths", "config_references", "file_nodes"),
+            label=label,
+        ),
+        safety=payload_required_bool_map(
+            payload,
+            "safety",
+            (
+                "no_execution",
+                "no_fetch",
+                "no_terraform_cli",
+                "no_provider_download",
+                "no_module_download",
+                "no_state_access",
+                "tfvars_redacted",
+                "raw_profile_only",
+                "no_new_canonical_namespaces",
+            ),
+            label=label,
+        ),
+    )
+
+
 def email_summary_from_storage_payload(payload: Any) -> EmailSummaryRecord:
     if not isinstance(payload, dict):
         raise StorageSchemaError("psql returned a malformed email summary")
@@ -5879,6 +6196,10 @@ def js_framework_summary_to_jsonable(
 
 
 def openapi_summary_to_jsonable(record: OpenAPISummaryRecord) -> dict[str, Any]:
+    return record.to_dict()
+
+
+def terraform_summary_to_jsonable(record: TerraformSummaryRecord) -> dict[str, Any]:
     return record.to_dict()
 
 
@@ -6416,6 +6737,45 @@ def format_openapi_summary_table(record: OpenAPISummaryRecord) -> str:
         "openapi",
         "methods",
         "references",
+        "redactions",
+        "diagnostics",
+        "generic_config",
+        "safety",
+    )
+    rendered_row = {key: render_table_value(row[key]) for key in columns}
+    widths = {key: max(len(key), len(rendered_row[key])) for key in columns}
+    return "\n".join(
+        [
+            format_table_row(dict(zip(columns, columns, strict=True)), columns, widths),
+            format_table_row(rendered_row, columns, widths),
+        ]
+    )
+
+
+def format_terraform_summary_table(record: TerraformSummaryRecord) -> str:
+    row = {
+        "root_path": record.root_path,
+        "repository_name": record.repository_name,
+        "terraform_observations": record.terraform_observations,
+        "terraform_files": record.terraform_files,
+        "file_families": format_count_summary(record.file_families),
+        "terraform": format_count_summary(record.terraform),
+        "references": format_count_summary(record.references),
+        "tfvars": format_bool_summary(record.tfvars),
+        "redactions": format_count_summary(record.redactions),
+        "diagnostics": format_count_summary(record.diagnostics),
+        "generic_config": format_count_summary(record.generic_config),
+        "safety": format_bool_summary(record.safety),
+    }
+    columns = (
+        "root_path",
+        "repository_name",
+        "terraform_observations",
+        "terraform_files",
+        "file_families",
+        "terraform",
+        "references",
+        "tfvars",
         "redactions",
         "diagnostics",
         "generic_config",
