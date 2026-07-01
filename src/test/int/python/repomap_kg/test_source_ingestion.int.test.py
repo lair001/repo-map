@@ -20,6 +20,13 @@ from repomap_kg.bulk_ingestion import (
     import_bulk_source,
     load_bulk_source_config,
 )
+from repomap_kg.github_api_ingestion import (
+    FixtureGitHubApiTransport,
+    GitHubApiPolicyError,
+    acquire_github_api_source,
+    build_github_api_plan_from_config,
+    load_github_api_source_config,
+)
 from repomap_kg.source_ingestion import (
     FeedFetchResponse,
     SourceAcquisitionError,
@@ -135,6 +142,89 @@ class SourceIngestionIntegrationTests(unittest.TestCase):
         self.assertNotIn(str(root), summary_payload)
         self.assertNotIn("fixture-secret-value", summary_payload)
         self.assertIn("fixture-secret-value", source_text)
+
+    def test_github_api_fixture_policy_plan_and_fail_closed_configs(self):
+        config = load_github_api_source_config(
+            github_api_fixture_root() / "readonly_public_repo" / "github-source.toml"
+        )
+        manifest = build_github_api_plan_from_config(
+            github_api_fixture_root() / "readonly_public_repo" / "github-source.toml"
+        )
+
+        self.assertEqual(config.source_id, "github-public-fixture")
+        self.assertEqual(config.source_type, "api.rest")
+        self.assertEqual(config.api_source_class, "api.github.repository")
+        self.assertEqual(config.provider_name, "GitHub")
+        self.assertEqual(config.provider_product, "GitHub REST API")
+        self.assertEqual(config.owner, "fixture-owner")
+        self.assertEqual(config.repository, "fixture-repo")
+        self.assertEqual(config.repository_visibility, "public")
+        self.assertEqual(config.credential_mode, "none_public_readonly")
+        self.assertIsNone(config.credentials_ref)
+        self.assertEqual(manifest.request_count, 5)
+        self.assertEqual(manifest.requests[0].method, "GET")
+        self.assertEqual(manifest.requests[0].path, "/repos/{owner}/{repo}")
+        payload = json.dumps(manifest.to_jsonable(), sort_keys=True)
+        self.assertIn('"fixture_transport_only": true', payload)
+        self.assertIn('"no_network": true', payload)
+        self.assertIn('"no_mutation": true', payload)
+        self.assertNotIn("fixture-github-token", payload)
+        self.assertNotIn(str(github_api_fixture_root()), payload)
+        for fixture_name in (
+            "blocked_policy",
+            "private_missing_consent",
+            "private_missing_credentials",
+            "mutation_attempt",
+            "non_allowlisted_endpoint",
+            "bad_provider",
+        ):
+            with self.subTest(fixture_name=fixture_name):
+                with self.assertRaises(GitHubApiPolicyError):
+                    load_github_api_source_config(
+                        github_api_fixture_root() / fixture_name / "github-source.toml"
+                    )
+
+    def test_github_api_redaction_fixture_masks_sensitive_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            captured = {}
+
+            def loader(_psql_args, observations, **kwargs):
+                captured["observations"] = tuple(observations)
+                captured["kwargs"] = dict(kwargs)
+                return LoadSummary(repository_id=44, run_id=45, files=1)
+
+            summary = acquire_github_api_source(
+                github_api_fixture_root() / "redaction" / "github-source.toml",
+                repository_name="fixture-github",
+                root_path=root,
+                psql_args=("--no-network-placeholder",),
+                psql_command="psql",
+                loader=loader,
+                transport=FixtureGitHubApiTransport(),
+            )
+            artifact_text = (
+                summary.output_path / "artifacts" / "repository.json"
+            ).read_text(encoding="utf-8")
+
+        self.assertEqual(summary.source_id, "github-redaction-fixture")
+        self.assertEqual(summary.requests, 1)
+        self.assertEqual(summary.responses, 1)
+        self.assertEqual(summary.load_summary.repository_id, 44)
+        self.assertEqual(captured["kwargs"]["repository_name"], "fixture-github")
+        payload = json.dumps(
+            [observation.to_dict() for observation in captured["observations"]],
+            sort_keys=True,
+        )
+        self.assertIn("github.repository", payload)
+        self.assertIn("config.document", payload)
+        self.assertNotIn("fixture-secret-value", payload)
+        self.assertNotIn("fixture-github-token", payload)
+        self.assertNotIn("fixture-private-key", payload)
+        self.assertNotIn(str(root), payload)
+        self.assertNotIn("fixture-secret-value", artifact_text)
+        self.assertNotIn("fixture-github-token", artifact_text)
+        self.assertNotIn("fixture-private-key", artifact_text)
 
     def test_bulk_fixture_policy_plan_and_observations(self):
         config = load_bulk_source_config(bulk_fixture_root() / "mixed_corpus" / "bulk.toml")
@@ -1123,6 +1213,10 @@ def bulk_fixture_root() -> Path:
 
 def api_fixture_root() -> Path:
     return Path(__file__).parents[3] / "fixtures" / "api"
+
+
+def github_api_fixture_root() -> Path:
+    return Path(__file__).parents[3] / "fixtures" / "github_api"
 
 
 if __name__ == "__main__":

@@ -1068,6 +1068,166 @@ class CliUnitTests(unittest.TestCase):
 
         self.assertIn("unrecognized arguments: --url", stderr.getvalue())
 
+    def test_github_plan_prints_json_manifest_from_config_only(self):
+        stdout = io.StringIO()
+        expected = SimpleNamespace(
+            to_jsonable=lambda: {
+                "source_id": "github-public-fixture",
+                "api_source_class": "api.github.repository",
+                "owner": "fixture-owner",
+                "repository": "fixture-repo",
+                "request_count": 5,
+                "fixture_transport_only": True,
+                "no_network": True,
+                "no_mutation": True,
+            }
+        )
+
+        with patch(
+            "repomap_kg.cli.build_github_api_plan_from_config",
+            return_value=expected,
+        ) as build_plan:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "github",
+                        "plan",
+                        "--config",
+                        "/tmp/github-source.toml",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["source_id"], "github-public-fixture")
+        self.assertEqual(payload["api_source_class"], "api.github.repository")
+        self.assertEqual(payload["owner"], "fixture-owner")
+        self.assertEqual(payload["repository"], "fixture-repo")
+        self.assertEqual(payload["request_count"], 5)
+        self.assertTrue(payload["fixture_transport_only"])
+        self.assertTrue(payload["no_network"])
+        self.assertTrue(payload["no_mutation"])
+        build_plan.assert_called_once_with("/tmp/github-source.toml")
+
+    def test_github_acquire_prints_json_summary_and_uses_storage_options(self):
+        stdout = io.StringIO()
+        expected = SimpleNamespace(
+            to_jsonable=lambda: {
+                "source_id": "github-public-fixture",
+                "owner": "fixture-owner",
+                "repository": "fixture-repo",
+                "observations": 21,
+                "repository_id": 7,
+                "run_id": 11,
+                "fixture_transport_only": True,
+                "no_network": True,
+                "no_mutation": True,
+            }
+        )
+
+        with patch(
+            "repomap_kg.cli.acquire_github_api_source",
+            return_value=expected,
+        ) as acquire:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "github",
+                        "acquire",
+                        "--config",
+                        "/tmp/github-source.toml",
+                        "--repository-name",
+                        "fixture",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--pg-host",
+                        "/tmp/socket",
+                        "--pg-port",
+                        "5432",
+                        "--pg-user",
+                        "repo_map_test",
+                        "--pg-database",
+                        "postgres",
+                        "--psql-command",
+                        "/bin/psql",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["repository_id"], 7)
+        self.assertEqual(payload["observations"], 21)
+        self.assertEqual(payload["owner"], "fixture-owner")
+        self.assertTrue(payload["fixture_transport_only"])
+        self.assertTrue(payload["no_network"])
+        acquire.assert_called_once()
+        self.assertEqual(
+            acquire.call_args.kwargs["config_path"],
+            "/tmp/github-source.toml",
+        )
+        self.assertEqual(acquire.call_args.kwargs["repository_name"], "fixture")
+        self.assertEqual(acquire.call_args.kwargs["root_path"], "/tmp/fixture")
+        self.assertEqual(acquire.call_args.kwargs["psql_command"], "/bin/psql")
+        self.assertEqual(
+            acquire.call_args.kwargs["psql_args"],
+            [
+                "-h",
+                "/tmp/socket",
+                "-p",
+                "5432",
+                "-U",
+                "repo_map_test",
+                "-d",
+                "postgres",
+            ],
+        )
+
+    def test_github_plan_reports_policy_errors(self):
+        from repomap_kg.github_api_ingestion import GitHubApiPolicyError
+
+        stderr = io.StringIO()
+        with patch(
+            "repomap_kg.cli.build_github_api_plan_from_config",
+            side_effect=GitHubApiPolicyError("source policy status blocked"),
+        ):
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "github",
+                        "plan",
+                        "--config",
+                        "/tmp/github-source.toml",
+                        "--json",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("source policy status blocked", stderr.getvalue())
+
+    def test_github_acquire_rejects_arbitrary_url_argument(self):
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            with self.assertRaises(SystemExit):
+                main(
+                    [
+                        "github",
+                        "acquire",
+                        "--config",
+                        "/tmp/github-source.toml",
+                        "--repository-name",
+                        "fixture",
+                        "--url",
+                        "https://github.com/fixture-owner/fixture-repo",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertIn("unrecognized arguments: --url", stderr.getvalue())
+
     def test_storage_files_prints_filtered_json_records(self):
         records = (
             FileRecord(

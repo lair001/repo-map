@@ -38,6 +38,11 @@ from repomap_kg.graph_keys import (
     host_category_key,
     validate_key,
 )
+from repomap_kg.github_api_ingestion import (
+    GitHubApiPolicyError,
+    acquire_github_api_source,
+    build_github_api_plan_from_config,
+)
 from repomap_kg.host_mutators import (
     filter_host_mutator_records,
     format_host_mutator_summary_table,
@@ -394,6 +399,44 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit API acquisition summary as JSON",
+    )
+
+    github = subparsers.add_parser(
+        "github",
+        help="plan and acquire explicitly configured GitHub REST fixture sources",
+    )
+    github_subcommands = github.add_subparsers(dest="github_command")
+    github_plan = github_subcommands.add_parser(
+        "plan",
+        help="plan one explicitly configured GitHub REST fixture acquisition",
+    )
+    github_plan.add_argument(
+        "--config",
+        required=True,
+        help="path to a GitHub REST source TOML config",
+    )
+    github_plan.add_argument(
+        "--json",
+        action="store_true",
+        help="emit GitHub API request plan as JSON",
+    )
+    github_acquire = github_subcommands.add_parser(
+        "acquire",
+        help="acquire one explicitly configured GitHub REST fixture source",
+    )
+    github_acquire.add_argument(
+        "--config",
+        required=True,
+        help="path to a GitHub REST source TOML config",
+    )
+    github_acquire.add_argument("--repository-name", required=True)
+    add_storage_root_argument(github_acquire)
+    github_acquire.add_argument("--git-commit")
+    add_storage_connection_arguments(github_acquire)
+    github_acquire.add_argument(
+        "--json",
+        action="store_true",
+        help="emit GitHub API acquisition summary as JSON",
     )
 
     storage = subparsers.add_parser(
@@ -1186,6 +1229,47 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(
                 "acquired API source "
+                f"{summary.source_id} into repository "
+                f"{summary.load_summary.repository_id} run "
+                f"{summary.load_summary.run_id} "
+                f"({summary.observations} observations)"
+            )
+        return 0
+
+    if args.command == "github" and args.github_command == "plan":
+        try:
+            manifest = build_github_api_plan_from_config(args.config)
+        except GitHubApiPolicyError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(manifest.to_jsonable(), sort_keys=True))
+        else:
+            print(
+                "planned GitHub API source "
+                f"{manifest.source_id} "
+                f"({manifest.request_count} GET requests)"
+            )
+        return 0
+
+    if args.command == "github" and args.github_command == "acquire":
+        try:
+            summary = acquire_github_api_source(
+                config_path=args.config,
+                repository_name=args.repository_name,
+                root_path=args.root_path,
+                psql_args=psql_args_from_args(args),
+                git_commit=args.git_commit,
+                psql_command=args.psql_command,
+            )
+        except (GitHubApiPolicyError, StorageSchemaError) as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(summary.to_jsonable(), sort_keys=True))
+        else:
+            print(
+                "acquired GitHub API source "
                 f"{summary.source_id} into repository "
                 f"{summary.load_summary.repository_id} run "
                 f"{summary.load_summary.run_id} "
