@@ -53,9 +53,9 @@ commands or explicit `--canonical` modes where those exist.
 
 5. Configure MCP project registry only after storage exists and readback works.
 
-## Current Extraction Families
+## Current Extraction And Ingestion Families
 
-RepoMap has static extraction and canonicalization for:
+RepoMap currently supports these graph-building families:
 
 - files and shell observations;
 - Python AST modules, definitions, and imports;
@@ -70,11 +70,15 @@ RepoMap has static extraction and canonicalization for:
   conservative CSS selector-to-HTML matches.
 - local RSS, Atom, and JSON Feed artifacts, including feed documents, channels,
   items, authors, categories, links, enclosures, and references.
+- documented REST API source configs through the API1 fixture-only acquisition
+  skeleton, raw API provenance, redacted JSON artifact routing into existing
+  config facts, and API2 aggregate summary readback.
 
 Do not run `nix eval`, execute project code, fetch URLs outside configured RSS2
 feed ingestion, execute Markdown code blocks, execute commands found in config
-files, expand environment variables, or treat MCP as a write surface unless a
-later accepted phase explicitly changes that.
+files, expand environment variables, resolve credentials, call real provider
+APIs, or treat MCP as a write surface unless a later accepted phase explicitly
+changes that.
 
 ## Configured Feed Ingestion
 
@@ -107,10 +111,47 @@ repomap-kg storage edges --root-path <repo-root> --kind references --source-key 
 repomap-kg storage explain-canonical-edge --root-path <repo-root> --source-key <feed.item-key> --kind references --target-key <target-key> --json
 ```
 
+## Documented API Source Workflow
+
+Use API1 only for explicit, policy-approved, read-only documented REST API
+source configs. The current acquisition path is fixture-only:
+
+```sh
+repomap-kg api plan --config <api-source.toml> --json
+repomap-kg api acquire --config <api-source.toml> --repository-name <name> --root-path <repo-root> --json
+```
+
+The config must provide source policy, read-only consent, an opaque credential
+reference, limits, retention, redaction, endpoint allowlists, and local fixture
+response paths. API1 validates credential reference shape only. It does not
+resolve credentials, read environment variables or keychains, implement OAuth,
+call real HTTP/provider APIs, mutate provider state, schedule work, or add MCP
+tools.
+
+`api acquire` writes RepoMap-owned artifacts under `.repomap/api-runs/...`,
+redacts response artifacts, routes safe JSON artifacts through the existing
+configuration extractor, and loads through existing storage paths. Raw
+`api.source`, `api.run`, and `api.response` observations remain
+provenance-only; they do not create `api.*` canonical nodes or new edge kinds.
+
+Use API2 readback to inspect aggregate API provenance without rerunning
+acquisition:
+
+```sh
+repomap-kg storage api-summary --root-path <repo-root> --json
+```
+
+`api-summary` combines safe API run manifests, raw observations with API
+provenance, and config documents produced from routed artifacts. It must not
+read credentials, open response bodies, call transports, fetch URLs, parse
+source configs for acquisition, mutate storage, expose absolute machine paths,
+or imply provider-specific behavior.
+
 ## Query Config Graphs
 
 Structured configuration nodes are useful for Codex, MCP, editor, and tool
-metadata. After loading a graph:
+metadata, including safe JSON artifacts routed from API1. After loading a
+graph:
 
 ```sh
 repomap-kg storage nodes --root-path <repo-root> --kind config.document --json
@@ -137,3 +178,10 @@ Prefer canonical graph identity:
 
 Do not present database integer ids, legacy `stable_key`, raw observation source
 ids, or line numbers as canonical identity.
+
+## Phase Hygiene
+
+When the CLI work is part of a RepoMap phase, ADR, status exit, skill update,
+test harness slice, smoke test, or commit/amend operation, use
+`repomap-phase-hygiene` for phase boundaries, verification, and commit-message
+standards.

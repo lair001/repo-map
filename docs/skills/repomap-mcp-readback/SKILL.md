@@ -29,6 +29,10 @@ The minimal read-only MCP surface exposes:
 - `repomap_explain_source_feed_item`
 - `repomap_source_references`
 
+API2 does not add API readback tools to MCP. Use the CLI command
+`repomap-kg storage api-summary --root-path <repo> --json` outside MCP when
+API1 provenance summary readback is needed.
+
 If the tools are not visible to the agent, first distinguish the cause:
 
 - the MCP server may not be configured;
@@ -103,6 +107,11 @@ Typical source/feed sequence:
 5. Call `repomap_explain_source_feed_item` for item evidence.
 6. Call `repomap_source_references` to inspect not-fetched item links and
    enclosures.
+
+For API1/API2 data, MCP readback has no API-specific tools yet. Use the CLI
+`storage api-summary` command outside MCP to inspect aggregate API run
+manifests, safe raw API provenance, and routed config-document counts without
+rerunning acquisition.
 
 ## Example Calls
 
@@ -198,8 +207,12 @@ Explain one ingested feed item:
 - Treat the MCP surface as read-only.
 - Run discovery, storage loading, and configured feed ingestion outside MCP
   through the normal RepoMap CLI.
+- Run API planning, fixture-only API acquisition, and API2 `api-summary`
+  readback outside MCP through the normal RepoMap CLI.
 - Do not fetch URLs, feed URLs, item links, enclosures, schemas, namespaces, or
   arbitrary model-selected targets through MCP.
+- Do not call provider APIs, resolve credentials, run OAuth, mutate provider
+  state, or summarize raw response bodies through MCP.
 - Do not expose credentials, secret values, full feed bodies, or full retained
   artifact bytes in MCP responses.
 - Report canonical keys, not database integer ids.

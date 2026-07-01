@@ -62,12 +62,15 @@ Use environment variables for server-level settings:
 
 ## Source Ingestion Boundary
 
-RepoMap feed ingestion is a CLI/storage workflow, not an MCP write surface.
-Run `repomap-kg sources ingest-feed --config <feed-source.toml> ...` outside
-MCP, then use the read-only MCP tools to query the loaded canonical graph.
+RepoMap feed ingestion and documented API acquisition are CLI/storage
+workflows, not MCP write surfaces. Run `repomap-kg sources ingest-feed --config
+<feed-source.toml> ...`, `repomap-kg api plan ...`, and `repomap-kg api
+acquire ...` outside MCP.
 
 Do not add arbitrary URL fetching, discovery, storage loading, source-ingestion
-commands, scheduler behavior, or write-capable tools to the MCP configuration.
+commands, API acquisition commands, credential lookup, scheduler behavior, or
+write-capable tools to the MCP configuration. API2 `storage api-summary` is a
+CLI readback command; it is not part of the MCP surface in API2.
 
 ## Resolution Rules
 
@@ -90,6 +93,10 @@ tool discovery is stale. Then call:
 2. `repomap_status` with no args when a default project is configured.
 3. `repomap_canonical_nodes` with `project="<name>"` and a known kind.
 4. `repomap_canonical_edges` with `project="<name>"` and a known edge kind.
+
+Do not expect API planning, acquisition, credential, provider-sync, or
+`api-summary` tools from the MCP server unless a later accepted phase adds
+them explicitly.
 
 If tools are missing, distinguish configuration, session exposure, approval
 policy, storage connection, and RepoMap query failures in the report.
