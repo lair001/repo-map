@@ -23,6 +23,7 @@ from repomap_kg.discovery import (
     extract_css_file_observations_from_file,
     extract_feed_file_observations_from_file,
     extract_html_file_observations_from_file,
+    extract_javascript_file_observations_from_file,
     extract_markdown_file_observations_from_file,
     extract_nix_file_observations_from_file,
     extract_python_file_observations_from_file,
@@ -84,6 +85,20 @@ SECRET_MARKERS = (
     "refresh_token",
     "bearer",
     "auth",
+)
+JAVASCRIPT_ARCHIVE_EXTENSIONS = frozenset(
+    {".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx"}
+)
+JAVASCRIPT_WARC_MEDIA_TYPES = frozenset(
+    {
+        "text/javascript",
+        "application/javascript",
+        "application/x-javascript",
+        "text/ecmascript",
+        "application/ecmascript",
+        "text/typescript",
+        "application/typescript",
+    }
 )
 DISALLOWED_TRUE_FLAGS = (
     "requires_login",
@@ -1486,6 +1501,8 @@ def _warc_payload_route(content_type: str | None) -> str | None:
         "application/atom+xml",
     }:
         return "xml"
+    if media_type in JAVASCRIPT_WARC_MEDIA_TYPES:
+        return "javascript"
     return None
 
 
@@ -1515,6 +1532,8 @@ def _warc_payload_extension(extractor_route: str) -> str:
         return ".json"
     if extractor_route == "xml":
         return ".xml"
+    if extractor_route == "javascript":
+        return ".js"
     return ".bin"
 
 
@@ -1959,6 +1978,14 @@ def _observations_for_archive_file(
         observations.extend(
             extract_css_file_observations_from_file(repository_root, file_info.path)
         )
+    if file_info.language == "javascript":
+        observations.extend(
+            extract_javascript_file_observations_from_file(
+                repository_root,
+                file_info.path,
+                repository_paths=repository_paths,
+            )
+        )
     return tuple(observations)
 
 
@@ -2127,8 +2154,8 @@ def _archive_extractor_route(path: Path) -> str:
         return "python"
     if suffix == ".nix":
         return "nix"
-    if suffix in {".js", ".mjs", ".cjs"}:
-        return "static-asset"
+    if suffix in JAVASCRIPT_ARCHIVE_EXTENSIONS:
+        return "javascript"
     return "file"
 
 
@@ -2150,8 +2177,10 @@ def _archive_media_type(path: Path) -> str:
         return "application/xml"
     if suffix in {".md", ".markdown"}:
         return "text/markdown"
-    if suffix in {".js", ".mjs", ".cjs"}:
+    if suffix in {".js", ".mjs", ".cjs", ".jsx"}:
         return "text/javascript"
+    if suffix in {".ts", ".mts", ".cts", ".tsx"}:
+        return "text/typescript"
     return "application/octet-stream"
 
 

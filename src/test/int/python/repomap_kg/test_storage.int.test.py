@@ -2964,6 +2964,17 @@ FROM canonical_edges;
                 kind="feed.document",
                 psql_command=postgres.psql_command,
             )
+            js_files = query_canonical_node_records(
+                postgres.psql_args,
+                root_path=str(root_path),
+                kind="js.file",
+                psql_command=postgres.psql_command,
+            )
+            js_summary = query_js_summary(
+                postgres.psql_args,
+                root_path=str(root_path),
+                psql_command=postgres.psql_command,
+            )
             references = query_canonical_edge_records(
                 postgres.psql_args,
                 root_path=str(root_path),
@@ -2976,19 +2987,58 @@ FROM canonical_edges;
                 kind="styles",
                 psql_command=postgres.psql_command,
             )
+            html_js_reference = next(
+                edge
+                for edge in references
+                if edge.target_key == (
+                    "file:archive_artifacts/example-test-report/static/app.js"
+                )
+            )
+            html_js_explanation = query_canonical_edge_explanation(
+                postgres.psql_args,
+                root_path=str(root_path),
+                source_key=html_js_reference.source_key,
+                kind=html_js_reference.edge_kind,
+                target_key=html_js_reference.target_key,
+                identity_metadata_hash=html_js_reference.identity_metadata_hash,
+                psql_command=postgres.psql_command,
+            )
+            js_source_map_reference = next(
+                edge
+                for edge in references
+                if edge.target_key == (
+                    "file:archive_artifacts/example-test-report/static/app.js.map"
+                )
+            )
+            js_source_map_explanation = query_canonical_edge_explanation(
+                postgres.psql_args,
+                root_path=str(root_path),
+                source_key=js_source_map_reference.source_key,
+                kind=js_source_map_reference.edge_kind,
+                target_key=js_source_map_reference.target_key,
+                identity_metadata_hash=js_source_map_reference.identity_metadata_hash,
+                psql_command=postgres.psql_command,
+            )
             raw_count = postgres.psql_scalar("SELECT count(*) FROM raw_observations;")
 
         self.assertEqual(summary.source_id, "example-test-report")
-        self.assertEqual(summary.included_files, 6)
-        self.assertEqual(summary.load_summary.files, 6)
+        self.assertEqual(summary.included_files, 8)
+        self.assertEqual(summary.load_summary.files, 8)
         self.assertEqual(raw_count, str(summary.observations))
         self.assertTrue(html_documents)
         self.assertTrue(css_documents)
         self.assertTrue(config_documents)
         self.assertTrue(feed_documents)
+        self.assertTrue(js_files)
+        self.assertGreaterEqual(js_summary.test_report_asset_files, 1)
+        self.assertGreaterEqual(js_summary.source_map_references, 1)
         self.assertTrue(
             any(edge.target_key.startswith("external.url:") for edge in references)
         )
+        self.assertIsNotNone(html_js_explanation.edge)
+        self.assertTrue(html_js_explanation.evidence)
+        self.assertIsNotNone(js_source_map_explanation.edge)
+        self.assertTrue(js_source_map_explanation.evidence)
         self.assertTrue(styles)
         source_metadata = json.dumps(
             [observation.to_dict() for observation in summary.raw_observations],
@@ -2996,7 +3046,21 @@ FROM canonical_edges;
         )
         self.assertIn('"source_id": "example-test-report"', source_metadata)
         self.assertIn('"artifact_manifest_id"', source_metadata)
+        self.assertIn('"profile": "test_report_asset"', source_metadata)
+        self.assertIn('"not_fetched": true', source_metadata)
+        self.assertIn(
+            "file:archive_artifacts/example-test-report/static/app.js.map",
+            source_metadata,
+        )
+        explain_payload = json.dumps(
+            {
+                "html": html_js_explanation.to_dict(),
+                "source_map": js_source_map_explanation.to_dict(),
+            },
+            sort_keys=True,
+        )
         self.assertNotIn("fixture-secret", source_metadata)
+        self.assertNotIn("fixture-secret", explain_payload)
 
     def test_sources_import_archive_cli_loads_fixture_and_preserves_json_summary(self):
         require_postgres_binaries()
@@ -3037,7 +3101,7 @@ FROM canonical_edges;
         payload = json.loads(stdout)
         self.assertEqual(payload["source_id"], "example-test-report")
         self.assertEqual(payload["source_type"], "test_report.artifact")
-        self.assertEqual(payload["included_files"], 6)
+        self.assertEqual(payload["included_files"], 8)
         self.assertEqual(str(payload["observations"]), raw_count)
 
     def test_sources_import_warc_loads_local_warc_fixture(self):
@@ -3090,6 +3154,17 @@ FROM canonical_edges;
                     kind="config.document",
                     psql_command=postgres.psql_command,
                 )
+                js_files = query_canonical_node_records(
+                    postgres.psql_args,
+                    root_path=str(root_path),
+                    kind="js.file",
+                    psql_command=postgres.psql_command,
+                )
+                js_summary = query_js_summary(
+                    postgres.psql_args,
+                    root_path=str(root_path),
+                    psql_command=postgres.psql_command,
+                )
                 references = query_canonical_edge_records(
                     postgres.psql_args,
                     root_path=str(root_path),
@@ -3112,29 +3187,56 @@ FROM canonical_edges;
                     identity_metadata_hash=warc_reference.identity_metadata_hash,
                     psql_command=postgres.psql_command,
                 )
+                js_source_map_reference = next(
+                    edge
+                    for edge in references
+                    if edge.target_key.endswith("/record-0005/payload.js.map")
+                )
+                js_source_map_explanation = query_canonical_edge_explanation(
+                    postgres.psql_args,
+                    root_path=str(root_path),
+                    source_key=js_source_map_reference.source_key,
+                    kind=js_source_map_reference.edge_kind,
+                    target_key=js_source_map_reference.target_key,
+                    identity_metadata_hash=js_source_map_reference.identity_metadata_hash,
+                    psql_command=postgres.psql_command,
+                )
 
         self.assertEqual(summary.source_id, "example-warc-archive")
-        self.assertEqual(summary.record_count, 7)
-        self.assertEqual(summary.routed_payloads, 3)
-        self.assertEqual(summary.load_summary.files, 3)
+        self.assertEqual(summary.record_count, 8)
+        self.assertEqual(summary.routed_payloads, 4)
+        self.assertEqual(summary.load_summary.files, 4)
         self.assertEqual(raw_count, str(summary.observations))
         self.assertEqual(len(warc_documents), 1)
-        self.assertEqual(len(warc_records), 7)
+        self.assertEqual(len(warc_records), 8)
         self.assertTrue(html_documents)
         self.assertTrue(css_documents)
         self.assertTrue(config_documents)
+        self.assertTrue(js_files)
+        self.assertGreaterEqual(js_summary.saved_page_asset_files, 1)
+        self.assertGreaterEqual(js_summary.source_map_references, 1)
         self.assertTrue(
             any(edge.source_key.startswith("warc.record:") for edge in references)
         )
         self.assertIsNotNone(explanation.edge)
         self.assertTrue(explanation.evidence)
+        self.assertIsNotNone(js_source_map_explanation.edge)
+        self.assertTrue(js_source_map_explanation.evidence)
         source_metadata = json.dumps(
             [observation.to_dict() for observation in summary.raw_observations],
             sort_keys=True,
         )
-        explain_payload = json.dumps(explanation.to_dict(), sort_keys=True)
+        explain_payload = json.dumps(
+            {
+                "warc": explanation.to_dict(),
+                "source_map": js_source_map_explanation.to_dict(),
+            },
+            sort_keys=True,
+        )
         self.assertIn('"warc_record_key"', source_metadata)
         self.assertIn('"warc_payload_path"', source_metadata)
+        self.assertIn('"artifact_extractor_route": "javascript"', source_metadata)
+        self.assertIn('"not_fetched": true', source_metadata)
         self.assertNotIn("fixture-secret", source_metadata)
         self.assertNotIn("fixture-secret", explain_payload)
 
@@ -3178,8 +3280,8 @@ FROM canonical_edges;
         payload = json.loads(stdout)
         self.assertEqual(payload["source_id"], "example-warc-archive")
         self.assertEqual(payload["source_type"], "saved_page.archive")
-        self.assertEqual(payload["record_count"], 7)
-        self.assertEqual(payload["routed_payloads"], 3)
+        self.assertEqual(payload["record_count"], 8)
+        self.assertEqual(payload["routed_payloads"], 4)
         self.assertEqual(str(payload["observations"]), raw_count)
 
     def test_mcp_read_only_source_feed_tools_read_rss2_loaded_rows(self):

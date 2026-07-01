@@ -63,7 +63,7 @@ class SourceIngestionIntegrationTests(unittest.TestCase):
 
         self.assertEqual(allowed.source_type, "test_report.artifact")
         self.assertEqual(saved_page.source_type, "saved_page.archive")
-        self.assertEqual(manifest.file_count, 6)
+        self.assertEqual(manifest.file_count, 8)
         self.assertEqual(
             [item.relative_path for item in manifest.included_files],
             [
@@ -72,6 +72,8 @@ class SourceIngestionIntegrationTests(unittest.TestCase):
                 "feed/feed.json",
                 "index.html",
                 "static/app.js",
+                "static/app.js.map",
+                "static/chunk.js",
                 "static/report.css",
             ],
         )
@@ -119,6 +121,10 @@ class SourceIngestionIntegrationTests(unittest.TestCase):
         self.assertIn("css.selector_match", kinds)
         self.assertIn("config.document", kinds)
         self.assertIn("feed.document", kinds)
+        self.assertIn("js.file", kinds)
+        self.assertIn("js.module", kinds)
+        self.assertIn("js.function", kinds)
+        self.assertIn("js.reference", kinds)
         self.assertIn('"source_id": "example-test-report"', payload)
         self.assertIn('"artifact_manifest_id"', payload)
         self.assertIn(
@@ -126,6 +132,11 @@ class SourceIngestionIntegrationTests(unittest.TestCase):
             '"archive_artifacts/example-test-report/index.html"',
             payload,
         )
+        self.assertIn(
+            "file:archive_artifacts/example-test-report/static/app.js.map",
+            payload,
+        )
+        self.assertIn('"not_fetched": true', payload)
         self.assertNotIn("fixture-secret", payload)
 
     def test_archive_import_uses_existing_loader_path_without_network(self):
@@ -134,7 +145,7 @@ class SourceIngestionIntegrationTests(unittest.TestCase):
         def loader(_psql_args, observations, **kwargs):
             captured["observations"] = tuple(observations)
             captured["kwargs"] = dict(kwargs)
-            return LoadSummary(repository_id=42, run_id=43, files=6)
+            return LoadSummary(repository_id=42, run_id=43, files=8)
 
         summary = import_archive_source(
             archive_source_fixture("allowed-test-report.toml"),
@@ -147,15 +158,18 @@ class SourceIngestionIntegrationTests(unittest.TestCase):
         )
 
         self.assertEqual(summary.source_id, "example-test-report")
-        self.assertEqual(summary.included_files, 6)
+        self.assertEqual(summary.included_files, 8)
         self.assertEqual(summary.load_summary.repository_id, 42)
         self.assertEqual(captured["kwargs"]["repository_name"], "fixture")
         self.assertGreater(len(captured["observations"]), 6)
+        self.assertIn("js.file", {item.kind for item in captured["observations"]})
         payload = json.dumps(
             [observation.to_dict() for observation in captured["observations"]],
             sort_keys=True,
         )
         self.assertIn('"source_id": "example-test-report"', payload)
+        self.assertIn('"profile": "test_report_asset"', payload)
+        self.assertIn('"not_fetched": true', payload)
         self.assertNotIn("fixture-secret", payload)
 
     def test_warc_source_fixture_policy_manifest_and_observations(self):
@@ -209,8 +223,8 @@ class SourceIngestionIntegrationTests(unittest.TestCase):
             [observation.to_dict() for observation in observations],
             sort_keys=True,
         )
-        self.assertEqual(manifest.record_count, 7)
-        self.assertEqual(manifest.routed_payload_count, 3)
+        self.assertEqual(manifest.record_count, 8)
+        self.assertEqual(manifest.routed_payload_count, 4)
         self.assertEqual(manifest.skipped_record_count, 1)
         self.assertIn("warc.document", kinds)
         self.assertIn("warc.record", kinds)
@@ -219,9 +233,20 @@ class SourceIngestionIntegrationTests(unittest.TestCase):
         self.assertIn("html.document", kinds)
         self.assertIn("css.document", kinds)
         self.assertIn("config.document", kinds)
+        self.assertIn("js.file", kinds)
+        self.assertIn("js.module", kinds)
+        self.assertIn("js.function", kinds)
+        self.assertIn("js.reference", kinds)
         self.assertIn('"source_id": "example-warc-archive"', payload)
         self.assertIn('"warc_record_key"', payload)
         self.assertIn('"warc_payload_path"', payload)
+        self.assertIn('"artifact_extractor_route": "javascript"', payload)
+        self.assertIn(
+            "file:.repomap/source-artifacts/example-warc-archive/"
+            "20260630T120000Z/warc-payloads/record-0005/payload.js.map",
+            payload,
+        )
+        self.assertIn('"not_fetched": true', payload)
         self.assertNotIn("fixture-secret", payload)
         self.assertTrue(
             any("max_warc_records" in error for error in record_limit_manifest.errors)
@@ -237,7 +262,7 @@ class SourceIngestionIntegrationTests(unittest.TestCase):
         def loader(_psql_args, observations, **kwargs):
             captured["observations"] = tuple(observations)
             captured["kwargs"] = dict(kwargs)
-            return LoadSummary(repository_id=44, run_id=45, files=3)
+            return LoadSummary(repository_id=44, run_id=45, files=4)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = copy_warc_fixture_root(Path(tmpdir))
@@ -252,16 +277,19 @@ class SourceIngestionIntegrationTests(unittest.TestCase):
             )
 
         self.assertEqual(summary.source_id, "example-warc-archive")
-        self.assertEqual(summary.record_count, 7)
-        self.assertEqual(summary.routed_payloads, 3)
+        self.assertEqual(summary.record_count, 8)
+        self.assertEqual(summary.routed_payloads, 4)
         self.assertEqual(summary.load_summary.repository_id, 44)
         self.assertEqual(captured["kwargs"]["repository_name"], "fixture")
         self.assertGreater(len(captured["observations"]), 10)
+        self.assertIn("js.file", {item.kind for item in captured["observations"]})
         payload = json.dumps(
             [observation.to_dict() for observation in captured["observations"]],
             sort_keys=True,
         )
         self.assertIn('"source_id": "example-warc-archive"', payload)
+        self.assertIn('"artifact_extractor_route": "javascript"', payload)
+        self.assertIn('"not_fetched": true', payload)
         self.assertNotIn("fixture-secret", payload)
 
     def test_warc_policy_parser_and_target_error_paths_are_local_only(self):

@@ -448,10 +448,12 @@ class SourceIngestionUnitTests(unittest.TestCase):
                 "config/settings.json",
                 "index.html",
                 "static/app.js",
+                "static/app.js.map",
+                "static/chunk.js",
                 "static/report.css",
             ],
         )
-        self.assertEqual(first.file_count, 5)
+        self.assertEqual(first.file_count, 7)
         expected_skips = 3 if symlink_created else 2
         self.assertEqual(first.skipped_file_count, expected_skips)
         self.assertTrue(all(len(item.sha256) == 64 for item in first.included_files))
@@ -502,7 +504,33 @@ class SourceIngestionUnitTests(unittest.TestCase):
         self.assertIn("css.document", kinds)
         self.assertIn("css.selector_match", kinds)
         self.assertIn("config.document", kinds)
+        self.assertIn("js.file", kinds)
+        self.assertIn("js.module", kinds)
+        self.assertIn("js.function", kinds)
+        self.assertIn("js.reference", kinds)
         self.assertNotIn("javascript.execution", kinds)
+        js_file = next(
+            observation for observation in observations if observation.kind == "js.file"
+        )
+        js_references = [
+            observation
+            for observation in observations
+            if observation.kind == "js.reference"
+        ]
+        self.assertEqual(js_file.metadata["profile"], "test_report_asset")
+        self.assertEqual(js_file.metadata["artifact_profile"], "test-report")
+        self.assertEqual(
+            js_file.metadata["artifact_relative_path"],
+            "reports/latest/static/app.js",
+        )
+        self.assertIn("file:reports/latest/static/chunk.js", {item.target for item in js_references})
+        source_map = next(
+            item
+            for item in js_references
+            if item.metadata.get("reference_kind") == "source_map"
+        )
+        self.assertEqual(source_map.target, "file:reports/latest/static/app.js.map")
+        self.assertTrue(source_map.metadata["not_fetched"])
         loaded_observations = captured["observations"]
         payload = json.dumps(
             {
@@ -663,9 +691,9 @@ class SourceIngestionUnitTests(unittest.TestCase):
             ]
 
         payload = json.dumps(manifest.to_jsonable(), sort_keys=True)
-        self.assertEqual(manifest.record_count, 7)
-        self.assertEqual(manifest.parsed_record_count, 7)
-        self.assertEqual(manifest.routed_payload_count, 3)
+        self.assertEqual(manifest.record_count, 8)
+        self.assertEqual(manifest.parsed_record_count, 8)
+        self.assertEqual(manifest.routed_payload_count, 4)
         self.assertEqual(manifest.skipped_record_count, 1)
         self.assertIn('"warc_version": "WARC/1.1"', payload)
         self.assertIn('"identity_source": "warc_record_id"', payload)
@@ -673,6 +701,7 @@ class SourceIngestionUnitTests(unittest.TestCase):
         self.assertIn('"extractor_route": "html"', payload)
         self.assertIn('"extractor_route": "css"', payload)
         self.assertIn('"extractor_route": "json"', payload)
+        self.assertIn('"extractor_route": "javascript"', payload)
         self.assertIn('"skip_reason": "metadata-only"', payload)
         self.assertIn("<redacted>", payload)
         self.assertNotIn("fixture-secret", payload)
@@ -682,6 +711,7 @@ class SourceIngestionUnitTests(unittest.TestCase):
                 ".repomap/source-artifacts/example-warc-archive/20260630T120000Z/warc-payloads/record-0002/payload.html",
                 ".repomap/source-artifacts/example-warc-archive/20260630T120000Z/warc-payloads/record-0003/payload.css",
                 ".repomap/source-artifacts/example-warc-archive/20260630T120000Z/warc-payloads/record-0004/payload.json",
+                ".repomap/source-artifacts/example-warc-archive/20260630T120000Z/warc-payloads/record-0005/payload.js",
             ],
         )
         self.assertTrue(all(materialized_exists))
@@ -710,6 +740,10 @@ class SourceIngestionUnitTests(unittest.TestCase):
         self.assertIn("html.document", kinds)
         self.assertIn("css.document", kinds)
         self.assertIn("config.document", kinds)
+        self.assertIn("js.file", kinds)
+        self.assertIn("js.module", kinds)
+        self.assertIn("js.function", kinds)
+        self.assertIn("js.reference", kinds)
         self.assertNotIn("javascript.execution", kinds)
         document = next(
             observation
@@ -723,8 +757,12 @@ class SourceIngestionUnitTests(unittest.TestCase):
         )
         self.assertIn('"source_id": "example-warc-archive"', payload)
         self.assertIn('"warc_record_ordinal": 2', payload)
+        self.assertIn('"warc_record_ordinal": 5', payload)
         self.assertIn('"warc_record_key"', payload)
         self.assertIn('"warc_payload_path"', payload)
+        self.assertIn('"artifact_extractor_route": "javascript"', payload)
+        self.assertIn("file:.repomap/source-artifacts/example-warc-archive/20260630T120000Z/warc-payloads/record-0005/payload.js.map", payload)
+        self.assertIn('"not_fetched": true', payload)
         self.assertIn("credentials.token", payload)
         self.assertNotIn("fixture-secret", payload)
         self.assertNotIn("Set-Cookie: session", payload)
@@ -784,12 +822,12 @@ class SourceIngestionUnitTests(unittest.TestCase):
             )
 
         self.assertEqual(summary.source_id, "example-warc-archive")
-        self.assertEqual(summary.record_count, 7)
-        self.assertEqual(summary.routed_payloads, 3)
+        self.assertEqual(summary.record_count, 8)
+        self.assertEqual(summary.routed_payloads, 4)
         self.assertGreater(summary.observations, 10)
         self.assertIn("warc.record", {item.kind for item in captured["observations"]})
         self.assertEqual(summary.to_jsonable()["repository_id"], 7)
-        self.assertEqual(summary.to_jsonable()["routed_payloads"], 3)
+        self.assertEqual(summary.to_jsonable()["routed_payloads"], 4)
 
     def write_config(
         self,
@@ -928,7 +966,23 @@ class SourceIngestionUnitTests(unittest.TestCase):
             encoding="utf-8",
         )
         (artifact / "static" / "app.js").write_text(
-            "console.log('inert fixture asset');\n",
+            """\
+import { renderChunk } from "./chunk.js";
+export function renderReport() {
+  return renderChunk("summary");
+}
+const apiToken = "fixture-secret";
+fetch("https://example.invalid/report-data.json");
+//# sourceMappingURL=app.js.map
+""",
+            encoding="utf-8",
+        )
+        (artifact / "static" / "chunk.js").write_text(
+            "export function renderChunk(name) { return name; }\n",
+            encoding="utf-8",
+        )
+        (artifact / "static" / "app.js.map").write_text(
+            '{"version": 3, "sources": ["app.ts"]}\n',
             encoding="utf-8",
         )
         (artifact / "config" / "settings.json").write_text(
@@ -1043,6 +1097,18 @@ class SourceIngestionUnitTests(unittest.TestCase):
                 "https://example.invalid/config.json",
                 b'{"command": "python3", "credentials": {"token": "fixture-secret"}}',
                 content_type="application/json",
+            ),
+            http_response_record(
+                "response",
+                "urn:uuid:js-1",
+                "https://example.invalid/assets/app.js",
+                "text/javascript",
+                (
+                    b"export function archivedReport() { return 'ok'; }\n"
+                    b"const apiToken = 'fixture-secret';\n"
+                    b"//# sourceMappingURL=payload.js.map\n"
+                ),
+                http_headers={"Content-Type": "text/javascript"},
             ),
             http_request_record(
                 "urn:uuid:request-1",
