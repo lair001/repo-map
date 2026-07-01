@@ -45,6 +45,7 @@ from repomap_kg.source_ingestion import (
     SourceAcquisitionError,
     SourcePolicyError,
     import_archive_source,
+    import_warc_source,
     ingest_feed_source,
 )
 from repomap_kg.storage import (
@@ -274,6 +275,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit local artifact import summary as JSON",
+    )
+    import_warc = source_subcommands.add_parser(
+        "import-warc",
+        help="import one configured local WARC artifact source",
+    )
+    import_warc.add_argument(
+        "--config",
+        required=True,
+        help="path to a configured local WARC source TOML file",
+    )
+    import_warc.add_argument("--repository-name", required=True)
+    add_storage_root_argument(import_warc)
+    import_warc.add_argument("--git-commit")
+    add_storage_connection_arguments(import_warc)
+    import_warc.add_argument(
+        "--json",
+        action="store_true",
+        help="emit local WARC import summary as JSON",
     )
 
     storage = subparsers.add_parser(
@@ -906,6 +925,32 @@ def main(argv: list[str] | None = None) -> int:
                 f"{summary.load_summary.repository_id} run "
                 f"{summary.load_summary.run_id} "
                 f"({summary.observations} observations)"
+            )
+        return 0
+
+    if args.command == "sources" and args.source_command == "import-warc":
+        try:
+            summary = import_warc_source(
+                config_path=args.config,
+                repository_name=args.repository_name,
+                root_path=args.root_path,
+                psql_args=psql_args_from_args(args),
+                git_commit=args.git_commit,
+                psql_command=args.psql_command,
+            )
+        except (SourcePolicyError, SourceAcquisitionError, StorageSchemaError) as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(summary.to_jsonable(), sort_keys=True))
+        else:
+            print(
+                "imported local WARC source "
+                f"{summary.source_id} into repository "
+                f"{summary.load_summary.repository_id} run "
+                f"{summary.load_summary.run_id} "
+                f"({summary.observations} observations, "
+                f"{summary.routed_payloads} routed payloads)"
             )
         return 0
 

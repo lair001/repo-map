@@ -30,6 +30,15 @@ from repomap_kg.discovery import (
     markdown_anchor_index,
 )
 from repomap_kg.feed import extract_feed_file_observations
+from repomap_kg.graph_keys import (
+    dynamic_key,
+    external_key,
+    external_url_key,
+    file_key,
+    unknown_key,
+    warc_document_key,
+    warc_record_key,
+)
 from repomap_kg.observations import RawObservation
 from repomap_kg.python_extractor import PythonModuleIndex
 from repomap_kg.storage import LoadSummary, load_file_observations
@@ -49,6 +58,7 @@ ARCHIVE_SOURCE_TYPES = frozenset(
         "local.file",
     }
 )
+WARC_SOURCE_TYPES = ARCHIVE_SOURCE_TYPES
 ALLOWED_POLICY_STATUSES = frozenset({"allowed", "allowed_with_limits"})
 BLOCKED_POLICY_STATUSES = frozenset(
     {
@@ -111,6 +121,32 @@ ARCHIVE_EXCLUDED_DIR_NAMES = frozenset(
         "node_modules",
         "tmp",
         "temp",
+    }
+)
+SAFE_WARC_HEADER_NAMES = frozenset(
+    {
+        "content-length",
+        "content-type",
+        "etag",
+        "last-modified",
+        "warc-block-digest",
+        "warc-concurrent-to",
+        "warc-date",
+        "warc-payload-digest",
+        "warc-record-id",
+        "warc-refers-to",
+        "warc-target-uri",
+        "warc-type",
+    }
+)
+SENSITIVE_HEADER_NAMES = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "set-cookie",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
     }
 )
 
@@ -328,6 +364,168 @@ class ArchiveImportSummary:
         }
 
 
+@dataclass(frozen=True)
+class WarcSourceConfig:
+    source_id: str
+    source_type: str
+    display_name: str | None
+    policy_status: str
+    max_artifact_bytes: int
+    max_file_count: int
+    max_warc_records: int
+    max_record_bytes: int
+    max_total_payload_bytes: int
+    retention_policy: str
+    requires_manual_review: bool
+    artifact_path: str
+    artifact_kind: str
+    artifact_profile: str
+    redacted_config_keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class WarcRecordSummary:
+    ordinal: int
+    record_type: str
+    record_id: str
+    record_key: str
+    identity_source: str
+    identity_strength: str
+    duplicate_identity: bool
+    target_uri_summary: str | None
+    target_key: str | None
+    target_uri_redacted: bool
+    warc_date: str | None
+    content_type: str | None
+    payload_byte_length: int
+    payload_sha256: str | None
+    extractor_route: str | None
+    materialized_path: str | None
+    skip_reason: str | None
+    safe_headers: Mapping[str, Any]
+    duplicate_disambiguator: str | None = None
+
+    def to_jsonable(self) -> dict[str, Any]:
+        return {
+            "ordinal": self.ordinal,
+            "record_type": self.record_type,
+            "record_id": self.record_id,
+            "record_key": self.record_key,
+            "identity_source": self.identity_source,
+            "identity_strength": self.identity_strength,
+            "duplicate_identity": self.duplicate_identity,
+            "duplicate_disambiguator": self.duplicate_disambiguator,
+            "target_uri_summary": self.target_uri_summary,
+            "target_key": self.target_key,
+            "target_uri_redacted": self.target_uri_redacted,
+            "warc_date": self.warc_date,
+            "content_type": self.content_type,
+            "payload_byte_length": self.payload_byte_length,
+            "payload_sha256": self.payload_sha256,
+            "extractor_route": self.extractor_route,
+            "materialized_path": self.materialized_path,
+            "skip_reason": self.skip_reason,
+            "safe_headers": dict(self.safe_headers),
+        }
+
+
+@dataclass(frozen=True)
+class WarcManifest:
+    source_id: str
+    source_type: str
+    policy_status: str
+    artifact_run_id: str
+    artifact_manifest_id: str
+    artifact_profile: str
+    artifact_path: str
+    warc_version: str | None
+    records: tuple[WarcRecordSummary, ...]
+    policy_snapshot: Mapping[str, Any]
+    warnings: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+
+    @property
+    def record_count(self) -> int:
+        return len(self.records)
+
+    @property
+    def parsed_record_count(self) -> int:
+        return len(self.records)
+
+    @property
+    def skipped_record_count(self) -> int:
+        return sum(
+            1
+            for record in self.records
+            if record.skip_reason is not None
+            and record.record_type
+            not in {"warcinfo", "request", "revisit", "conversion"}
+        )
+
+    @property
+    def routed_payload_count(self) -> int:
+        return sum(1 for record in self.records if record.materialized_path is not None)
+
+    @property
+    def total_payload_bytes(self) -> int:
+        return sum(record.payload_byte_length for record in self.records)
+
+    def to_jsonable(self) -> dict[str, Any]:
+        return {
+            "source_id": self.source_id,
+            "source_type": self.source_type,
+            "policy_status": self.policy_status,
+            "artifact_run_id": self.artifact_run_id,
+            "artifact_manifest_id": self.artifact_manifest_id,
+            "artifact_profile": self.artifact_profile,
+            "artifact_path": self.artifact_path,
+            "warc_version": self.warc_version,
+            "record_count": self.record_count,
+            "parsed_record_count": self.parsed_record_count,
+            "skipped_record_count": self.skipped_record_count,
+            "routed_payload_count": self.routed_payload_count,
+            "total_payload_bytes": self.total_payload_bytes,
+            "records": [record.to_jsonable() for record in self.records],
+            "policy_snapshot": dict(self.policy_snapshot),
+            "warnings": list(self.warnings),
+            "errors": list(self.errors),
+        }
+
+
+@dataclass(frozen=True)
+class WarcImportSummary:
+    source_id: str
+    source_type: str
+    policy_status: str
+    artifact_run_id: str
+    artifact_manifest_id: str
+    record_count: int
+    parsed_records: int
+    skipped_records: int
+    routed_payloads: int
+    observations: int
+    raw_observations: tuple[RawObservation, ...]
+    manifest: WarcManifest | None
+    load_summary: LoadSummary
+
+    def to_jsonable(self) -> dict[str, Any]:
+        return {
+            "source_id": self.source_id,
+            "source_type": self.source_type,
+            "policy_status": self.policy_status,
+            "artifact_run_id": self.artifact_run_id,
+            "artifact_manifest_id": self.artifact_manifest_id,
+            "record_count": self.record_count,
+            "parsed_records": self.parsed_records,
+            "skipped_records": self.skipped_records,
+            "routed_payloads": self.routed_payloads,
+            "observations": self.observations,
+            "repository_id": self.load_summary.repository_id,
+            "run_id": self.load_summary.run_id,
+            "files": self.load_summary.files,
+        }
+
+
 FetchFeed = Callable[[FeedSourceConfig], FeedFetchResponse]
 LoadObservations = Callable[..., LoadSummary]
 Clock = Callable[[], datetime]
@@ -470,6 +668,89 @@ def load_archive_source_config(path: Path | str) -> ArchiveSourceConfig:
         artifact_kind=artifact_kind,
         artifact_profile=artifact_profile,
         entry_document=_optional_text(artifact, "entry_document"),
+        redacted_config_keys=tuple(_secret_key_paths(payload)),
+    )
+
+
+def load_warc_source_config(path: Path | str) -> WarcSourceConfig:
+    config_path = Path(path)
+    with config_path.open("rb") as handle:
+        payload = tomllib.load(handle)
+    if not isinstance(payload, Mapping):
+        raise SourcePolicyError("source config must be a TOML object")
+    _reject_archive_network_fields(payload)
+    source = _mapping(payload, "source")
+    policy = _mapping(payload, "policy")
+    artifact = _mapping(payload, "artifact")
+
+    source_id = _required_text(source, "id", "source.id")
+    source_type = _required_text(source, "type", "source.type")
+    display_name = _optional_text(source, "display_name")
+    policy_status = _required_text(policy, "status", "policy.status")
+    max_artifact_bytes = _required_positive_int(
+        policy,
+        "max_artifact_bytes",
+        "policy.max_artifact_bytes",
+    )
+    max_file_count = _required_positive_int(
+        policy,
+        "max_file_count",
+        "policy.max_file_count",
+    )
+    max_warc_records = _required_positive_int(
+        policy,
+        "max_warc_records",
+        "policy.max_warc_records",
+    )
+    max_record_bytes = _required_positive_int(
+        policy,
+        "max_record_bytes",
+        "policy.max_record_bytes",
+    )
+    max_total_payload_bytes = _required_positive_int(
+        policy,
+        "max_total_payload_bytes",
+        "policy.max_total_payload_bytes",
+    )
+    retention_policy = _required_text(
+        policy,
+        "retention_policy",
+        "policy.retention_policy",
+    )
+    requires_manual_review = _optional_bool(
+        policy.get("requires_manual_review"),
+        "policy.requires_manual_review",
+        default=False,
+    )
+    artifact_path = _required_text(artifact, "path", "artifact.path")
+    artifact_kind = _required_text(artifact, "kind", "artifact.kind")
+    artifact_profile = _required_text(artifact, "profile", "artifact.profile")
+
+    _validate_source_id(source_id)
+    _validate_warc_source_type(source_type)
+    _validate_policy_status(policy_status)
+    _validate_disallowed_flags(payload)
+    if requires_manual_review:
+        raise SourcePolicyError("source requires manual review before WARC import")
+    if artifact_kind != "warc":
+        raise SourcePolicyError("artifact.kind must be warc")
+    _validate_local_artifact_path(artifact_path)
+
+    return WarcSourceConfig(
+        source_id=source_id,
+        source_type=source_type,
+        display_name=display_name,
+        policy_status=policy_status,
+        max_artifact_bytes=max_artifact_bytes,
+        max_file_count=max_file_count,
+        max_warc_records=max_warc_records,
+        max_record_bytes=max_record_bytes,
+        max_total_payload_bytes=max_total_payload_bytes,
+        retention_policy=retention_policy,
+        requires_manual_review=requires_manual_review,
+        artifact_path=artifact_path,
+        artifact_kind=artifact_kind,
+        artifact_profile=artifact_profile,
         redacted_config_keys=tuple(_secret_key_paths(payload)),
     )
 
@@ -694,6 +975,802 @@ def import_archive_source(
         manifest=manifest,
         load_summary=load_summary,
     )
+
+
+def build_warc_manifest(
+    config: WarcSourceConfig,
+    *,
+    root_path: Path | str,
+    clock: Clock | None = None,
+) -> WarcManifest:
+    root = Path(root_path).resolve()
+    artifact_path = _resolve_archive_artifact_path(root, config.artifact_path)
+    if artifact_path.is_symlink():
+        raise SourcePolicyError("artifact.path must not be a symlink")
+    if not artifact_path.is_file():
+        raise SourcePolicyError("artifact.path must be an existing WARC file")
+    if artifact_path.suffix != ".warc":
+        raise SourcePolicyError("WARC1 supports local .warc files only")
+    artifact_bytes = artifact_path.stat().st_size
+    if artifact_bytes > config.max_artifact_bytes:
+        raise SourcePolicyError("artifact exceeds policy.max_artifact_bytes")
+    now = clock() if clock is not None else _utc_now()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    now = now.astimezone(UTC)
+    artifact_run_id = now.strftime("%Y%m%dT%H%M%SZ")
+    document_key = warc_document_key(config.artifact_path)
+    materialization_root = (
+        root
+        / ".repomap"
+        / "source-artifacts"
+        / config.source_id
+        / artifact_run_id
+        / "warc-payloads"
+    )
+    records, warc_version, warnings, errors = _parse_warc_records(
+        config=config,
+        root=root,
+        artifact_path=artifact_path,
+        document_key=document_key,
+        materialization_root=materialization_root,
+    )
+    policy_snapshot = _warc_policy_snapshot(config)
+    manifest_payload = {
+        "source_id": config.source_id,
+        "source_type": config.source_type,
+        "policy_status": config.policy_status,
+        "artifact_run_id": artifact_run_id,
+        "artifact_profile": config.artifact_profile,
+        "artifact_path": config.artifact_path,
+        "warc_version": warc_version,
+        "records": [record.to_jsonable() for record in records],
+        "policy_snapshot": policy_snapshot,
+        "warnings": list(warnings),
+        "errors": list(errors),
+    }
+    artifact_manifest_id = hashlib.sha256(
+        json_dumps_stable(manifest_payload).encode("utf-8")
+    ).hexdigest()[:16]
+    return WarcManifest(
+        source_id=config.source_id,
+        source_type=config.source_type,
+        policy_status=config.policy_status,
+        artifact_run_id=artifact_run_id,
+        artifact_manifest_id=artifact_manifest_id,
+        artifact_profile=config.artifact_profile,
+        artifact_path=config.artifact_path,
+        warc_version=warc_version,
+        records=tuple(records),
+        policy_snapshot=policy_snapshot,
+        warnings=tuple(warnings),
+        errors=tuple(errors),
+    )
+
+
+def warc_observations_from_manifest(
+    config: WarcSourceConfig,
+    manifest: WarcManifest,
+    *,
+    root_path: Path | str,
+) -> tuple[RawObservation, ...]:
+    root = Path(root_path).resolve()
+    document_key = warc_document_key(manifest.artifact_path)
+    observations: list[RawObservation] = [
+        RawObservation(
+            kind="warc.document",
+            source_id=f"{manifest.artifact_path}#warc-document",
+            path=manifest.artifact_path,
+            target=document_key,
+            confidence="extracted",
+            extractor=EXTRACTOR,
+            extractor_version=EXTRACTOR_VERSION,
+            metadata={
+                "format": "warc",
+                "warc_version": manifest.warc_version,
+                "parser": "stdlib-bytes",
+                "parser_mode": "plain-warc-local-only",
+                "record_count": manifest.record_count,
+                "parsed_record_count": manifest.parsed_record_count,
+                "skipped_record_count": manifest.skipped_record_count,
+                "routed_payload_count": manifest.routed_payload_count,
+                "artifact_manifest_id": manifest.artifact_manifest_id,
+            },
+        )
+    ]
+    record_by_materialized_path = {
+        record.materialized_path: record
+        for record in manifest.records
+        if record.materialized_path is not None
+    }
+    for record in manifest.records:
+        observations.extend(_warc_record_observations(manifest, record, document_key))
+    for index, message in enumerate(manifest.errors):
+        observations.append(
+            RawObservation(
+                kind="warc.parse_error",
+                source_id=f"{manifest.artifact_path}#warc-parse-error:{index}",
+                path=manifest.artifact_path,
+                confidence="unknown",
+                extractor=EXTRACTOR,
+                extractor_version=EXTRACTOR_VERSION,
+                metadata={"error_kind": "warc-parse", "message": message},
+            )
+        )
+    routed_infos = [
+        classify_path(root, root / relative_path)
+        for relative_path in sorted(record_by_materialized_path)
+    ]
+    module_index = PythonModuleIndex.from_python_paths((), repository_root=root)
+    repository_paths = frozenset(file_info.path for file_info in routed_infos)
+    markdown_anchors: dict[str, frozenset[str]] = {}
+    routed_observations: list[RawObservation] = []
+    for file_info in routed_infos:
+        routed_observations.extend(
+            _observations_for_archive_file(
+                root,
+                file_info,
+                module_index=module_index,
+                repository_paths=repository_paths,
+                markdown_anchors=markdown_anchors,
+            )
+        )
+    routed_observations.extend(
+        extract_css_selector_match_observations(routed_observations)
+    )
+    observations.extend(routed_observations)
+    return _annotate_warc_observations(
+        observations,
+        config,
+        manifest,
+        record_by_materialized_path,
+    )
+
+
+def import_warc_source(
+    config_path: Path | str,
+    *,
+    repository_name: str,
+    root_path: Path | str,
+    psql_args: Sequence[str],
+    git_commit: str | None = None,
+    psql_command: str = "psql",
+    loader: LoadObservations = load_file_observations,
+    clock: Clock | None = None,
+) -> WarcImportSummary:
+    config = load_warc_source_config(config_path)
+    manifest = build_warc_manifest(config, root_path=root_path, clock=clock)
+    observations = warc_observations_from_manifest(
+        config,
+        manifest,
+        root_path=root_path,
+    )
+    load_summary = loader(
+        psql_args,
+        observations,
+        repository_name=repository_name,
+        root_path=str(root_path),
+        git_commit=git_commit,
+        psql_command=psql_command,
+    )
+    return WarcImportSummary(
+        source_id=config.source_id,
+        source_type=config.source_type,
+        policy_status=config.policy_status,
+        artifact_run_id=manifest.artifact_run_id,
+        artifact_manifest_id=manifest.artifact_manifest_id,
+        record_count=manifest.record_count,
+        parsed_records=manifest.parsed_record_count,
+        skipped_records=manifest.skipped_record_count,
+        routed_payloads=manifest.routed_payload_count,
+        observations=len(observations),
+        raw_observations=tuple(observations),
+        manifest=manifest,
+        load_summary=load_summary,
+    )
+
+
+def _parse_warc_records(
+    *,
+    config: WarcSourceConfig,
+    root: Path,
+    artifact_path: Path,
+    document_key: str,
+    materialization_root: Path,
+) -> tuple[list[WarcRecordSummary], str | None, list[str], list[str]]:
+    data = artifact_path.read_bytes()
+    offset = 0
+    records: list[WarcRecordSummary] = []
+    warnings: list[str] = []
+    errors: list[str] = []
+    warc_version: str | None = None
+    total_payload_bytes = 0
+    routed_files = 0
+    seen_identity_counts: dict[str, int] = {}
+
+    while offset < len(data):
+        while offset < len(data) and data[offset : offset + 1] in (b"\r", b"\n"):
+            offset += 1
+        if offset >= len(data):
+            break
+        if len(records) >= config.max_warc_records:
+            errors.append(f"max_warc_records exceeded: {config.max_warc_records}")
+            break
+
+        parsed = _next_warc_record(data, offset)
+        if isinstance(parsed, str):
+            errors.append(parsed)
+            break
+        (
+            next_offset,
+            version,
+            headers,
+            raw_header_bytes,
+            block,
+        ) = parsed
+        if warc_version is None:
+            warc_version = version
+
+        total_record_bytes = len(raw_header_bytes) + len(block)
+        if total_record_bytes > config.max_record_bytes:
+            errors.append(
+                f"max_record_bytes exceeded at record {len(records) + 1}: "
+                f"{total_record_bytes} > {config.max_record_bytes}"
+            )
+            offset = next_offset
+            continue
+
+        record, payload_bytes = _warc_record_summary(
+            config=config,
+            root=root,
+            document_key=document_key,
+            materialization_root=materialization_root,
+            ordinal=len(records) + 1,
+            headers=headers,
+            block=block,
+            seen_identity_counts=seen_identity_counts,
+            total_payload_bytes=total_payload_bytes,
+            routed_files=routed_files,
+        )
+        if record.materialized_path is not None:
+            routed_files += 1
+            total_payload_bytes += payload_bytes
+        records.append(record)
+        offset = next_offset
+
+    return records, warc_version, warnings, errors
+
+
+def _next_warc_record(
+    data: bytes,
+    offset: int,
+) -> tuple[int, str, dict[str, str], bytes, bytes] | str:
+    crlf_header_end = data.find(b"\r\n\r\n", offset)
+    lf_header_end = data.find(b"\n\n", offset)
+    candidates = [
+        (position, 4)
+        for position in (crlf_header_end,)
+        if position >= 0
+    ] + [
+        (position, 2)
+        for position in (lf_header_end,)
+        if position >= 0
+    ]
+    if not candidates:
+        return f"malformed WARC record at byte {offset}: missing header terminator"
+    header_end, separator_length = min(candidates, key=lambda item: item[0])
+    raw_header_bytes = data[offset:header_end]
+    header_text = raw_header_bytes.decode("utf-8", errors="replace")
+    lines = header_text.splitlines()
+    if not lines or lines[0] not in {"WARC/1.0", "WARC/1.1"}:
+        return f"malformed WARC record at byte {offset}: unsupported WARC version"
+    headers = _parse_header_lines(lines[1:])
+    content_length_text = headers.get("content-length")
+    if content_length_text is None:
+        return f"malformed WARC record at byte {offset}: missing Content-Length"
+    try:
+        content_length = int(content_length_text)
+    except ValueError:
+        return f"malformed WARC record at byte {offset}: invalid Content-Length"
+    if content_length < 0:
+        return f"malformed WARC record at byte {offset}: negative Content-Length"
+    payload_start = header_end + separator_length
+    payload_end = payload_start + content_length
+    if payload_end > len(data):
+        return f"malformed WARC record at byte {offset}: truncated payload"
+    next_offset = payload_end
+    if data[next_offset : next_offset + 2] == b"\r\n":
+        next_offset += 2
+    elif data[next_offset : next_offset + 1] == b"\n":
+        next_offset += 1
+    return next_offset, lines[0], headers, raw_header_bytes, data[payload_start:payload_end]
+
+
+def _parse_header_lines(lines: Sequence[str]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    current_key: str | None = None
+    for line in lines:
+        if not line:
+            continue
+        if line[:1] in {" ", "\t"} and current_key is not None:
+            headers[current_key] = f"{headers[current_key]} {line.strip()}"
+            continue
+        key, separator, value = line.partition(":")
+        if not separator:
+            continue
+        current_key = key.strip().lower()
+        headers[current_key] = value.strip()
+    return headers
+
+
+def _warc_record_summary(
+    *,
+    config: WarcSourceConfig,
+    root: Path,
+    document_key: str,
+    materialization_root: Path,
+    ordinal: int,
+    headers: Mapping[str, str],
+    block: bytes,
+    seen_identity_counts: dict[str, int],
+    total_payload_bytes: int,
+    routed_files: int,
+) -> tuple[WarcRecordSummary, int]:
+    record_type = headers.get("warc-type", "unknown").strip().lower() or "unknown"
+    target_summary, target_key, target_redacted = _warc_target(headers.get("warc-target-uri"))
+    identity, identity_source, identity_strength = _warc_record_identity(
+        headers=headers,
+        record_type=record_type,
+        target_uri_summary=target_summary,
+        ordinal=ordinal,
+    )
+    seen_identity_counts[identity] = seen_identity_counts.get(identity, 0) + 1
+    duplicate_count = seen_identity_counts[identity]
+    duplicate = duplicate_count > 1
+    duplicate_disambiguator: str | None = None
+    record_identity = identity
+    if duplicate:
+        duplicate_disambiguator = f"duplicate-{duplicate_count}"
+        record_identity = f"{identity}:{duplicate_disambiguator}"
+    record_key = warc_record_key(document_key, record_identity)
+    content_type = headers.get("content-type")
+    payload = b""
+    payload_content_type = content_type
+    extractor_route: str | None = None
+    materialized_path: str | None = None
+    skip_reason: str | None = None
+
+    if record_type == "response":
+        http_headers, payload = _parse_http_message_payload(block, response=True)
+        payload_content_type = _http_content_type(http_headers) or content_type
+        extractor_route = _warc_payload_route(payload_content_type)
+    elif record_type == "resource":
+        payload = block
+        extractor_route = _warc_payload_route(payload_content_type)
+    elif record_type in {
+        "warcinfo",
+        "request",
+        "metadata",
+        "revisit",
+        "conversion",
+    }:
+        skip_reason = "metadata-only"
+    elif record_type == "continuation":
+        skip_reason = "continuation-deferred"
+    else:
+        skip_reason = "unsupported-record-type"
+
+    payload_sha256: str | None = None
+    routed_payload_bytes = 0
+    if extractor_route is not None:
+        if not payload:
+            skip_reason = "empty-payload"
+        elif total_payload_bytes + len(payload) > config.max_total_payload_bytes:
+            skip_reason = "max_total_payload_bytes"
+        elif routed_files >= config.max_file_count:
+            skip_reason = "max_file_count"
+        else:
+            payload_sha256 = hashlib.sha256(payload).hexdigest()
+            materialized_path = _materialize_warc_payload(
+                config=config,
+                root=root,
+                materialization_root=materialization_root,
+                ordinal=ordinal,
+                extractor_route=extractor_route,
+                payload=payload,
+            )
+            routed_payload_bytes = len(payload)
+
+    if materialized_path is None and skip_reason is None and extractor_route is None:
+        skip_reason = "metadata-only"
+
+    return (
+        WarcRecordSummary(
+            ordinal=ordinal,
+            record_type=record_type,
+            record_id=_normalise_warc_record_id(headers.get("warc-record-id")),
+            record_key=record_key,
+            identity_source=identity_source,
+            identity_strength=identity_strength,
+            duplicate_identity=duplicate,
+            duplicate_disambiguator=duplicate_disambiguator,
+            target_uri_summary=target_summary,
+            target_key=target_key,
+            target_uri_redacted=target_redacted,
+            warc_date=headers.get("warc-date"),
+            content_type=payload_content_type,
+            payload_byte_length=len(payload),
+            payload_sha256=payload_sha256,
+            extractor_route=extractor_route,
+            materialized_path=materialized_path,
+            skip_reason=skip_reason,
+            safe_headers=_safe_warc_headers(headers),
+        ),
+        routed_payload_bytes,
+    )
+
+
+def _warc_record_identity(
+    *,
+    headers: Mapping[str, str],
+    record_type: str,
+    target_uri_summary: str | None,
+    ordinal: int,
+) -> tuple[str, str, str]:
+    record_id = _normalise_warc_record_id(headers.get("warc-record-id"))
+    if record_id:
+        return record_id, "warc_record_id", "strong"
+    warc_date = headers.get("warc-date")
+    if warc_date and target_uri_summary:
+        digest = hashlib.sha256(
+            f"{warc_date}\0{target_uri_summary}\0{record_type}".encode("utf-8")
+        ).hexdigest()[:16]
+        return f"date-target-type:{digest}", "warc-date-target-uri-type", "fallback"
+    return f"ordinal:{ordinal:04d}", "record-ordinal", "structural"
+
+
+def _normalise_warc_record_id(record_id: str | None) -> str:
+    if not record_id:
+        return ""
+    return f"record:{record_id.strip()}"
+
+
+def _parse_http_message_payload(
+    block: bytes,
+    *,
+    response: bool,
+) -> tuple[dict[str, str], bytes]:
+    delimiter = b"\r\n\r\n"
+    separator_length = 4
+    header_end = block.find(delimiter)
+    if header_end < 0:
+        delimiter = b"\n\n"
+        separator_length = 2
+        header_end = block.find(delimiter)
+    if header_end < 0:
+        return {}, b""
+    header_text = block[:header_end].decode("utf-8", errors="replace")
+    lines = header_text.splitlines()
+    if not lines:
+        return {}, b""
+    if response and not lines[0].upper().startswith("HTTP/"):
+        return {}, b""
+    return (
+        _parse_header_lines(lines[1:]),
+        block[header_end + separator_length :],
+    )
+
+
+def _http_content_type(headers: Mapping[str, str]) -> str | None:
+    return headers.get("content-type")
+
+
+def _warc_payload_route(content_type: str | None) -> str | None:
+    if content_type is None:
+        return None
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if media_type in {"text/html", "application/xhtml+xml"}:
+        return "html"
+    if media_type == "text/css":
+        return "css"
+    if media_type in {
+        "application/json",
+        "application/feed+json",
+        "application/jsonfeed+json",
+    }:
+        return "json"
+    if media_type in {
+        "application/xml",
+        "text/xml",
+        "application/rss+xml",
+        "application/atom+xml",
+    }:
+        return "xml"
+    return None
+
+
+def _materialize_warc_payload(
+    *,
+    config: WarcSourceConfig,
+    root: Path,
+    materialization_root: Path,
+    ordinal: int,
+    extractor_route: str,
+    payload: bytes,
+) -> str:
+    extension = _warc_payload_extension(extractor_route)
+    directory = materialization_root / f"record-{ordinal:04d}"
+    directory.mkdir(parents=True, exist_ok=True)
+    payload_path = directory / f"payload{extension}"
+    payload_path.write_bytes(payload)
+    return payload_path.relative_to(root).as_posix()
+
+
+def _warc_payload_extension(extractor_route: str) -> str:
+    if extractor_route == "html":
+        return ".html"
+    if extractor_route == "css":
+        return ".css"
+    if extractor_route == "json":
+        return ".json"
+    if extractor_route == "xml":
+        return ".xml"
+    return ".bin"
+
+
+def _safe_warc_headers(headers: Mapping[str, str]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, value in sorted(headers.items()):
+        key_lower = key.lower()
+        if key_lower == "warc-target-uri":
+            safe[key_lower] = _warc_target(value)[0]
+            continue
+        if _is_sensitive_header_name(key_lower):
+            safe[key_lower] = "<redacted>"
+            continue
+        if key_lower in SAFE_WARC_HEADER_NAMES:
+            safe[key_lower] = _redact_header_value(key_lower, value)
+    return safe
+
+
+def _is_sensitive_header_name(name: str) -> bool:
+    name_lower = name.lower()
+    return name_lower in SENSITIVE_HEADER_NAMES or _is_secret_marker(name_lower)
+
+
+def _redact_header_value(key: str, value: str) -> str:
+    if _is_secret_marker(key) or _is_secret_marker(value):
+        return "<redacted>"
+    return value
+
+
+def _warc_target(uri: str | None) -> tuple[str | None, str | None, bool]:
+    if not uri:
+        return None, None, False
+    summary, redacted = _redact_warc_target_uri(uri)
+    return summary, _warc_target_key(summary), redacted
+
+
+def _redact_warc_target_uri(uri: str) -> tuple[str, bool]:
+    parsed = urllib.parse.urlsplit(uri)
+    redacted = False
+    if parsed.username or parsed.password:
+        redacted = True
+    netloc = parsed.hostname or parsed.netloc
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    query_items = urllib.parse.parse_qsl(
+        parsed.query,
+        keep_blank_values=True,
+        strict_parsing=False,
+    )
+    sanitized_items: list[tuple[str, str]] = []
+    for key, value in query_items:
+        if _is_secret_marker(key) or _is_secret_marker(value):
+            sanitized_items.append((key, "<redacted>"))
+            redacted = True
+        else:
+            sanitized_items.append((key, value))
+    query = "&".join(
+        f"{urllib.parse.quote(key, safe='')}="
+        f"{value if value == '<redacted>' else urllib.parse.quote(value, safe='')}"
+        for key, value in sanitized_items
+    )
+    fragment = "" if _is_secret_marker(parsed.fragment) else parsed.fragment
+    if fragment != parsed.fragment:
+        redacted = True
+    return (
+        urllib.parse.urlunsplit(
+            (parsed.scheme, netloc, parsed.path, query, fragment)
+        ),
+        redacted,
+    )
+
+
+def _warc_target_key(uri_summary: str | None) -> str | None:
+    if not uri_summary:
+        return None
+    parsed = urllib.parse.urlsplit(uri_summary)
+    scheme = parsed.scheme.lower()
+    if scheme in {"http", "https", "mailto"}:
+        return external_url_key(uri_summary)
+    if scheme == "javascript":
+        return dynamic_key("warc.target-uri", "javascript")
+    if "$" in uri_summary or "{" in uri_summary or "}" in uri_summary:
+        return dynamic_key("warc.target-uri", "template")
+    if scheme == "file" or uri_summary.startswith("/"):
+        return external_key("file", "absolute-warc-reference")
+    if not scheme and uri_summary and not uri_summary.startswith("../"):
+        return file_key(uri_summary)
+    return unknown_key("warc.target-uri", "unsupported-scheme")
+
+
+def _warc_record_observations(
+    manifest: WarcManifest,
+    record: WarcRecordSummary,
+    document_key: str,
+) -> list[RawObservation]:
+    path = manifest.artifact_path
+    metadata = _warc_record_metadata(manifest, record, document_key)
+    observations = [
+        RawObservation(
+            kind="warc.record",
+            source_id=f"{path}#warc-record:{record.ordinal}",
+            path=path,
+            target=record.record_key,
+            name=f"{record.record_type} record {record.ordinal}",
+            confidence="extracted",
+            extractor=EXTRACTOR,
+            extractor_version=EXTRACTOR_VERSION,
+            metadata=metadata,
+        ),
+        RawObservation(
+            kind="warc.header",
+            source_id=f"{path}#warc-header:{record.ordinal}",
+            path=path,
+            confidence="extracted",
+            extractor=EXTRACTOR,
+            extractor_version=EXTRACTOR_VERSION,
+            metadata={
+                **metadata,
+                "safe_headers": dict(record.safe_headers),
+            },
+        ),
+    ]
+    if record.target_key is not None:
+        observations.append(
+            RawObservation(
+                kind="warc.reference",
+                source_id=f"{path}#warc-reference:{record.ordinal}",
+                path=path,
+                target=record.target_key,
+                confidence="extracted",
+                extractor=EXTRACTOR,
+                extractor_version=EXTRACTOR_VERSION,
+                metadata={
+                    **metadata,
+                    "source_key": record.record_key,
+                    "target_key": record.target_key,
+                    "reference_kind": "warc-target-uri",
+                    "target_kind": record.target_key.split(":", 1)[0],
+                    "not_fetched": True,
+                },
+            )
+        )
+    if record.payload_byte_length or record.materialized_path is not None:
+        observations.append(
+            RawObservation(
+                kind="warc.payload",
+                source_id=f"{path}#warc-payload:{record.ordinal}",
+                path=record.materialized_path or path,
+                confidence="extracted",
+                extractor=EXTRACTOR,
+                extractor_version=EXTRACTOR_VERSION,
+                metadata={
+                    **metadata,
+                    "warc_payload_path": record.materialized_path,
+                    "payload_sha256": record.payload_sha256,
+                    "payload_materialized": record.materialized_path is not None,
+                    "not_executed": True,
+                    "not_rendered": True,
+                },
+            )
+        )
+    return observations
+
+
+def _warc_record_metadata(
+    manifest: WarcManifest,
+    record: WarcRecordSummary,
+    document_key: str,
+) -> dict[str, Any]:
+    return {
+        "format": "warc",
+        "warc_version": manifest.warc_version,
+        "document_key": document_key,
+        "record_key": record.record_key,
+        "warc_record_key": record.record_key,
+        "record_ordinal": record.ordinal,
+        "record_type": record.record_type,
+        "record_id": record.record_id,
+        "identity_source": record.identity_source,
+        "identity_strength": record.identity_strength,
+        "duplicate_identity": record.duplicate_identity,
+        "duplicate_disambiguator": record.duplicate_disambiguator,
+        "target_uri_summary": record.target_uri_summary,
+        "target_uri_redacted": record.target_uri_redacted,
+        "warc_date": record.warc_date,
+        "content_type": record.content_type,
+        "payload_byte_length": record.payload_byte_length,
+        "extractor_route": record.extractor_route,
+        "skip_reason": record.skip_reason,
+        "artifact_manifest_id": manifest.artifact_manifest_id,
+        "artifact_run_id": manifest.artifact_run_id,
+    }
+
+
+def _annotate_warc_observations(
+    observations: Sequence[RawObservation],
+    config: WarcSourceConfig,
+    manifest: WarcManifest,
+    record_by_materialized_path: Mapping[str, WarcRecordSummary],
+) -> tuple[RawObservation, ...]:
+    annotated: list[RawObservation] = []
+    for observation in observations:
+        record = record_by_materialized_path.get(observation.path or "")
+        metadata = {
+            **dict(observation.metadata),
+            "source_id": config.source_id,
+            "source_id_configured": config.source_id,
+            "source_type": config.source_type,
+            "source_display_name": config.display_name,
+            "source_policy_status": config.policy_status,
+            "source_run_id": manifest.artifact_run_id,
+            "source_artifact_id": manifest.artifact_manifest_id,
+            "artifact_policy_status": config.policy_status,
+            "artifact_run_id": manifest.artifact_run_id,
+            "artifact_manifest_id": manifest.artifact_manifest_id,
+            "artifact_profile": config.artifact_profile,
+            "artifact_relative_path": observation.path,
+            "source_artifact_path": observation.path,
+            "artifact_retention_policy": config.retention_policy,
+            "retention_policy": config.retention_policy,
+            "config_redacted_keys": list(config.redacted_config_keys),
+        }
+        if record is not None:
+            metadata.update(
+                {
+                    "warc_record_ordinal": record.ordinal,
+                    "warc_record_key": record.record_key,
+                    "warc_record_type": record.record_type,
+                    "warc_payload_path": record.materialized_path,
+                    "artifact_byte_length": record.payload_byte_length,
+                    "source_artifact_bytes": record.payload_byte_length,
+                    "artifact_sha256": record.payload_sha256,
+                    "source_artifact_sha256": record.payload_sha256,
+                    "artifact_extractor_route": record.extractor_route,
+                }
+            )
+        annotated.append(replace(observation, metadata=metadata))
+    return tuple(annotated)
+
+
+def _warc_policy_snapshot(config: WarcSourceConfig) -> dict[str, Any]:
+    return {
+        "status": config.policy_status,
+        "max_artifact_bytes": config.max_artifact_bytes,
+        "max_file_count": config.max_file_count,
+        "max_warc_records": config.max_warc_records,
+        "max_record_bytes": config.max_record_bytes,
+        "max_total_payload_bytes": config.max_total_payload_bytes,
+        "retention_policy": config.retention_policy,
+        "requires_manual_review": config.requires_manual_review,
+    }
+
+
+def _is_secret_marker(value: str) -> bool:
+    normalized = value.lower()
+    return any(marker in normalized for marker in SECRET_MARKERS)
 
 
 def retain_feed_artifact(
@@ -1184,6 +2261,11 @@ def _validate_archive_source_type(source_type: str) -> None:
         raise SourcePolicyError(
             "source type must be a supported local artifact source type"
         )
+
+
+def _validate_warc_source_type(source_type: str) -> None:
+    if source_type not in WARC_SOURCE_TYPES:
+        raise SourcePolicyError("source type must be a supported local WARC source type")
 
 
 def _validate_policy_status(policy_status: str) -> None:

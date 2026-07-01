@@ -47,6 +47,8 @@ _SEGMENT_COUNTS = {
     "feed.item": 2,
     "feed.author": 2,
     "feed.category": 2,
+    "warc.document": 1,
+    "warc.record": 2,
     "ruby.module": 1,
     "ruby.class": 1,
     "ruby.method": 2,
@@ -244,6 +246,18 @@ def feed_category_key(feed_channel_canonical_key: str, category_id: str) -> str:
         "feed.category",
         _coerce_namespace_key(feed_channel_canonical_key, "feed.channel"),
         category_id,
+    )
+
+
+def warc_document_key(path_or_file_key: str | os.PathLike[str]) -> str:
+    return _key("warc.document", _coerce_file_key(path_or_file_key))
+
+
+def warc_record_key(warc_document_canonical_key: str, record_id: str) -> str:
+    return _key(
+        "warc.record",
+        _coerce_namespace_key(warc_document_canonical_key, "warc.document"),
+        record_id,
     )
 
 

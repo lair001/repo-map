@@ -48,6 +48,8 @@ from repomap_kg.graph_keys import (
     tool_key,
     unknown_key,
     validate_key,
+    warc_document_key,
+    warc_record_key,
 )
 
 
@@ -245,6 +247,21 @@ class GraphKeysUnitTests(unittest.TestCase):
                 "Release%20Notes"
             ),
         )
+        self.assertEqual(
+            warc_document_key("archives/example.warc"),
+            "warc.document:file%3Aarchives%2Fexample.warc",
+        )
+        self.assertEqual(
+            warc_record_key(
+                "warc.document:file%3Aarchives%2Fexample.warc",
+                "record:<urn:uuid:1>",
+            ),
+            (
+                "warc.record:"
+                "warc.document%3Afile%253Aarchives%252Fexample.warc:"
+                "record%3A%3Curn%3Auuid%3A1%3E"
+            ),
+        )
         self.assertEqual(ruby_module_key("RepoMap"), "ruby.module:RepoMap")
         self.assertEqual(
             ruby_class_key("RepoMap::Runner"),
@@ -287,6 +304,9 @@ class GraphKeysUnitTests(unittest.TestCase):
         parsed_xml_attribute = parse_key(
             "xml.attribute:file%3Abeans.xml:%2Fbeans%2Fbean:class"
         )
+        parsed_warc_record = parse_key(
+            "warc.record:warc.document%3Afile%253Aarchives%252Fexample.warc:record-1"
+        )
 
         self.assertEqual(parsed_file.graph_key_version, GRAPH_KEY_VERSION)
         self.assertEqual(parsed_file.namespace, "file")
@@ -320,6 +340,11 @@ class GraphKeysUnitTests(unittest.TestCase):
             parsed_xml_attribute.segments,
             ("file:beans.xml", "/beans/bean", "class"),
         )
+        self.assertEqual(parsed_warc_record.namespace, "warc.record")
+        self.assertEqual(
+            parsed_warc_record.segments,
+            ("warc.document:file%3Aarchives%2Fexample.warc", "record-1"),
+        )
 
     def test_parse_key_rejects_bad_grammar_and_malformed_escapes(self):
         cases = (
@@ -334,6 +359,7 @@ class GraphKeysUnitTests(unittest.TestCase):
             ("config.path:file%3Asettings.json:", "segment"),
             ("css.rule:file%3Astyle.css:", "segment"),
             ("xml.attribute:file%3Abeans.xml:%2Fbeans", "segments"),
+            ("warc.record:warc.document%3Afile%253Aarchives%252Fexample.warc", "segments"),
         )
 
         for key, message in cases:

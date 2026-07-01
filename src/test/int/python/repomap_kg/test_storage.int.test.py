@@ -1,5 +1,6 @@
 import os
 import json
+import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -18,6 +19,7 @@ from repomap_kg.observations import RawObservation
 from repomap_kg.source_ingestion import (
     FeedFetchResponse,
     import_archive_source,
+    import_warc_source,
     ingest_feed_source,
 )
 from repomap_kg.storage import (
@@ -25,6 +27,7 @@ from repomap_kg.storage import (
     apply_migrations,
     default_rdbms_root,
     load_file_observations,
+    query_canonical_edge_explanation,
     query_canonical_edge_records,
     query_canonical_node_records,
     raw_observation_rows_from_observations,
@@ -2720,6 +2723,148 @@ FROM canonical_edges;
         self.assertEqual(payload["source_id"], "example-test-report")
         self.assertEqual(payload["source_type"], "test_report.artifact")
         self.assertEqual(payload["included_files"], 6)
+        self.assertEqual(str(payload["observations"]), raw_count)
+
+    def test_sources_import_warc_loads_local_warc_fixture(self):
+        require_postgres_binaries()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root_path = copy_warc_fixture_root(Path(tmpdir))
+            config_path = root_path / "warc_sources" / "allowed-warc.toml"
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                summary = import_warc_source(
+                    config_path,
+                    repository_name="fixture",
+                    root_path=root_path,
+                    psql_args=postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                    clock=fixed_source_clock,
+                )
+                warc_documents = query_canonical_node_records(
+                    postgres.psql_args,
+                    root_path=str(root_path),
+                    kind="warc.document",
+                    psql_command=postgres.psql_command,
+                )
+                warc_records = query_canonical_node_records(
+                    postgres.psql_args,
+                    root_path=str(root_path),
+                    kind="warc.record",
+                    psql_command=postgres.psql_command,
+                )
+                html_documents = query_canonical_node_records(
+                    postgres.psql_args,
+                    root_path=str(root_path),
+                    kind="html.document",
+                    psql_command=postgres.psql_command,
+                )
+                css_documents = query_canonical_node_records(
+                    postgres.psql_args,
+                    root_path=str(root_path),
+                    kind="css.document",
+                    psql_command=postgres.psql_command,
+                )
+                config_documents = query_canonical_node_records(
+                    postgres.psql_args,
+                    root_path=str(root_path),
+                    kind="config.document",
+                    psql_command=postgres.psql_command,
+                )
+                references = query_canonical_edge_records(
+                    postgres.psql_args,
+                    root_path=str(root_path),
+                    kind="references",
+                    psql_command=postgres.psql_command,
+                )
+                raw_count = postgres.psql_scalar("SELECT count(*) FROM raw_observations;")
+                warc_reference = next(
+                    edge
+                    for edge in references
+                    if edge.source_key.startswith("warc.record:")
+                    and edge.target_key.startswith("external.url:")
+                )
+                explanation = query_canonical_edge_explanation(
+                    postgres.psql_args,
+                    root_path=str(root_path),
+                    source_key=warc_reference.source_key,
+                    kind=warc_reference.edge_kind,
+                    target_key=warc_reference.target_key,
+                    identity_metadata_hash=warc_reference.identity_metadata_hash,
+                    psql_command=postgres.psql_command,
+                )
+
+        self.assertEqual(summary.source_id, "example-warc-archive")
+        self.assertEqual(summary.record_count, 7)
+        self.assertEqual(summary.routed_payloads, 3)
+        self.assertEqual(summary.load_summary.files, 3)
+        self.assertEqual(raw_count, str(summary.observations))
+        self.assertEqual(len(warc_documents), 1)
+        self.assertEqual(len(warc_records), 7)
+        self.assertTrue(html_documents)
+        self.assertTrue(css_documents)
+        self.assertTrue(config_documents)
+        self.assertTrue(
+            any(edge.source_key.startswith("warc.record:") for edge in references)
+        )
+        self.assertIsNotNone(explanation.edge)
+        self.assertTrue(explanation.evidence)
+        source_metadata = json.dumps(
+            [observation.to_dict() for observation in summary.raw_observations],
+            sort_keys=True,
+        )
+        explain_payload = json.dumps(explanation.to_dict(), sort_keys=True)
+        self.assertIn('"warc_record_key"', source_metadata)
+        self.assertIn('"warc_payload_path"', source_metadata)
+        self.assertNotIn("fixture-secret", source_metadata)
+        self.assertNotIn("fixture-secret", explain_payload)
+
+    def test_sources_import_warc_cli_loads_fixture_and_preserves_json_summary(self):
+        require_postgres_binaries()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root_path = copy_warc_fixture_root(Path(tmpdir))
+            config_path = root_path / "warc_sources" / "allowed-warc.toml"
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                exit_code, stdout, stderr = run_repo_map_in_process(
+                    "sources",
+                    "import-warc",
+                    "--config",
+                    str(config_path),
+                    "--repository-name",
+                    "fixture",
+                    "--root-path",
+                    str(root_path),
+                    "--psql-command",
+                    postgres.psql_command,
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--json",
+                )
+                raw_count = postgres.psql_scalar("SELECT count(*) FROM raw_observations;")
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(stderr, "")
+        payload = json.loads(stdout)
+        self.assertEqual(payload["source_id"], "example-warc-archive")
+        self.assertEqual(payload["source_type"], "saved_page.archive")
+        self.assertEqual(payload["record_count"], 7)
+        self.assertEqual(payload["routed_payloads"], 3)
         self.assertEqual(str(payload["observations"]), raw_count)
 
     def test_mcp_read_only_source_feed_tools_read_rss2_loaded_rows(self):
@@ -6450,6 +6595,24 @@ def source_fixture(filename: str) -> Path:
 
 def archive_source_fixture(filename: str) -> Path:
     return source_ingestion_fixture_root() / "archive_sources" / filename
+
+
+def warc_source_fixture(filename: str) -> Path:
+    return source_ingestion_fixture_root() / "warc_sources" / filename
+
+
+def copy_warc_fixture_root(parent: Path) -> Path:
+    root = parent / "source_ingestion"
+    root.mkdir()
+    shutil.copytree(
+        source_ingestion_fixture_root() / "warc_artifacts",
+        root / "warc_artifacts",
+    )
+    shutil.copytree(
+        source_ingestion_fixture_root() / "warc_sources",
+        root / "warc_sources",
+    )
+    return root
 
 
 def source_ingestion_fixture_root() -> Path:

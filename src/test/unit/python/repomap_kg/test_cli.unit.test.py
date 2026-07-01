@@ -685,6 +685,91 @@ class CliUnitTests(unittest.TestCase):
 
         self.assertIn("unrecognized arguments: --url", stderr.getvalue())
 
+    def test_sources_import_warc_prints_json_summary_from_config_only(self):
+        from repomap_kg.source_ingestion import WarcImportSummary
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "warc-source.toml"
+            config_path.write_text("[source]\nid = \"example-warc-archive\"\n")
+            stdout = io.StringIO()
+            expected = WarcImportSummary(
+                source_id="example-warc-archive",
+                source_type="saved_page.archive",
+                policy_status="allowed",
+                artifact_run_id="20260630T120000Z",
+                artifact_manifest_id="manifest123",
+                record_count=3,
+                parsed_records=3,
+                skipped_records=0,
+                routed_payloads=2,
+                observations=12,
+                raw_observations=(),
+                manifest=None,
+                load_summary=LoadSummary(repository_id=7, run_id=11, files=2),
+            )
+
+            with patch(
+                "repomap_kg.cli.import_warc_source",
+                return_value=expected,
+            ) as import_warc:
+                with redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            "sources",
+                            "import-warc",
+                            "--config",
+                            str(config_path),
+                            "--repository-name",
+                            "fixture",
+                            "--root-path",
+                            "/tmp/fixture",
+                            "--pg-host",
+                            "/tmp/socket",
+                            "--pg-port",
+                            "5432",
+                            "--pg-user",
+                            "repo_map_test",
+                            "--pg-database",
+                            "postgres",
+                            "--psql-command",
+                            "/bin/psql",
+                            "--json",
+                        ]
+                    )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["source_id"], "example-warc-archive")
+        self.assertEqual(payload["repository_id"], 7)
+        self.assertEqual(payload["run_id"], 11)
+        self.assertEqual(payload["record_count"], 3)
+        self.assertEqual(payload["routed_payloads"], 2)
+        import_warc.assert_called_once()
+        self.assertEqual(import_warc.call_args.kwargs["config_path"], str(config_path))
+        self.assertEqual(import_warc.call_args.kwargs["root_path"], "/tmp/fixture")
+
+    def test_sources_import_warc_rejects_arbitrary_url_argument(self):
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            with self.assertRaises(SystemExit):
+                main(
+                    [
+                        "sources",
+                        "import-warc",
+                        "--config",
+                        "/tmp/warc-source.toml",
+                        "--repository-name",
+                        "fixture",
+                        "--url",
+                        "https://example.invalid/archive.warc",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertIn("unrecognized arguments: --url", stderr.getvalue())
+
     def test_storage_files_prints_filtered_json_records(self):
         records = (
             FileRecord(

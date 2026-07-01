@@ -11,11 +11,15 @@ from repomap_kg.source_ingestion import (
     SourcePolicyError,
     archive_observations_from_manifest,
     build_archive_manifest,
+    build_warc_manifest,
     fetch_feed_source,
     import_archive_source,
+    import_warc_source,
     ingest_feed_source,
     load_archive_source_config,
     load_feed_source_config,
+    load_warc_source_config,
+    warc_observations_from_manifest,
 )
 
 
@@ -601,6 +605,192 @@ class SourceIngestionUnitTests(unittest.TestCase):
             with self.assertRaisesRegex(SourcePolicyError, "network acquisition"):
                 load_archive_source_config(url_path)
 
+    def test_warc_config_policy_rejects_blocked_url_fields_and_missing_limits(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "repo"
+            root.mkdir()
+            (root / "warc_artifacts").mkdir()
+            (root / "warc_artifacts" / "example.warc").write_bytes(b"WARC/1.1\r\n")
+            allowed = self.write_warc_config(root / "allowed.toml")
+            blocked = self.write_warc_config(
+                root / "blocked.toml",
+                policy_status="blocked_terms_risk",
+            )
+            acquisition = self.write_warc_config(
+                root / "acquisition.toml",
+                extra="\n[acquisition]\nurl = \"https://example.invalid/archive.warc\"\n",
+            )
+            missing_records = self.write_warc_config(
+                root / "missing-records.toml",
+                max_warc_records=None,
+            )
+            wrong_kind = self.write_warc_config(
+                root / "wrong-kind.toml",
+                artifact_kind="directory",
+            )
+
+            config = load_warc_source_config(allowed)
+
+            self.assertEqual(config.source_id, "example-warc-archive")
+            self.assertEqual(config.source_type, "saved_page.archive")
+            self.assertEqual(config.artifact_kind, "warc")
+            self.assertEqual(config.max_warc_records, 100)
+            with self.assertRaisesRegex(SourcePolicyError, "policy status"):
+                load_warc_source_config(blocked)
+            with self.assertRaisesRegex(SourcePolicyError, "network acquisition"):
+                load_warc_source_config(acquisition)
+            with self.assertRaisesRegex(SourcePolicyError, "max_warc_records"):
+                load_warc_source_config(missing_records)
+            with self.assertRaisesRegex(SourcePolicyError, "artifact.kind"):
+                load_warc_source_config(wrong_kind)
+
+    def test_warc_manifest_parses_records_redacts_and_materializes_payloads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "repo"
+            root.mkdir()
+            self.write_warc_fixture(root)
+            config = load_warc_source_config(self.write_warc_config(root / "warc.toml"))
+
+            manifest = build_warc_manifest(config, root_path=root, clock=self.fixed_clock)
+            materialized = [
+                record.materialized_path
+                for record in manifest.records
+                if record.materialized_path is not None
+            ]
+            materialized_exists = [
+                (root / relative_path).is_file()
+                for relative_path in materialized
+            ]
+
+        payload = json.dumps(manifest.to_jsonable(), sort_keys=True)
+        self.assertEqual(manifest.record_count, 7)
+        self.assertEqual(manifest.parsed_record_count, 7)
+        self.assertEqual(manifest.routed_payload_count, 3)
+        self.assertEqual(manifest.skipped_record_count, 1)
+        self.assertIn('"warc_version": "WARC/1.1"', payload)
+        self.assertIn('"identity_source": "warc_record_id"', payload)
+        self.assertIn('"duplicate_identity": true', payload)
+        self.assertIn('"extractor_route": "html"', payload)
+        self.assertIn('"extractor_route": "css"', payload)
+        self.assertIn('"extractor_route": "json"', payload)
+        self.assertIn('"skip_reason": "metadata-only"', payload)
+        self.assertIn("<redacted>", payload)
+        self.assertNotIn("fixture-secret", payload)
+        self.assertEqual(
+            materialized,
+            [
+                ".repomap/source-artifacts/example-warc-archive/20260630T120000Z/warc-payloads/record-0002/payload.html",
+                ".repomap/source-artifacts/example-warc-archive/20260630T120000Z/warc-payloads/record-0003/payload.css",
+                ".repomap/source-artifacts/example-warc-archive/20260630T120000Z/warc-payloads/record-0004/payload.json",
+            ],
+        )
+        self.assertTrue(all(materialized_exists))
+
+    def test_warc_observations_route_payload_extractors_and_attach_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "repo"
+            root.mkdir()
+            self.write_warc_fixture(root)
+            config = load_warc_source_config(
+                self.write_warc_config(root / "warc.toml", secret=True)
+            )
+            manifest = build_warc_manifest(config, root_path=root, clock=self.fixed_clock)
+            observations = warc_observations_from_manifest(
+                config,
+                manifest,
+                root_path=root,
+            )
+
+        kinds = {observation.kind for observation in observations}
+        self.assertIn("warc.document", kinds)
+        self.assertIn("warc.record", kinds)
+        self.assertIn("warc.header", kinds)
+        self.assertIn("warc.payload", kinds)
+        self.assertIn("warc.reference", kinds)
+        self.assertIn("html.document", kinds)
+        self.assertIn("css.document", kinds)
+        self.assertIn("config.document", kinds)
+        self.assertNotIn("javascript.execution", kinds)
+        document = next(
+            observation
+            for observation in observations
+            if observation.kind == "warc.document"
+        )
+        self.assertEqual(document.target, "warc.document:file%3Awarc_artifacts%2Fexample.warc")
+        payload = json.dumps(
+            [observation.to_dict() for observation in observations],
+            sort_keys=True,
+        )
+        self.assertIn('"source_id": "example-warc-archive"', payload)
+        self.assertIn('"warc_record_ordinal": 2', payload)
+        self.assertIn('"warc_record_key"', payload)
+        self.assertIn('"warc_payload_path"', payload)
+        self.assertIn("credentials.token", payload)
+        self.assertNotIn("fixture-secret", payload)
+        self.assertNotIn("Set-Cookie: session", payload)
+        self.assertNotIn("Authorization: Bearer", payload)
+
+    def test_warc_record_and_byte_limits_emit_parse_errors_without_payload_routing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "repo"
+            root.mkdir()
+            self.write_warc_fixture(root)
+            limited = load_warc_source_config(
+                self.write_warc_config(root / "limited.toml", max_warc_records=2)
+            )
+            too_small = load_warc_source_config(
+                self.write_warc_config(root / "small.toml", max_record_bytes=32)
+            )
+
+            limited_manifest = build_warc_manifest(
+                limited,
+                root_path=root,
+                clock=self.fixed_clock,
+            )
+            small_manifest = build_warc_manifest(
+                too_small,
+                root_path=root,
+                clock=self.fixed_clock,
+            )
+            observations = warc_observations_from_manifest(
+                limited,
+                limited_manifest,
+                root_path=root,
+            )
+
+        self.assertTrue(any("max_warc_records" in error for error in limited_manifest.errors))
+        self.assertTrue(any("max_record_bytes" in error for error in small_manifest.errors))
+        self.assertIn("warc.parse_error", {observation.kind for observation in observations})
+
+    def test_import_warc_source_loads_observations_and_reports_record_counts(self):
+        captured = {}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "repo"
+            root.mkdir()
+            self.write_warc_fixture(root)
+            config_path = self.write_warc_config(root / "warc.toml")
+
+            def capture_loader(_psql_args, observations, **_kwargs):
+                captured["observations"] = tuple(observations)
+                return self.fake_loader(_psql_args, observations, **_kwargs)
+
+            summary = import_warc_source(
+                config_path,
+                repository_name="fixture",
+                root_path=root,
+                psql_args=(),
+                loader=capture_loader,
+                clock=self.fixed_clock,
+            )
+
+        self.assertEqual(summary.source_id, "example-warc-archive")
+        self.assertEqual(summary.record_count, 7)
+        self.assertEqual(summary.routed_payloads, 3)
+        self.assertGreater(summary.observations, 10)
+        self.assertIn("warc.record", {item.kind for item in captured["observations"]})
+        self.assertEqual(summary.to_jsonable()["repository_id"], 7)
+        self.assertEqual(summary.to_jsonable()["routed_payloads"], 3)
+
     def write_config(
         self,
         path: Path,
@@ -759,6 +949,125 @@ class SourceIngestionUnitTests(unittest.TestCase):
         (artifact / ".git" / "config").write_text("[core]\n", encoding="utf-8")
         return artifact
 
+    def write_warc_config(
+        self,
+        path: Path,
+        *,
+        source_id: str = "example-warc-archive",
+        source_type: str = "saved_page.archive",
+        policy_status: str = "allowed",
+        artifact_path: str = "warc_artifacts/example.warc",
+        artifact_kind: str = "warc",
+        max_artifact_bytes: int = 1048576,
+        max_file_count: int = 10,
+        max_warc_records: int | None = 100,
+        max_record_bytes: int | None = 1048576,
+        max_total_payload_bytes: int | None = 1048576,
+        secret: bool = False,
+        extra: str = "",
+    ) -> Path:
+        policy_lines = [
+            f'status = "{policy_status}"',
+            f"max_artifact_bytes = {max_artifact_bytes}",
+            f"max_file_count = {max_file_count}",
+            'retention_policy = "materialize-safe-payloads"',
+            "requires_manual_review = false",
+        ]
+        if max_warc_records is not None:
+            policy_lines.append(f"max_warc_records = {max_warc_records}")
+        if max_record_bytes is not None:
+            policy_lines.append(f"max_record_bytes = {max_record_bytes}")
+        if max_total_payload_bytes is not None:
+            policy_lines.append(
+                f"max_total_payload_bytes = {max_total_payload_bytes}"
+            )
+        secret_block = (
+            '\n[credentials]\ntoken = "fixture-secret"\n' if secret else ""
+        )
+        path.write_text(
+            "\n".join(
+                [
+                    "[source]",
+                    f'id = "{source_id}"',
+                    f'type = "{source_type}"',
+                    'display_name = "Example WARC Archive"',
+                    "",
+                    "[policy]",
+                    *policy_lines,
+                    "",
+                    "[artifact]",
+                    f'path = "{artifact_path}"',
+                    f'kind = "{artifact_kind}"',
+                    'profile = "warc-local-archive"',
+                    secret_block,
+                    extra,
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def write_warc_fixture(self, root: Path) -> Path:
+        artifact_dir = root / "warc_artifacts"
+        artifact_dir.mkdir()
+        warc_path = artifact_dir / "example.warc"
+        records = [
+            warc_record(
+                "warcinfo",
+                "urn:uuid:warcinfo",
+                None,
+                b"software: RepoMap fixture\n",
+                content_type="application/warc-fields",
+            ),
+            http_response_record(
+                "response",
+                "urn:uuid:html-1",
+                "https://user:fixture-secret@example.invalid/page.html?token=fixture-secret&ok=1",
+                "text/html",
+                b"<!doctype html><html><head><title>Archived</title><link rel=\"stylesheet\" href=\"style.css\"></head><body><h1 id=\"top\">Archived</h1></body></html>",
+                http_headers={
+                    "Set-Cookie": "session=fixture-secret",
+                    "Content-Type": "text/html",
+                },
+            ),
+            warc_record(
+                "resource",
+                "urn:uuid:css-1",
+                "https://example.invalid/style.css",
+                b".archived { color: #fff; }\n",
+                content_type="text/css",
+            ),
+            warc_record(
+                "resource",
+                "urn:uuid:json-1",
+                "https://example.invalid/config.json",
+                b'{"command": "python3", "credentials": {"token": "fixture-secret"}}',
+                content_type="application/json",
+            ),
+            http_request_record(
+                "urn:uuid:request-1",
+                "https://example.invalid/page.html",
+                {"Authorization": "Bearer fixture-secret", "Cookie": "a=fixture-secret"},
+            ),
+            warc_record(
+                "revisit",
+                "urn:uuid:revisit-1",
+                "https://example.invalid/page.html",
+                b"",
+                content_type="application/warc-fields",
+                extra_headers={"WARC-Refers-To": "<urn:uuid:html-1>"},
+            ),
+            warc_record(
+                "metadata",
+                "urn:uuid:html-1",
+                "https://example.invalid/page.html",
+                b"duplicate id metadata\n",
+                content_type="text/plain",
+            ),
+        ]
+        warc_path.write_bytes(b"".join(records))
+        return warc_path
+
     def fetcher_returning(
         self,
         body: bytes,
@@ -786,6 +1095,86 @@ class SourceIngestionUnitTests(unittest.TestCase):
     @staticmethod
     def fixed_clock():
         return datetime(2026, 6, 30, 12, 0, 0, tzinfo=UTC)
+
+
+def warc_record(
+    record_type: str,
+    record_id: str,
+    target_uri: str | None,
+    body: bytes,
+    *,
+    content_type: str,
+    extra_headers: dict[str, str] | None = None,
+) -> bytes:
+    headers = {
+        "WARC-Type": record_type,
+        "WARC-Record-ID": f"<{record_id}>",
+        "WARC-Date": "2026-06-30T12:00:00Z",
+        "Content-Type": content_type,
+        "Content-Length": str(len(body)),
+    }
+    if target_uri is not None:
+        headers["WARC-Target-URI"] = target_uri
+    if extra_headers:
+        headers.update(extra_headers)
+    return _header_block(headers) + body + b"\r\n\r\n"
+
+
+def http_response_record(
+    record_type: str,
+    record_id: str,
+    target_uri: str,
+    content_type: str,
+    body: bytes,
+    *,
+    http_headers: dict[str, str],
+) -> bytes:
+    response_headers = {
+        **http_headers,
+        "Content-Length": str(len(body)),
+    }
+    http_payload = (
+        b"HTTP/1.1 200 OK\r\n"
+        + _http_header_lines(response_headers)
+        + b"\r\n"
+        + body
+    )
+    return warc_record(
+        record_type,
+        record_id,
+        target_uri,
+        http_payload,
+        content_type="application/http; msgtype=response",
+    )
+
+
+def http_request_record(
+    record_id: str,
+    target_uri: str,
+    request_headers: dict[str, str],
+) -> bytes:
+    http_payload = (
+        b"GET /page.html HTTP/1.1\r\n"
+        + _http_header_lines(request_headers)
+        + b"\r\n"
+    )
+    return warc_record(
+        "request",
+        record_id,
+        target_uri,
+        http_payload,
+        content_type="application/http; msgtype=request",
+    )
+
+
+def _header_block(headers: dict[str, str]) -> bytes:
+    return b"WARC/1.1\r\n" + _http_header_lines(headers) + b"\r\n"
+
+
+def _http_header_lines(headers: dict[str, str]) -> bytes:
+    return "".join(f"{key}: {value}\r\n" for key, value in headers.items()).encode(
+        "utf-8"
+    )
 
 
 class FakeOpener:

@@ -3552,6 +3552,101 @@ cwd = "src/main/python"
         self.assertEqual(payload["summary"]["errors"], 1)
         self.assertIn("config.path", payload["diagnostics"][0]["message"])
 
+    def test_warc_document_record_and_reference_canonicalize_without_new_edges(self):
+        record_key = (
+            "warc.record:"
+            "warc.document%3Afile%253Aarchives%252Fexample.warc:"
+            "urn%3Auuid%3Ahtml-1"
+        )
+        observations = [
+            RawObservation(
+                kind="warc.document",
+                source_id="archives/example.warc#warc-document",
+                path="archives/example.warc",
+                target="warc.document:file%3Aarchives%2Fexample.warc",
+                confidence="extracted",
+                extractor="source-ingestion",
+                extractor_version="0.1.0",
+                metadata={
+                    "format": "warc",
+                    "warc_version": "WARC/1.1",
+                    "record_count": 1,
+                    "routed_payload_count": 1,
+                },
+            ),
+            RawObservation(
+                kind="warc.record",
+                source_id="archives/example.warc#warc-record:1",
+                path="archives/example.warc",
+                target=record_key,
+                confidence="extracted",
+                extractor="source-ingestion",
+                extractor_version="0.1.0",
+                metadata={
+                    "document_key": "warc.document:file%3Aarchives%2Fexample.warc",
+                    "record_type": "response",
+                    "record_ordinal": 1,
+                    "identity_source": "warc_record_id",
+                    "identity_strength": "strong",
+                    "duplicate_identity": False,
+                    "target_uri_summary": "https://example.invalid/page.html",
+                },
+            ),
+            RawObservation(
+                kind="warc.reference",
+                source_id="archives/example.warc#warc-record:1:target-uri",
+                path="archives/example.warc",
+                target="external.url:https%3A%2F%2Fexample.invalid%2Fpage.html",
+                confidence="extracted",
+                extractor="source-ingestion",
+                extractor_version="0.1.0",
+                metadata={
+                    "source_key": record_key,
+                    "reference_kind": "target-uri",
+                    "not_fetched": True,
+                },
+            ),
+        ]
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["summary"]["nodes"], 4)
+        self.assertEqual(payload["summary"]["edges"], 3)
+        self.assertEqual(
+            {(node["kind"], node["canonical_key"]) for node in payload["nodes"]},
+            {
+                ("file", "file:archives/example.warc"),
+                ("warc.document", "warc.document:file%3Aarchives%2Fexample.warc"),
+                ("warc.record", record_key),
+                ("external.url", "external.url:https%3A%2F%2Fexample.invalid%2Fpage.html"),
+            },
+        )
+        self.assertEqual(
+            {
+                (edge["source_key"], edge["kind"], edge["target_key"])
+                for edge in payload["edges"]
+            },
+            {
+                (
+                    "file:archives/example.warc",
+                    "defines",
+                    "warc.document:file%3Aarchives%2Fexample.warc",
+                ),
+                (
+                    "warc.document:file%3Aarchives%2Fexample.warc",
+                    "defines",
+                    record_key,
+                ),
+                (
+                    record_key,
+                    "references",
+                    "external.url:https%3A%2F%2Fexample.invalid%2Fpage.html",
+                ),
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

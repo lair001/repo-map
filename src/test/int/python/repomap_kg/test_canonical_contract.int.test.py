@@ -32,6 +32,7 @@ from repomap_kg.graph_keys import (
     dynamic_key,
     env_key,
     external_key,
+    external_url_key,
     feed_author_key,
     feed_category_key,
     feed_channel_key,
@@ -58,6 +59,8 @@ from repomap_kg.graph_keys import (
     tool_key,
     unknown_key,
     validate_key,
+    warc_document_key,
+    warc_record_key,
     xml_attribute_key,
     xml_document_key,
     xml_element_key,
@@ -2388,6 +2391,105 @@ a.external,
         self.assertEqual(
             [diagnostic["field"] for diagnostic in payload["diagnostics"]],
             ["target", "target", "target", "metadata.page_key"],
+        )
+
+    def test_warc_observations_create_archive_nodes_and_reference_edges(self):
+        document_key = warc_document_key("archives/example.warc")
+        record_key = warc_record_key(document_key, "record:<urn:uuid:html-1>")
+        target_key = external_url_key("https://example.invalid/page.html")
+        observations = (
+            RawObservation(
+                kind="warc.document",
+                source_id="archives/example.warc#warc-document",
+                path="archives/example.warc",
+                target=document_key,
+                confidence="extracted",
+                extractor="source-ingestion",
+                extractor_version="0.1.0",
+                metadata={
+                    "format": "warc",
+                    "warc_version": "WARC/1.1",
+                    "record_count": 1,
+                    "routed_payload_count": 1,
+                },
+            ),
+            RawObservation(
+                kind="warc.record",
+                source_id="archives/example.warc#warc-record:1",
+                path="archives/example.warc",
+                target=record_key,
+                confidence="extracted",
+                extractor="source-ingestion",
+                extractor_version="0.1.0",
+                metadata={
+                    "document_key": document_key,
+                    "record_type": "response",
+                    "record_ordinal": 1,
+                    "identity_source": "warc_record_id",
+                    "identity_strength": "strong",
+                    "duplicate_identity": False,
+                    "target_uri_summary": "https://example.invalid/page.html",
+                    "content_type": "text/html",
+                    "payload_byte_length": 42,
+                    "extractor_route": "html",
+                },
+            ),
+            RawObservation(
+                kind="warc.reference",
+                source_id="archives/example.warc#warc-reference:1",
+                path="archives/example.warc",
+                target=target_key,
+                confidence="extracted",
+                extractor="source-ingestion",
+                extractor_version="0.1.0",
+                metadata={
+                    "source_key": record_key,
+                    "reference_kind": "warc-target-uri",
+                    "not_fetched": True,
+                    "record_type": "response",
+                    "record_ordinal": 1,
+                    "target_uri_summary": "https://example.invalid/page.html",
+                },
+            ),
+            RawObservation(
+                kind="warc.header",
+                source_id="archives/example.warc#warc-header:1",
+                path="archives/example.warc",
+                confidence="extracted",
+                extractor="source-ingestion",
+                extractor_version="0.1.0",
+                metadata={"safe_headers": {"content-type": "text/html"}},
+            ),
+            RawObservation(
+                kind="warc.payload",
+                source_id="archives/example.warc#warc-payload:1",
+                path=".repomap/source-artifacts/example/warc-payloads/record-0001/payload.html",
+                confidence="extracted",
+                extractor="source-ingestion",
+                extractor_version="0.1.0",
+                metadata={"warc_payload_path": "payload.html"},
+            ),
+        )
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["summary"]["edges"], 3)
+        self.assertIn(
+            ("file", "file:archives/example.warc"),
+            {(node["kind"], node["canonical_key"]) for node in payload["nodes"]},
+        )
+        self.assertEqual(
+            {
+                (edge["source_key"], edge["kind"], edge["target_key"])
+                for edge in payload["edges"]
+            },
+            {
+                ("file:archives/example.warc", "defines", document_key),
+                (document_key, "defines", record_key),
+                (record_key, "references", target_key),
+            },
         )
 
 
