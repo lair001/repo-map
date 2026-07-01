@@ -285,6 +285,50 @@ class DiscoveryUnitTests(unittest.TestCase):
         self.assertNotIn("fake-kubernetes-password", payload)
         self.assertNotIn("fake-client-secret", payload)
 
+    def test_discover_observations_includes_terraform_hcl_profile_facts(self):
+        fixture_root = Path(__file__).parents[3] / "fixtures" / "terraform_hcl" / "basic"
+
+        observations = discover_observations(fixture_root)
+
+        payload = "\n".join(item.to_json_line() for item in observations)
+        kinds = {observation.kind for observation in observations}
+        languages = {
+            observation.path: observation.metadata.get("language")
+            for observation in observations
+            if observation.kind == "file"
+        }
+
+        self.assertEqual(languages["main.tf"], "terraform")
+        self.assertEqual(languages["terraform.tfvars"], "terraform")
+        self.assertEqual(languages["dev.auto.tfvars"], "terraform")
+        self.assertIn("terraform.file", kinds)
+        self.assertIn("terraform.block", kinds)
+        self.assertIn("terraform.resource", kinds)
+        self.assertIn("terraform.module", kinds)
+        self.assertIn("terraform.variable", kinds)
+        self.assertIn("terraform.output", kinds)
+        self.assertIn("terraform.reference", kinds)
+        self.assertIn("terraform.import", kinds)
+        self.assertIn("terraform.redaction", kinds)
+        self.assertIn("terraform.parse_error", kinds)
+        self.assertNotIn("fake-tfhcl-provider-secret", payload)
+        self.assertNotIn("fake-tfhcl-module-secret", payload)
+        self.assertNotIn("fake-tfhcl-tfvars-secret", payload)
+        self.assertNotIn("fake-tfhcl-import-secret", payload)
+
+    def test_discover_repository_classifies_terraform_hcl_as_config(self):
+        fixture_root = Path(__file__).parents[3] / "fixtures" / "terraform_hcl" / "basic"
+
+        file_infos = discover_repository(fixture_root)
+
+        by_path = {file_info.path: file_info for file_info in file_infos}
+        self.assertEqual(by_path["main.tf"].language, "terraform")
+        self.assertEqual(by_path["main.tf"].role, "config")
+        self.assertEqual(by_path["terraform.tfvars"].language, "terraform")
+        self.assertEqual(by_path["terraform.tfvars"].role, "config")
+        self.assertEqual(by_path["dev.auto.tfvars"].language, "terraform")
+        self.assertEqual(by_path["dev.auto.tfvars"].role, "config")
+
     def test_discover_observations_includes_ruby_facts_for_ruby_files_and_dsls(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

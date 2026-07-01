@@ -3422,6 +3422,48 @@ class CanonicalizationUnitTests(unittest.TestCase):
                 },
             ),
             RawObservation(
+                kind="terraform.block",
+                source_id="infra/main.tf#terraform-block:resource:1",
+                path="infra/main.tf",
+                confidence="extracted",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={
+                    "format": "terraform-hcl",
+                    "profile": "terraform",
+                    "block_type": "resource",
+                    "labels": ["aws_s3_bucket", "app"],
+                },
+            ),
+            RawObservation(
+                kind="terraform.moved",
+                source_id="infra/main.tf#terraform-moved:42",
+                path="infra/main.tf",
+                confidence="heuristic",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={
+                    "format": "terraform-hcl",
+                    "profile": "terraform",
+                    "from_summary": "aws_s3_bucket.old",
+                    "to_summary": "aws_s3_bucket.app",
+                },
+            ),
+            RawObservation(
+                kind="terraform.parse_error",
+                source_id="infra/broken.tf#terraform-parse-error:document",
+                path="infra/broken.tf",
+                confidence="unknown",
+                extractor="repo-config",
+                extractor_version="0.1.0",
+                metadata={
+                    "format": "terraform-hcl",
+                    "profile": "terraform",
+                    "error_kind": "terraform-unclosed-block",
+                    "recovered": True,
+                },
+            ),
+            RawObservation(
                 kind="kubernetes.resource",
                 source_id="deploy/app.json#kubernetes-resource:Deployment:app",
                 path="deploy/app.json",
@@ -3444,7 +3486,7 @@ class CanonicalizationUnitTests(unittest.TestCase):
         self.assertEqual(payload["diagnostics"], [])
         self.assertEqual(payload["summary"]["nodes"], 0)
         self.assertEqual(payload["summary"]["edges"], 0)
-        self.assertEqual(payload["summary"]["evidence"], 3)
+        self.assertEqual(payload["summary"]["evidence"], 6)
         self.assertEqual(payload["summary"]["node_evidence_links"], 0)
         self.assertEqual(payload["summary"]["edge_evidence_links"], 0)
 

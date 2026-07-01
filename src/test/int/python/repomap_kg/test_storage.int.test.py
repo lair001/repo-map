@@ -3997,6 +3997,127 @@ FROM raw_observations;
             set(),
         )
 
+    def test_storage_loads_tfhcl_profile_observations_as_raw_evidence(self):
+        require_postgres_binaries()
+        fixture_root = terraform_hcl_fixture("basic")
+
+        discover_exit_code, discover_stdout, discover_stderr = (
+            run_repo_map_in_process(
+                "discover",
+                str(fixture_root),
+                "--jsonl",
+            )
+        )
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as jsonl_file:
+            jsonl_file.write(discover_stdout)
+            jsonl_file.flush()
+
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                storage_args = (
+                    "--root-path",
+                    str(fixture_root),
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                )
+                load_exit_code, _load_stdout, load_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "load-files",
+                        jsonl_file.name,
+                        "--repository-name",
+                        "tfhcl-fixture",
+                        *storage_args,
+                        "--json",
+                    )
+                )
+                raw_kinds_json = postgres.psql_scalar(
+                    """
+SELECT COALESCE(jsonb_agg(payload_json->>'kind' ORDER BY ordinal)::text, '[]')
+FROM raw_observations;
+"""
+                )
+                raw_payload = postgres.psql_scalar(
+                    """
+SELECT COALESCE(jsonb_agg(payload_json ORDER BY ordinal)::text, '[]')
+FROM raw_observations;
+"""
+                )
+                canonical_kinds = {
+                    record.kind
+                    for record in query_canonical_node_records(
+                        postgres.psql_args,
+                        root_path=str(fixture_root),
+                        psql_command=postgres.psql_command,
+                    )
+                }
+                canonical_edges = query_canonical_edge_records(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    psql_command=postgres.psql_command,
+                )
+
+        self.assertEqual(discover_exit_code, 0, discover_stderr)
+        discovered = [
+            json.loads(line)
+            for line in discover_stdout.splitlines()
+            if line.strip()
+        ]
+        discovered_kinds = {record["kind"] for record in discovered}
+        self.assertTrue(
+            {
+                "terraform.file",
+                "terraform.block",
+                "terraform.required_version",
+                "terraform.required_provider",
+                "terraform.backend",
+                "terraform.provider",
+                "terraform.resource",
+                "terraform.module",
+                "terraform.variable",
+                "terraform.output",
+                "terraform.reference",
+                "terraform.import",
+                "terraform.redaction",
+                "terraform.parse_error",
+            }.issubset(discovered_kinds)
+        )
+        self.assertNotIn("fake-tfhcl-provider-secret", discover_stdout)
+        self.assertNotIn("fake-tfhcl-module-secret", discover_stdout)
+        self.assertNotIn("fake-tfhcl-tfvars-secret", discover_stdout)
+        self.assertNotIn("fake-tfhcl-import-secret", discover_stdout)
+
+        self.assertEqual(load_exit_code, 0, load_stderr)
+        raw_kinds = set(json.loads(raw_kinds_json))
+        self.assertTrue(
+            {"terraform.block", "terraform.resource", "terraform.variable"}.issubset(
+                raw_kinds
+            )
+        )
+        self.assertNotIn("fake-tfhcl-provider-secret", raw_payload)
+        self.assertNotIn("fake-tfhcl-module-secret", raw_payload)
+        self.assertNotIn("fake-tfhcl-tfvars-secret", raw_payload)
+        self.assertNotIn("fake-tfhcl-import-secret", raw_payload)
+        self.assertNotIn("terraform.resource", canonical_kinds)
+        self.assertNotIn("terraform.module", canonical_kinds)
+        self.assertNotIn("terraform.variable", canonical_kinds)
+        self.assertEqual(
+            {edge.edge_kind for edge in canonical_edges} - {"defines", "references"},
+            set(),
+        )
+
     def test_storage_loads_feed_discovery_into_canonical_readback(self):
         require_postgres_binaries()
         fixture_root = discovery_fixture("feed_static_basic")
@@ -9217,6 +9338,10 @@ def discovery_fixture(name: str) -> Path:
 
 def openapi_fixture(name: str) -> Path:
     return Path(__file__).parents[3] / "fixtures" / "openapi" / name
+
+
+def terraform_hcl_fixture(name: str) -> Path:
+    return Path(__file__).parents[3] / "fixtures" / "terraform_hcl" / name
 
 
 def source_fixture(filename: str) -> Path:

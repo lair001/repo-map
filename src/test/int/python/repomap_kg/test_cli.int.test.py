@@ -796,6 +796,50 @@ class CliIntegrationTests(unittest.TestCase):
             {error["metadata"]["error_kind"] for error in parse_errors},
         )
 
+    def test_discover_command_emits_terraform_hcl_observations_from_fixture(self):
+        fixture = REPO_ROOT / "src" / "test" / "fixtures" / "terraform_hcl" / "basic"
+
+        exit_code, stdout, stderr = self.run_module_entrypoint(
+            "discover", str(fixture), "--jsonl"
+        )
+
+        self.assertEqual(exit_code, 0, stderr)
+        observations = [
+            json.loads(line)
+            for line in stdout.splitlines()
+            if line.strip()
+        ]
+        kinds = {observation["kind"] for observation in observations}
+        self.assertTrue(
+            {
+                "terraform.file",
+                "terraform.block",
+                "terraform.required_provider",
+                "terraform.resource",
+                "terraform.module",
+                "terraform.variable",
+                "terraform.output",
+                "terraform.reference",
+                "terraform.import",
+                "terraform.redaction",
+                "terraform.parse_error",
+            }.issubset(kinds)
+        )
+        terraform_files = [
+            observation
+            for observation in observations
+            if observation["kind"] == "file"
+            and observation["metadata"]["language"] == "terraform"
+        ]
+        self.assertEqual(
+            [observation["path"] for observation in terraform_files],
+            ["broken.tf", "dev.auto.tfvars", "main.tf", "terraform.tfvars"],
+        )
+        self.assertNotIn("fake-tfhcl-provider-secret", stdout)
+        self.assertNotIn("fake-tfhcl-module-secret", stdout)
+        self.assertNotIn("fake-tfhcl-tfvars-secret", stdout)
+        self.assertNotIn("fake-tfhcl-import-secret", stdout)
+
     def test_discover_command_emits_css_static_observations_from_fixture(self):
         fixture = REPO_ROOT / "src" / "test" / "fixtures" / "discovery" / "css_static_basic"
 

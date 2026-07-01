@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import posixpath
 import re
 import tomllib
 import xml.etree.ElementTree as ElementTree
@@ -111,6 +112,42 @@ TFJSON_FRAMEWORK_DEPENDENCY_HINTS = {
     "react": "react",
     "vue": "vue",
 }
+TERRAFORM_HCL_FORMAT = "terraform-hcl"
+TERRAFORM_HCL_PROFILE = "terraform"
+TERRAFORM_HCL_TFVARS_PROFILE = "terraform_tfvars"
+TERRAFORM_HCL_PARSER = "repo-terraform-hcl-shallow-scanner"
+TERRAFORM_HCL_BLOCK_TYPES = frozenset(
+    (
+        "terraform",
+        "provider",
+        "resource",
+        "data",
+        "module",
+        "variable",
+        "output",
+        "locals",
+        "moved",
+        "import",
+        "check",
+        "removed",
+    )
+)
+TERRAFORM_HCL_MAX_FILE_BYTES = 1_048_576
+TERRAFORM_HCL_MAX_BLOCKS = 256
+TERRAFORM_HCL_MAX_ATTRIBUTES_PER_BLOCK = 128
+TERRAFORM_HCL_MAX_REFERENCES = 512
+TERRAFORM_HCL_MAX_METADATA_STRING = 160
+TERRAFORM_HCL_MAX_DIAGNOSTICS = 64
+TERRAFORM_HCL_BLOCK_HEADER_PATTERN = re.compile(
+    r'^\s*(?P<block_type>[A-Za-z_][A-Za-z0-9_-]*)'
+    r'(?P<labels>(?:\s+"(?:[^"\\]|\\.)*")*)\s*\{'
+)
+TERRAFORM_HCL_ATTRIBUTE_PATTERN = re.compile(
+    r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(?P<value>.*)$"
+)
+TERRAFORM_HCL_TRAVERSAL_PATTERN = re.compile(
+    r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_*-]+)+\b"
+)
 OPENAPI_HTTP_METHODS = frozenset(
     ("get", "post", "put", "patch", "delete", "options", "head", "trace")
 )
@@ -185,11 +222,31 @@ class _YamlParseState:
         return self.metadata_by_pointer
 
 
+@dataclass(frozen=True)
+class _TerraformHclBlock:
+    block_type: str
+    labels: tuple[str, ...]
+    body: str
+    start_line: int
+    end_line: int
+
+
+@dataclass(frozen=True)
+class _TerraformHclAttribute:
+    name: str
+    value: str
+    start_line: int
+
+
 def extract_config_file_observations(
     relative_path: str,
     content: str,
 ) -> tuple[RawObservation, ...]:
     suffix = PurePosixPath(relative_path).suffix.lower()
+    if _is_terraform_hcl_file_name(relative_path):
+        return _extract_terraform_hcl_observations(relative_path, content)
+    if _is_terraform_tfvars_hcl_file_name(relative_path):
+        return _extract_terraform_hcl_tfvars_observations(relative_path, content)
     if suffix == ".jsonl":
         return _extract_jsonl_observations(relative_path, content)
     if suffix == ".jsonc":
@@ -3461,6 +3518,1322 @@ def _terraform_tfvars_observations(
             )
         )
     return observations
+
+
+def _extract_terraform_hcl_observations(
+    relative_path: str,
+    content: str,
+) -> tuple[RawObservation, ...]:
+    diagnostics: list[RawObservation] = []
+    observations: list[RawObservation] = []
+    encoded_size = len(content.encode("utf-8"))
+    observations.append(
+        _terraform_hcl_observation(
+            "terraform.file",
+            relative_path,
+            metadata={
+                "file_family": "tf",
+                "parser": TERRAFORM_HCL_PARSER,
+                "byte_count": encoded_size,
+            },
+            source_suffix="terraform-file",
+        )
+    )
+    if encoded_size > TERRAFORM_HCL_MAX_FILE_BYTES:
+        observations.append(
+            _terraform_hcl_parse_error_observation(
+                relative_path,
+                error_kind="terraform-file-byte-limit",
+                message="Terraform HCL file exceeds conservative byte limit",
+                recovered=False,
+            )
+        )
+        return tuple(observations)
+
+    blocks, block_diagnostics = _terraform_hcl_scan_blocks(relative_path, content)
+    observations.extend(block_diagnostics)
+    for block in blocks:
+        observations.append(_terraform_hcl_block_observation(relative_path, block))
+        observations.extend(_terraform_hcl_block_profile_observations(relative_path, block))
+    return tuple(observations)
+
+
+def _extract_terraform_hcl_tfvars_observations(
+    relative_path: str,
+    content: str,
+) -> tuple[RawObservation, ...]:
+    observations: list[RawObservation] = []
+    encoded_size = len(content.encode("utf-8"))
+    observations.append(
+        _terraform_hcl_observation(
+            "terraform.file",
+            relative_path,
+            profile=TERRAFORM_HCL_TFVARS_PROFILE,
+            metadata={
+                "file_family": "tfvars",
+                "parser": TERRAFORM_HCL_PARSER,
+                "byte_count": encoded_size,
+                "all_values_sensitive": True,
+            },
+            source_suffix="terraform-file",
+        )
+    )
+    if encoded_size > TERRAFORM_HCL_MAX_FILE_BYTES:
+        observations.append(
+            _terraform_hcl_parse_error_observation(
+                relative_path,
+                error_kind="terraform-file-byte-limit",
+                message="Terraform tfvars file exceeds conservative byte limit",
+                recovered=False,
+            )
+        )
+        return tuple(observations)
+
+    attributes, diagnostics = _terraform_hcl_top_level_attributes(
+        relative_path,
+        content,
+        base_line=1,
+    )
+    observations.extend(diagnostics)
+    for attribute in attributes:
+        value_type = _terraform_hcl_value_type(attribute.value)
+        observations.append(
+            _terraform_hcl_observation(
+                "terraform.variable",
+                relative_path,
+                profile=TERRAFORM_HCL_TFVARS_PROFILE,
+                confidence="heuristic",
+                metadata={
+                    "file_family": "tfvars",
+                    "variable_name": attribute.name,
+                    "value_type": value_type,
+                    "value_shape": {"type": value_type},
+                    "redacted": True,
+                    "redaction_reason": "tfvars-sensitive-by-default",
+                },
+                name=attribute.name,
+                start_line=attribute.start_line,
+                source_suffix=f"terraform-variable:{attribute.name}",
+            )
+        )
+        observations.append(
+            _terraform_hcl_redaction_observation(
+                relative_path,
+                redaction_reason="tfvars-sensitive-by-default",
+                field_name=attribute.name,
+                start_line=attribute.start_line,
+            )
+        )
+    return tuple(observations)
+
+
+def _terraform_hcl_scan_blocks(
+    relative_path: str,
+    content: str,
+) -> tuple[list[_TerraformHclBlock], list[RawObservation]]:
+    blocks: list[_TerraformHclBlock] = []
+    diagnostics: list[RawObservation] = []
+    lines = content.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        stripped = _terraform_hcl_strip_comment(line).strip()
+        match = TERRAFORM_HCL_BLOCK_HEADER_PATTERN.match(stripped)
+        if match is None or match.group("block_type") not in TERRAFORM_HCL_BLOCK_TYPES:
+            index += 1
+            continue
+        if len(blocks) >= TERRAFORM_HCL_MAX_BLOCKS:
+            diagnostics.append(
+                _terraform_hcl_parse_error_observation(
+                    relative_path,
+                    error_kind="terraform-block-limit",
+                    message="Terraform HCL block limit reached",
+                    start_line=index + 1,
+                    recovered=True,
+                )
+            )
+            break
+
+        block_type = match.group("block_type")
+        labels = _terraform_hcl_labels(match.group("labels"))
+        start_line = index + 1
+        depth = _terraform_hcl_brace_delta(line)
+        body_lines: list[str] = []
+        index += 1
+        if depth <= 0:
+            blocks.append(
+                _TerraformHclBlock(
+                    block_type=block_type,
+                    labels=labels,
+                    body="",
+                    start_line=start_line,
+                    end_line=start_line,
+                )
+            )
+            continue
+        while index < len(lines) and depth > 0:
+            body_line = lines[index]
+            depth += _terraform_hcl_brace_delta(body_line)
+            if depth > 0:
+                body_lines.append(body_line)
+            index += 1
+        if depth > 0:
+            diagnostics.append(
+                _terraform_hcl_parse_error_observation(
+                    relative_path,
+                    error_kind="terraform-unclosed-block",
+                    message="Terraform HCL block is missing a closing brace",
+                    start_line=start_line,
+                    recovered=True,
+                )
+            )
+            end_line = len(lines)
+        else:
+            end_line = index
+        blocks.append(
+            _TerraformHclBlock(
+                block_type=block_type,
+                labels=labels,
+                body="\n".join(body_lines),
+                start_line=start_line,
+                end_line=end_line,
+            )
+        )
+    return blocks, diagnostics[:TERRAFORM_HCL_MAX_DIAGNOSTICS]
+
+
+def _terraform_hcl_block_profile_observations(
+    relative_path: str,
+    block: _TerraformHclBlock,
+) -> list[RawObservation]:
+    attributes, diagnostics = _terraform_hcl_top_level_attributes(
+        relative_path,
+        block.body,
+        base_line=block.start_line + 1,
+    )
+    by_name = {attribute.name: attribute for attribute in attributes}
+    observations: list[RawObservation] = list(diagnostics)
+    observations.extend(
+        _terraform_hcl_attribute_redactions(relative_path, attributes)
+    )
+    if block.block_type == "terraform":
+        observations.extend(
+            _terraform_hcl_terraform_block_observations(
+                relative_path,
+                block,
+                by_name,
+            )
+        )
+    elif block.block_type == "provider":
+        observations.extend(
+            _terraform_hcl_provider_observations(relative_path, block, by_name)
+        )
+    elif block.block_type == "resource":
+        observations.extend(
+            _terraform_hcl_resource_observations(relative_path, block, by_name)
+        )
+    elif block.block_type == "data":
+        observations.extend(_terraform_hcl_data_observations(relative_path, block))
+    elif block.block_type == "module":
+        observations.extend(
+            _terraform_hcl_module_observations(relative_path, block, by_name)
+        )
+    elif block.block_type == "variable":
+        observations.extend(
+            _terraform_hcl_variable_observations(relative_path, block, by_name)
+        )
+    elif block.block_type == "output":
+        observations.extend(
+            _terraform_hcl_output_observations(relative_path, block, by_name)
+        )
+    elif block.block_type == "locals":
+        observations.extend(_terraform_hcl_local_observations(relative_path, attributes))
+    elif block.block_type == "moved":
+        observations.extend(
+            _terraform_hcl_move_like_observations(
+                relative_path,
+                "terraform.moved",
+                block,
+                by_name,
+                fields=("from", "to"),
+            )
+        )
+    elif block.block_type == "import":
+        observations.extend(_terraform_hcl_import_observations(relative_path, block, by_name))
+    elif block.block_type == "removed":
+        observations.extend(
+            _terraform_hcl_move_like_observations(
+                relative_path,
+                "terraform.removed",
+                block,
+                by_name,
+                fields=("from",),
+            )
+        )
+    elif block.block_type == "check":
+        observations.append(
+            _terraform_hcl_observation(
+                "terraform.check",
+                relative_path,
+                confidence="heuristic",
+                metadata={
+                    "file_family": "tf",
+                    "check_name": block.labels[0] if block.labels else None,
+                    "assertion_count": _terraform_hcl_nested_block_count(
+                        block.body,
+                        "assert",
+                    ),
+                },
+                name=block.labels[0] if block.labels else None,
+                start_line=block.start_line,
+                end_line=block.end_line,
+                source_suffix=f"terraform-check:{block.labels[0] if block.labels else block.start_line}",
+            )
+        )
+    return observations
+
+
+def _terraform_hcl_terraform_block_observations(
+    relative_path: str,
+    block: _TerraformHclBlock,
+    attributes: dict[str, _TerraformHclAttribute],
+) -> list[RawObservation]:
+    observations: list[RawObservation] = []
+    required_version = attributes.get("required_version")
+    if required_version is not None:
+        version_constraint = _terraform_hcl_literal_string(required_version.value)
+        if version_constraint is None:
+            version_constraint = _terraform_hcl_expression_summary(required_version.value)
+        observations.append(
+            _terraform_hcl_observation(
+                "terraform.required_version",
+                relative_path,
+                confidence="heuristic",
+                metadata={
+                    "file_family": "tf",
+                    "version_constraint": version_constraint,
+                    "expression_kind": _terraform_hcl_expression_kind(
+                        required_version.value
+                    ),
+                },
+                start_line=required_version.start_line,
+                source_suffix="terraform-required-version",
+            )
+        )
+        observations.append(
+            _terraform_hcl_reference_observation(
+                relative_path,
+                "required_version",
+                version_constraint,
+                target=external_key("terraform.version", version_constraint),
+                start_line=required_version.start_line,
+            )
+        )
+
+    required_providers_body = _terraform_hcl_nested_block_body(
+        block.body,
+        "required_providers",
+    )
+    if required_providers_body is not None:
+        provider_attributes, diagnostics = _terraform_hcl_top_level_attributes(
+            relative_path,
+            required_providers_body,
+            base_line=block.start_line,
+        )
+        observations.extend(diagnostics)
+        for provider in provider_attributes:
+            provider_body = _terraform_hcl_collection_body(provider.value)
+            provider_source = provider.name
+            version_constraint = None
+            if provider_body is not None:
+                provider_config, provider_diagnostics = _terraform_hcl_top_level_attributes(
+                    relative_path,
+                    provider_body,
+                    base_line=provider.start_line,
+                )
+                observations.extend(provider_diagnostics)
+                provider_fields = {item.name: item for item in provider_config}
+                source = provider_fields.get("source")
+                version = provider_fields.get("version")
+                if source is not None:
+                    provider_source = (
+                        _terraform_hcl_literal_string(source.value) or provider.name
+                    )
+                if version is not None:
+                    version_constraint = (
+                        _terraform_hcl_literal_string(version.value)
+                        or _terraform_hcl_expression_summary(version.value)
+                    )
+            observations.append(
+                _terraform_hcl_observation(
+                    "terraform.required_provider",
+                    relative_path,
+                    confidence="heuristic",
+                    metadata={
+                        "file_family": "tf",
+                        "provider_name": provider.name,
+                        "provider_source": provider_source,
+                        "version_constraint": version_constraint,
+                        "not_fetched": True,
+                    },
+                    name=provider.name,
+                    target=external_key("terraform.provider", provider_source),
+                    start_line=provider.start_line,
+                    source_suffix=f"terraform-required-provider:{provider.name}",
+                )
+            )
+            observations.append(
+                _terraform_hcl_reference_observation(
+                    relative_path,
+                    "provider_source",
+                    provider_source,
+                    target=external_key("terraform.provider", provider_source),
+                    start_line=provider.start_line,
+                )
+            )
+
+    for backend_type in _terraform_hcl_nested_block_labels(block.body, "backend"):
+        observations.append(
+            _terraform_hcl_observation(
+                "terraform.backend",
+                relative_path,
+                confidence="heuristic",
+                metadata={
+                    "file_family": "tf",
+                    "backend_type": backend_type,
+                    "not_fetched": True,
+                },
+                name=backend_type,
+                source_suffix=f"terraform-backend:{backend_type}",
+                start_line=block.start_line,
+            )
+        )
+    return observations
+
+
+def _terraform_hcl_provider_observations(
+    relative_path: str,
+    block: _TerraformHclBlock,
+    attributes: dict[str, _TerraformHclAttribute],
+) -> list[RawObservation]:
+    provider_name = block.labels[0] if block.labels else "unknown"
+    alias = None
+    if "alias" in attributes:
+        alias = _terraform_hcl_literal_string(attributes["alias"].value)
+    return [
+        _terraform_hcl_observation(
+            "terraform.provider",
+            relative_path,
+            confidence="heuristic",
+            metadata={
+                "file_family": "tf",
+                "provider_name": provider_name,
+                "alias": alias,
+            },
+            name=provider_name,
+            start_line=block.start_line,
+            end_line=block.end_line,
+            source_suffix=f"terraform-provider:{provider_name}:{alias or 'default'}",
+        )
+    ]
+
+
+def _terraform_hcl_resource_observations(
+    relative_path: str,
+    block: _TerraformHclBlock,
+    attributes: dict[str, _TerraformHclAttribute],
+) -> list[RawObservation]:
+    resource_type = block.labels[0] if len(block.labels) >= 1 else "unknown"
+    resource_name = block.labels[1] if len(block.labels) >= 2 else "unknown"
+    observations = [
+        _terraform_hcl_observation(
+            "terraform.resource",
+            relative_path,
+            confidence="heuristic",
+            metadata={
+                "file_family": "tf",
+                "resource_type": resource_type,
+                "resource_name": resource_name,
+                "provider_prefix": resource_type.split("_", 1)[0]
+                if "_" in resource_type
+                else resource_type,
+                "count_present": "count" in attributes,
+                "for_each_present": "for_each" in attributes,
+                "lifecycle_present": _terraform_hcl_nested_block_count(
+                    block.body,
+                    "lifecycle",
+                )
+                > 0,
+                "connection_present": _terraform_hcl_nested_block_count(
+                    block.body,
+                    "connection",
+                )
+                > 0,
+                "provisioner_present": _terraform_hcl_nested_block_count(
+                    block.body,
+                    "provisioner",
+                )
+                > 0,
+            },
+            name=f"{resource_type}.{resource_name}",
+            start_line=block.start_line,
+            end_line=block.end_line,
+            source_suffix=f"terraform-resource:{resource_type}:{resource_name}",
+        )
+    ]
+    observations.extend(
+        _terraform_hcl_reference_observations_from_attribute(
+            relative_path,
+            attributes.get("depends_on"),
+            "depends_on",
+        )
+    )
+    observations.extend(
+        _terraform_hcl_reference_observations_from_attribute(
+            relative_path,
+            attributes.get("provider"),
+            "provider_alias",
+            target_kind="terraform.provider",
+        )
+    )
+    return observations
+
+
+def _terraform_hcl_data_observations(
+    relative_path: str,
+    block: _TerraformHclBlock,
+) -> list[RawObservation]:
+    data_source_type = block.labels[0] if len(block.labels) >= 1 else "unknown"
+    data_source_name = block.labels[1] if len(block.labels) >= 2 else "unknown"
+    return [
+        _terraform_hcl_observation(
+            "terraform.data_source",
+            relative_path,
+            confidence="heuristic",
+            metadata={
+                "file_family": "tf",
+                "data_source_type": data_source_type,
+                "data_source_name": data_source_name,
+                "not_fetched": True,
+            },
+            name=f"{data_source_type}.{data_source_name}",
+            start_line=block.start_line,
+            end_line=block.end_line,
+            source_suffix=f"terraform-data-source:{data_source_type}:{data_source_name}",
+        )
+    ]
+
+
+def _terraform_hcl_module_observations(
+    relative_path: str,
+    block: _TerraformHclBlock,
+    attributes: dict[str, _TerraformHclAttribute],
+) -> list[RawObservation]:
+    module_name = block.labels[0] if block.labels else "unknown"
+    metadata: dict[str, Any] = {"file_family": "tf", "module_name": module_name}
+    target = None
+    observations: list[RawObservation] = []
+    source = attributes.get("source")
+    if source is not None:
+        source_value = _terraform_hcl_literal_string(source.value)
+        if source_value is not None:
+            source_metadata, target, reference_kind = _terraform_hcl_module_source(
+                relative_path,
+                source_value,
+            )
+            metadata.update(source_metadata)
+            observations.append(
+                _terraform_hcl_reference_observation(
+                    relative_path,
+                    reference_kind,
+                    source_value,
+                    target=target,
+                    start_line=source.start_line,
+                    redacted=bool(source_metadata.get("redacted")),
+                )
+            )
+        else:
+            metadata.update(
+                {
+                    "source_expression_kind": _terraform_hcl_expression_kind(
+                        source.value
+                    ),
+                    "dynamic": True,
+                    "not_fetched": True,
+                }
+            )
+    observations.insert(
+        0,
+        _terraform_hcl_observation(
+            "terraform.module",
+            relative_path,
+            confidence="heuristic",
+            metadata=metadata,
+            name=module_name,
+            target=target,
+            start_line=block.start_line,
+            end_line=block.end_line,
+            source_suffix=f"terraform-module:{module_name}",
+        ),
+    )
+    return observations
+
+
+def _terraform_hcl_variable_observations(
+    relative_path: str,
+    block: _TerraformHclBlock,
+    attributes: dict[str, _TerraformHclAttribute],
+) -> list[RawObservation]:
+    variable_name = block.labels[0] if block.labels else "unknown"
+    default = attributes.get("default")
+    type_attr = attributes.get("type")
+    description = attributes.get("description")
+    metadata: dict[str, Any] = {
+        "file_family": "tf",
+        "variable_name": variable_name,
+        "default_present": default is not None,
+        "validation_present": _terraform_hcl_nested_block_count(
+            block.body,
+            "validation",
+        )
+        > 0,
+    }
+    if type_attr is not None:
+        metadata["type_expression_kind"] = _terraform_hcl_expression_kind(
+            type_attr.value
+        )
+        metadata["type_summary"] = _terraform_hcl_expression_summary(type_attr.value)
+    if default is not None:
+        metadata["default_value_type"] = _terraform_hcl_value_type(default.value)
+        metadata["default_expression_kind"] = _terraform_hcl_expression_kind(
+            default.value
+        )
+    if "sensitive" in attributes:
+        metadata["sensitive"] = _terraform_hcl_bool_literal(
+            attributes["sensitive"].value
+        )
+    if description is not None:
+        metadata.update(_terraform_hcl_text_presence_metadata("description", description.value))
+    return [
+        _terraform_hcl_observation(
+            "terraform.variable",
+            relative_path,
+            confidence="heuristic",
+            metadata=metadata,
+            name=variable_name,
+            start_line=block.start_line,
+            end_line=block.end_line,
+            source_suffix=f"terraform-variable:{variable_name}",
+        )
+    ]
+
+
+def _terraform_hcl_output_observations(
+    relative_path: str,
+    block: _TerraformHclBlock,
+    attributes: dict[str, _TerraformHclAttribute],
+) -> list[RawObservation]:
+    output_name = block.labels[0] if block.labels else "unknown"
+    value = attributes.get("value")
+    metadata: dict[str, Any] = {
+        "file_family": "tf",
+        "output_name": output_name,
+        "value_expression_kind": _terraform_hcl_expression_kind(value.value)
+        if value is not None
+        else "unknown",
+        "value_redacted": True,
+    }
+    if "sensitive" in attributes:
+        metadata["sensitive"] = _terraform_hcl_bool_literal(
+            attributes["sensitive"].value
+        )
+    if "description" in attributes:
+        metadata.update(
+            _terraform_hcl_text_presence_metadata(
+                "description",
+                attributes["description"].value,
+            )
+        )
+    return [
+        _terraform_hcl_observation(
+            "terraform.output",
+            relative_path,
+            confidence="heuristic",
+            metadata=metadata,
+            name=output_name,
+            start_line=block.start_line,
+            end_line=block.end_line,
+            source_suffix=f"terraform-output:{output_name}",
+        )
+    ]
+
+
+def _terraform_hcl_local_observations(
+    relative_path: str,
+    attributes: list[_TerraformHclAttribute],
+) -> list[RawObservation]:
+    observations: list[RawObservation] = []
+    for attribute in attributes[:TERRAFORM_HCL_MAX_ATTRIBUTES_PER_BLOCK]:
+        redacted = _is_secret_key(attribute.name)
+        observations.append(
+            _terraform_hcl_observation(
+                "terraform.local",
+                relative_path,
+                confidence="heuristic",
+                metadata={
+                    "file_family": "tf",
+                    "local_name": attribute.name,
+                    "expression_kind": "redacted"
+                    if redacted
+                    else _terraform_hcl_expression_kind(attribute.value),
+                    "redacted": redacted,
+                },
+                name=attribute.name,
+                start_line=attribute.start_line,
+                source_suffix=f"terraform-local:{attribute.name}",
+            )
+        )
+        if redacted:
+            observations.append(
+                _terraform_hcl_redaction_observation(
+                    relative_path,
+                    redaction_reason="secret-prone-terraform-local",
+                    field_name=attribute.name,
+                    start_line=attribute.start_line,
+                )
+            )
+    return observations
+
+
+def _terraform_hcl_move_like_observations(
+    relative_path: str,
+    kind: str,
+    block: _TerraformHclBlock,
+    attributes: dict[str, _TerraformHclAttribute],
+    *,
+    fields: tuple[str, ...],
+) -> list[RawObservation]:
+    metadata: dict[str, Any] = {"file_family": "tf"}
+    for field in fields:
+        attribute = attributes.get(field)
+        if attribute is not None:
+            metadata[f"{field}_summary"] = _terraform_hcl_expression_summary(
+                attribute.value
+            )
+    return [
+        _terraform_hcl_observation(
+            kind,
+            relative_path,
+            confidence="heuristic",
+            metadata=metadata,
+            start_line=block.start_line,
+            end_line=block.end_line,
+            source_suffix=f"{kind.replace('.', '-')}:{block.start_line}",
+        )
+    ]
+
+
+def _terraform_hcl_import_observations(
+    relative_path: str,
+    block: _TerraformHclBlock,
+    attributes: dict[str, _TerraformHclAttribute],
+) -> list[RawObservation]:
+    target = attributes.get("to")
+    import_id = attributes.get("id")
+    metadata: dict[str, Any] = {
+        "file_family": "tf",
+        "id_redacted": import_id is not None,
+    }
+    if target is not None:
+        metadata["to_summary"] = _terraform_hcl_expression_summary(target.value)
+    if import_id is not None:
+        metadata["id_expression_kind"] = _terraform_hcl_expression_kind(import_id.value)
+        metadata["redacted"] = True
+        metadata["redaction_reason"] = "terraform-import-id-sensitive-by-default"
+    observations = [
+        _terraform_hcl_observation(
+            "terraform.import",
+            relative_path,
+            confidence="heuristic",
+            metadata=metadata,
+            start_line=block.start_line,
+            end_line=block.end_line,
+            source_suffix=f"terraform-import:{block.start_line}",
+        )
+    ]
+    if import_id is not None:
+        observations.append(
+            _terraform_hcl_redaction_observation(
+                relative_path,
+                redaction_reason="terraform-import-id-sensitive-by-default",
+                field_name="id",
+                start_line=import_id.start_line,
+            )
+        )
+    return observations
+
+
+def _terraform_hcl_block_observation(
+    relative_path: str,
+    block: _TerraformHclBlock,
+) -> RawObservation:
+    return _terraform_hcl_observation(
+        "terraform.block",
+        relative_path,
+        metadata={
+            "file_family": "tf",
+            "block_type": block.block_type,
+            "labels": list(block.labels),
+        },
+        name=".".join((block.block_type, *block.labels)),
+        start_line=block.start_line,
+        end_line=block.end_line,
+        source_suffix=(
+            f"terraform-block:{block.block_type}:"
+            f"{_stable_text_sha256('|'.join(block.labels))[:16]}:{block.start_line}"
+        ),
+    )
+
+
+def _terraform_hcl_observation(
+    kind: str,
+    relative_path: str,
+    *,
+    metadata: dict[str, Any],
+    profile: str = TERRAFORM_HCL_PROFILE,
+    confidence: str = "extracted",
+    name: str | None = None,
+    target: str | None = None,
+    start_line: int | None = None,
+    end_line: int | None = None,
+    source_suffix: str | None = None,
+) -> RawObservation:
+    full_metadata = {
+        "format": TERRAFORM_HCL_FORMAT,
+        "profile": profile,
+        **metadata,
+    }
+    return RawObservation(
+        kind=kind,
+        source_id=f"{relative_path}#{source_suffix or kind.replace('.', '-')}",
+        path=relative_path,
+        start_line=start_line,
+        end_line=end_line if end_line is not None else start_line,
+        name=name,
+        target=target,
+        confidence=confidence,
+        extractor=EXTRACTOR_NAME,
+        extractor_version=__version__,
+        metadata=full_metadata,
+    )
+
+
+def _terraform_hcl_reference_observations_from_attribute(
+    relative_path: str,
+    attribute: _TerraformHclAttribute | None,
+    reference_kind: str,
+    *,
+    target_kind: str = "terraform.reference",
+) -> list[RawObservation]:
+    if attribute is None:
+        return []
+    observations: list[RawObservation] = []
+    for reference in _terraform_hcl_reference_names(attribute.value):
+        observations.append(
+            _terraform_hcl_reference_observation(
+                relative_path,
+                reference_kind,
+                reference,
+                target=external_key(target_kind, reference),
+                start_line=attribute.start_line,
+            )
+        )
+        if len(observations) >= TERRAFORM_HCL_MAX_REFERENCES:
+            observations.append(
+                _terraform_hcl_parse_error_observation(
+                    relative_path,
+                    error_kind="terraform-reference-limit",
+                    message="Terraform HCL reference limit reached",
+                    start_line=attribute.start_line,
+                    recovered=True,
+                )
+            )
+            break
+    return observations
+
+
+def _terraform_hcl_reference_observation(
+    relative_path: str,
+    reference_kind: str,
+    raw_value: str,
+    *,
+    target: str,
+    start_line: int | None = None,
+    redacted: bool = False,
+) -> RawObservation:
+    metadata = {
+        "file_family": "tf",
+        "reference_kind": reference_kind,
+        "not_fetched": True,
+        "redacted": redacted,
+    }
+    if not redacted:
+        metadata["raw_value_summary"] = _terraform_hcl_bounded_string(raw_value)
+    return _terraform_hcl_observation(
+        "terraform.reference",
+        relative_path,
+        confidence="heuristic",
+        metadata=metadata,
+        target=target,
+        start_line=start_line,
+        source_suffix=(
+            f"terraform-reference:{reference_kind}:"
+            f"{_stable_text_sha256(raw_value)[:16]}"
+        ),
+    )
+
+
+def _terraform_hcl_redaction_observation(
+    relative_path: str,
+    *,
+    redaction_reason: str,
+    field_name: str | None = None,
+    start_line: int | None = None,
+) -> RawObservation:
+    metadata: dict[str, Any] = {
+        "file_family": "tf",
+        "redaction_reason": redaction_reason,
+        "redacted": True,
+    }
+    if field_name is not None:
+        metadata["field_name"] = field_name
+    return _terraform_hcl_observation(
+        "terraform.redaction",
+        relative_path,
+        confidence="heuristic",
+        metadata=metadata,
+        start_line=start_line,
+        source_suffix=(
+            f"terraform-redaction:{redaction_reason}:"
+            f"{_stable_text_sha256(field_name or 'document')[:16]}:"
+            f"{start_line or 'document'}"
+        ),
+    )
+
+
+def _terraform_hcl_parse_error_observation(
+    relative_path: str,
+    *,
+    error_kind: str,
+    message: str,
+    start_line: int | None = None,
+    recovered: bool,
+) -> RawObservation:
+    return _terraform_hcl_observation(
+        "terraform.parse_error",
+        relative_path,
+        confidence="unknown",
+        metadata={
+            "file_family": "tf",
+            "parser": TERRAFORM_HCL_PARSER,
+            "error_kind": error_kind,
+            "message_summary": message[:120],
+            "recovered": recovered,
+        },
+        start_line=start_line,
+        source_suffix=f"terraform-parse-error:{error_kind}:{start_line or 'document'}",
+    )
+
+
+def _terraform_hcl_attribute_redactions(
+    relative_path: str,
+    attributes: list[_TerraformHclAttribute],
+) -> list[RawObservation]:
+    observations: list[RawObservation] = []
+    for attribute in attributes:
+        literal = _terraform_hcl_literal_string(attribute.value)
+        if _is_secret_key(attribute.name):
+            observations.append(
+                _terraform_hcl_redaction_observation(
+                    relative_path,
+                    redaction_reason="secret-prone-terraform-attribute",
+                    field_name=attribute.name,
+                    start_line=attribute.start_line,
+                )
+            )
+        elif literal is not None and _terraform_hcl_credentialed_url(literal):
+            observations.append(
+                _terraform_hcl_redaction_observation(
+                    relative_path,
+                    redaction_reason="credentialed-terraform-url",
+                    field_name=attribute.name,
+                    start_line=attribute.start_line,
+                )
+            )
+    return observations
+
+
+def _terraform_hcl_top_level_attributes(
+    relative_path: str,
+    content: str,
+    *,
+    base_line: int,
+) -> tuple[list[_TerraformHclAttribute], list[RawObservation]]:
+    attributes: list[_TerraformHclAttribute] = []
+    diagnostics: list[RawObservation] = []
+    lines = content.splitlines()
+    nested_block_depth = 0
+    index = 0
+    while index < len(lines):
+        raw_line = lines[index]
+        stripped_line = _terraform_hcl_strip_comment(raw_line).strip()
+        line_number = base_line + index
+        if not stripped_line:
+            index += 1
+            continue
+        if nested_block_depth > 0:
+            nested_block_depth += _terraform_hcl_brace_delta(raw_line)
+            nested_block_depth = max(nested_block_depth, 0)
+            index += 1
+            continue
+        match = TERRAFORM_HCL_ATTRIBUTE_PATTERN.match(stripped_line)
+        if match is None:
+            block_match = TERRAFORM_HCL_BLOCK_HEADER_PATTERN.match(stripped_line)
+            if block_match is not None:
+                nested_block_depth += _terraform_hcl_brace_delta(raw_line)
+                nested_block_depth = max(nested_block_depth, 0)
+            index += 1
+            continue
+        if len(attributes) >= TERRAFORM_HCL_MAX_ATTRIBUTES_PER_BLOCK:
+            diagnostics.append(
+                _terraform_hcl_parse_error_observation(
+                    relative_path,
+                    error_kind="terraform-attribute-limit",
+                    message="Terraform HCL attribute limit reached",
+                    start_line=line_number,
+                    recovered=True,
+                )
+            )
+            break
+        name = match.group("name")
+        value_lines = [match.group("value")]
+        depth = _terraform_hcl_collection_delta(match.group("value"))
+        index += 1
+        while index < len(lines) and depth > 0:
+            continuation = lines[index]
+            value_lines.append(continuation.strip())
+            depth += _terraform_hcl_collection_delta(continuation)
+            index += 1
+        attributes.append(
+            _TerraformHclAttribute(
+                name=name,
+                value="\n".join(value_lines).strip(),
+                start_line=line_number,
+            )
+        )
+    return attributes, diagnostics[:TERRAFORM_HCL_MAX_DIAGNOSTICS]
+
+
+def _terraform_hcl_labels(label_text: str) -> tuple[str, ...]:
+    return tuple(
+        bytes(match.group(1), "utf-8").decode("unicode_escape")
+        for match in re.finditer(r'"((?:[^"\\]|\\.)*)"', label_text)
+    )
+
+
+def _terraform_hcl_brace_delta(line: str) -> int:
+    return _terraform_hcl_delimiter_delta(line, openings="{", closings="}")
+
+
+def _terraform_hcl_collection_delta(line: str) -> int:
+    return _terraform_hcl_delimiter_delta(line, openings="{[(", closings="}])")
+
+
+def _terraform_hcl_delimiter_delta(
+    line: str,
+    *,
+    openings: str,
+    closings: str,
+) -> int:
+    stripped = _terraform_hcl_strip_comment(line)
+    depth = 0
+    in_string = False
+    escape = False
+    for character in stripped:
+        if escape:
+            escape = False
+            continue
+        if character == "\\" and in_string:
+            escape = True
+            continue
+        if character == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if character in openings:
+            depth += 1
+        elif character in closings:
+            depth -= 1
+    return depth
+
+
+def _terraform_hcl_strip_comment(line: str) -> str:
+    in_string = False
+    escape = False
+    index = 0
+    while index < len(line):
+        character = line[index]
+        if escape:
+            escape = False
+            index += 1
+            continue
+        if character == "\\" and in_string:
+            escape = True
+            index += 1
+            continue
+        if character == '"':
+            in_string = not in_string
+            index += 1
+            continue
+        if not in_string and character == "#":
+            return line[:index]
+        if not in_string and line[index : index + 2] == "//":
+            return line[:index]
+        index += 1
+    return line
+
+
+def _terraform_hcl_nested_block_body(content: str, block_type: str) -> str | None:
+    lines = content.splitlines()
+    for index, line in enumerate(lines):
+        stripped = _terraform_hcl_strip_comment(line).strip()
+        match = TERRAFORM_HCL_BLOCK_HEADER_PATTERN.match(stripped)
+        if match is None or match.group("block_type") != block_type:
+            continue
+        depth = _terraform_hcl_brace_delta(line)
+        body_lines: list[str] = []
+        index += 1
+        while index < len(lines) and depth > 0:
+            nested_line = lines[index]
+            depth += _terraform_hcl_brace_delta(nested_line)
+            if depth > 0:
+                body_lines.append(nested_line)
+            index += 1
+        return "\n".join(body_lines)
+    return None
+
+
+def _terraform_hcl_nested_block_labels(content: str, block_type: str) -> tuple[str, ...]:
+    labels: list[str] = []
+    for line in content.splitlines():
+        stripped = _terraform_hcl_strip_comment(line).strip()
+        match = TERRAFORM_HCL_BLOCK_HEADER_PATTERN.match(stripped)
+        if match is None or match.group("block_type") != block_type:
+            continue
+        block_labels = _terraform_hcl_labels(match.group("labels"))
+        if block_labels:
+            labels.append(block_labels[0])
+    return tuple(labels)
+
+
+def _terraform_hcl_nested_block_count(content: str, block_type: str) -> int:
+    count = 0
+    for line in content.splitlines():
+        stripped = _terraform_hcl_strip_comment(line).strip()
+        match = TERRAFORM_HCL_BLOCK_HEADER_PATTERN.match(stripped)
+        if match is not None and match.group("block_type") == block_type:
+            count += 1
+    return count
+
+
+def _terraform_hcl_collection_body(value: str) -> str | None:
+    stripped = value.strip()
+    if not (stripped.startswith("{") and stripped.endswith("}")):
+        return None
+    return stripped[1:-1]
+
+
+def _terraform_hcl_module_source(
+    relative_path: str,
+    source: str,
+) -> tuple[dict[str, Any], str, str]:
+    if _terraform_hcl_credentialed_url(source):
+        return (
+            {
+                "source_kind": "remote",
+                "not_fetched": True,
+                "redacted": True,
+                "redaction_reason": "credentialed-terraform-module-source",
+            },
+            external_key("terraform.module", "redacted-module-source"),
+            "module_source",
+        )
+    local_target = _terraform_hcl_local_path_target(relative_path, source)
+    if local_target is not None:
+        return (
+            {
+                "source_kind": "local",
+                "source_summary": _terraform_hcl_bounded_string(source),
+                "not_fetched": True,
+            },
+            local_target,
+            "module_source_local",
+        )
+    return (
+        {
+            "source_kind": "remote",
+            "source_summary": _terraform_hcl_bounded_string(source),
+            "not_fetched": True,
+        },
+        external_key("terraform.module", source),
+        "module_source",
+    )
+
+
+def _terraform_hcl_local_path_target(relative_path: str, source: str) -> str | None:
+    if source.startswith("/") or _is_url(source) or source.startswith(("git::", "ssh://")):
+        return None
+    if not (source.startswith("./") or source.startswith("../")):
+        return None
+    base_dir = PurePosixPath(relative_path).parent
+    candidate = posixpath.normpath((base_dir / source).as_posix())
+    if candidate == "." or candidate.startswith("../") or candidate == "..":
+        return unknown_key("file", "repo-escaping-terraform-module-source")
+    if PurePosixPath(candidate).is_absolute():
+        return unknown_key("file", "repo-escaping-terraform-module-source")
+    return file_key(candidate)
+
+
+def _terraform_hcl_reference_names(value: str) -> tuple[str, ...]:
+    names = []
+    for match in TERRAFORM_HCL_TRAVERSAL_PATTERN.finditer(value):
+        names.append(match.group(0))
+    return tuple(dict.fromkeys(names))
+
+
+def _terraform_hcl_literal_string(value: str) -> str | None:
+    stripped = value.strip()
+    match = re.match(r'^"((?:[^"\\]|\\.)*)"$', stripped, flags=re.DOTALL)
+    if match is None:
+        return None
+    return bytes(match.group(1), "utf-8").decode("unicode_escape")
+
+
+def _terraform_hcl_bool_literal(value: str) -> bool | None:
+    stripped = value.strip().lower()
+    if stripped == "true":
+        return True
+    if stripped == "false":
+        return False
+    return None
+
+
+def _terraform_hcl_value_type(value: str) -> str:
+    kind = _terraform_hcl_expression_kind(value)
+    if kind == "literal_string":
+        return "string"
+    if kind == "literal_number":
+        return "number"
+    if kind == "literal_bool":
+        return "boolean"
+    if kind == "literal_null":
+        return "null"
+    stripped = value.strip()
+    if stripped.startswith("{"):
+        return "object"
+    if stripped.startswith("["):
+        return "array"
+    return "expression"
+
+
+def _terraform_hcl_expression_kind(value: str) -> str:
+    stripped = value.strip()
+    if not stripped:
+        return "unknown"
+    literal = _terraform_hcl_literal_string(stripped)
+    if literal is not None:
+        if "${" in literal:
+            return "template_interpolation"
+        return "literal_string"
+    lowered = stripped.lower()
+    if lowered in ("true", "false"):
+        return "literal_bool"
+    if lowered == "null":
+        return "literal_null"
+    if re.fullmatch(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", stripped):
+        return "literal_number"
+    if stripped.startswith(("{", "[")):
+        return "collection_shape"
+    if "${" in stripped:
+        return "template_interpolation"
+    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*\s*\(", stripped):
+        return "function_call"
+    if "?" in stripped and ":" in stripped:
+        return "conditional"
+    if TERRAFORM_HCL_TRAVERSAL_PATTERN.fullmatch(stripped):
+        return "traversal_reference"
+    if "dynamic " in stripped or stripped.startswith("dynamic"):
+        return "dynamic_block"
+    return "unknown"
+
+
+def _terraform_hcl_expression_summary(value: str) -> str:
+    kind = _terraform_hcl_expression_kind(value)
+    if kind in (
+        "literal_string",
+        "literal_number",
+        "literal_bool",
+        "literal_null",
+        "traversal_reference",
+    ):
+        literal = _terraform_hcl_literal_string(value)
+        if literal is not None:
+            return _terraform_hcl_bounded_string(literal)
+        return _terraform_hcl_bounded_string(value.strip())
+    return kind
+
+
+def _terraform_hcl_text_presence_metadata(key: str, value: str) -> dict[str, Any]:
+    literal = _terraform_hcl_literal_string(value)
+    text = literal if literal is not None else value.strip()
+    return {
+        f"{key}_present": True,
+        f"{key}_length": len(text),
+        f"{key}_sha256": _stable_text_sha256(text),
+    }
+
+
+def _terraform_hcl_credentialed_url(value: str) -> bool:
+    candidate = value.removeprefix("git::")
+    parsed = urlsplit(candidate)
+    if parsed.scheme in ("http", "https", "ssh", "git") and (
+        parsed.username is not None or parsed.password is not None
+    ):
+        return True
+    return bool(re.search(r"://[^/\s:@]+:[^/\s@]+@", candidate))
+
+
+def _terraform_hcl_bounded_string(value: str) -> str:
+    if len(value) <= TERRAFORM_HCL_MAX_METADATA_STRING and all(
+        character.isprintable() for character in value
+    ):
+        return value
+    return f"<string:{len(value)}>"
+
+
+def _is_terraform_hcl_file_name(relative_path: str) -> bool:
+    name = PurePosixPath(relative_path).name.lower()
+    return name.endswith(".tf") and not name.endswith(".tf.json")
+
+
+def _is_terraform_tfvars_hcl_file_name(relative_path: str) -> bool:
+    name = PurePosixPath(relative_path).name.lower()
+    return (
+        name == "terraform.tfvars"
+        or name.endswith(".auto.tfvars")
+        or (name.endswith(".tfvars") and not name.endswith(".tfvars.json"))
+    )
 
 
 def _kubernetes_json_observations(

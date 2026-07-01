@@ -90,6 +90,8 @@ LANGUAGE_BY_EXTENSION = {
     ".tex": "latex",
     ".tsv": "tsv",
     ".txt": "text",
+    ".tf": "terraform",
+    ".tfvars": "terraform",
     ".toml": "toml",
     ".cts": "javascript",
     ".ts": "javascript",
@@ -241,6 +243,7 @@ def discover_observations(
             "jsonc",
             "jsonl",
             "toml",
+            "terraform",
             "plist",
             "xml",
             "yaml",
@@ -600,6 +603,8 @@ def detect_role(relative_path: str, *, executable: bool, generated: bool) -> str
     if (
         filename in CONFIG_FILENAMES
         or filename.endswith(".plist")
+        or filename.endswith(".tf")
+        or filename.endswith(".tfvars")
         or relative_path.startswith(".github/")
     ):
         return "config"
