@@ -444,6 +444,31 @@ class DiscoveryUnitTests(unittest.TestCase):
 
         self.assertEqual(observations, ())
 
+    def test_discover_observations_routes_docs1_text_table_and_latex_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.write(root / "notes.txt", "# Overview\nSee data.csv\n")
+            self.write(root / "data.csv", "name,amount\nalpha,1\n")
+            self.write(root / "data.tsv", "name\tactive\nalpha\ttrue\n")
+            self.write(root / "paper.tex", "\\section{Intro}\n\\input{chapter}\n")
+            self.write(root / "chapter.tex", "\\section{Chapter}\n")
+            self.write(root / "README.md", "# Markdown\n")
+            self.write(root / "ignored.pdf", "%PDF\n")
+
+            observations = discover_observations(root)
+
+        kinds = {observation.kind for observation in observations}
+        self.assertIn("document.text_document", kinds)
+        self.assertIn("document.text_section", kinds)
+        self.assertIn("document.table_document", kinds)
+        self.assertIn("document.table_column", kinds)
+        self.assertIn("document.latex_document", kinds)
+        self.assertIn("document.latex_section", kinds)
+        self.assertIn("document.latex_command", kinds)
+        self.assertIn("document.reference", kinds)
+        self.assertIn("markdown.document", kinds)
+        self.assertNotIn("document.pdf", kinds)
+
     def test_unknown_language_and_role_fall_back_honestly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

@@ -49,6 +49,11 @@ _SEGMENT_COUNTS = {
     "feed.category": 2,
     "warc.document": 1,
     "warc.record": 2,
+    "document.file": 1,
+    "document.section": 2,
+    "document.table": 2,
+    "document.column": 2,
+    "document.latex_command": 2,
     "ruby.module": 1,
     "ruby.class": 1,
     "ruby.method": 2,
@@ -258,6 +263,44 @@ def warc_record_key(warc_document_canonical_key: str, record_id: str) -> str:
         "warc.record",
         _coerce_namespace_key(warc_document_canonical_key, "warc.document"),
         record_id,
+    )
+
+
+def document_file_key(path_or_file_key: str | os.PathLike[str]) -> str:
+    return _key("document.file", _coerce_file_key(path_or_file_key))
+
+
+def document_section_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
+    return _key(
+        "document.section",
+        _coerce_file_key(path_or_file_key),
+        _coerce_pointer(pointer),
+    )
+
+
+def document_table_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
+    return _key(
+        "document.table",
+        _coerce_file_key(path_or_file_key),
+        _coerce_pointer(pointer),
+    )
+
+
+def document_column_key(path_or_file_key: str | os.PathLike[str], pointer: str) -> str:
+    return _key(
+        "document.column",
+        _coerce_file_key(path_or_file_key),
+        _coerce_pointer(pointer),
+    )
+
+
+def document_latex_command_key(
+    path_or_file_key: str | os.PathLike[str], pointer: str
+) -> str:
+    return _key(
+        "document.latex_command",
+        _coerce_file_key(path_or_file_key),
+        _coerce_pointer(pointer),
     )
 
 

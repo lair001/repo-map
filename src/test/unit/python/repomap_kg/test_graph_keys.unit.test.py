@@ -11,6 +11,11 @@ from repomap_kg.graph_keys import (
     css_document_key,
     css_rule_key,
     css_selector_key,
+    document_column_key,
+    document_file_key,
+    document_latex_command_key,
+    document_section_key,
+    document_table_key,
     dynamic_key,
     env_key,
     external_key,
@@ -261,6 +266,29 @@ class GraphKeysUnitTests(unittest.TestCase):
                 "warc.document%3Afile%253Aarchives%252Fexample.warc:"
                 "record%3A%3Curn%3Auuid%3A1%3E"
             ),
+        )
+        self.assertEqual(
+            document_file_key("docs/notes.txt"),
+            "document.file:file%3Adocs%2Fnotes.txt",
+        )
+        self.assertEqual(
+            document_section_key("docs/notes.txt", "/sections/overview"),
+            "document.section:file%3Adocs%2Fnotes.txt:%2Fsections%2Foverview",
+        )
+        self.assertEqual(
+            document_table_key("data/report.csv", "/table"),
+            "document.table:file%3Adata%2Freport.csv:%2Ftable",
+        )
+        self.assertEqual(
+            document_column_key("data/report.csv", "/table/columns/status"),
+            (
+                "document.column:file%3Adata%2Freport.csv:"
+                "%2Ftable%2Fcolumns%2Fstatus"
+            ),
+        )
+        self.assertEqual(
+            document_latex_command_key("paper.tex", "/commands/input:1"),
+            "document.latex_command:file%3Apaper.tex:%2Fcommands%2Finput%3A1",
         )
         self.assertEqual(ruby_module_key("RepoMap"), "ruby.module:RepoMap")
         self.assertEqual(

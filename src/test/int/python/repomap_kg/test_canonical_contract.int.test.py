@@ -19,6 +19,7 @@ from repomap_kg.canonicalization import canonicalize_observations
 from repomap_kg.config_extractor import extract_config_file_observations
 from repomap_kg.css import extract_css_file_observations
 from repomap_kg.css_html_matching import extract_css_selector_match_observations
+from repomap_kg.documents import extract_document_file_observations
 from repomap_kg.discovery import (
     extract_css_file_observations_from_file,
     extract_feed_file_observations_from_file,
@@ -2490,6 +2491,242 @@ a.external,
                 (document_key, "defines", record_key),
                 (record_key, "references", target_key),
             },
+        )
+
+    def test_docs1_text_table_latex_extraction_and_canonicalization_contract(self):
+        observations = (
+            *extract_document_file_observations(
+                "docs/notes.txt",
+                """# Paths
+Read /Users/example/private.txt
+Read ../../outside.txt
+Read ${DOCS_ROOT}/dynamic.txt
+Read https://example.com/docs.
+""",
+            ),
+            *extract_document_file_observations("empty.csv", "\n"),
+            *extract_document_file_observations(
+                "numbers.csv",
+                "1,2.5\n3,4.5\n",
+            ),
+            *extract_document_file_observations(
+                "secrets.csv",
+                "account_number,amount\nacct-docs1-secret,5\n",
+            ),
+            *extract_document_file_observations(
+                "data.tsv",
+                "name\tactive\tstarted\nalpha\ttrue\t2026-01-02\n",
+            ),
+            *extract_document_file_observations(
+                "header-only.csv",
+                "name,amount\n",
+            ),
+            *extract_document_file_observations(
+                "duplicate-header.csv",
+                "name,name\nalpha,beta\n",
+            ),
+            *extract_document_file_observations(
+                "empty-mix.csv",
+                "name,amount\nalpha,\nbeta,2\n",
+            ),
+            *extract_document_file_observations(
+                "typed.csv",
+                "url,date,answer\nhttps://example.com,2026-01-01,yes\n",
+            ),
+            *extract_document_file_observations(
+                "bad.csv",
+                "name,amount\nalpha,1\nbeta,2,extra\n",
+            ),
+            *extract_document_file_observations(
+                "paper.tex",
+                r"""\section{Intro} % \input{ignored}
+\href{https://example.com/href}
+\input{chapter}
+\includegraphics{figures/diagram.png}
+\bibliography{references}
+""",
+                repository_paths=frozenset(
+                    {
+                        "paper.tex",
+                        "chapter.tex",
+                        "figures/diagram.png",
+                        "references.bib",
+                    }
+                ),
+            ),
+            *extract_document_file_observations(
+                "links.tex",
+                r"""\url{ftp://example.com/archive}
+\href{mailto:dev@example.com}
+""",
+            ),
+        )
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertEqual(extract_document_file_observations("ignored.docx", "x"), ())
+        self.assertTrue(result.ok)
+        serialized = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("acct-docs1-secret", serialized)
+        node_keys = {node["canonical_key"] for node in payload["nodes"]}
+        self.assertIn("document.file:file%3Adocs%2Fnotes.txt", node_keys)
+        self.assertIn("document.table:file%3Aempty.csv:%2Ftable", node_keys)
+        self.assertIn(
+            "document.column:file%3Anumbers.csv:%2Ftable%2Fcolumns%2Fcolumn-1",
+            node_keys,
+        )
+        self.assertIn(
+            "document.latex_command:file%3Apaper.tex:%2Fcommands%2Fhref%3A1",
+            node_keys,
+        )
+        edges = {
+            (edge["source_key"], edge["kind"], edge["target_key"])
+            for edge in payload["edges"]
+        }
+        self.assertIn(
+            (
+                "document.section:file%3Adocs%2Fnotes.txt:%2Fsections%2Fpaths",
+                "references",
+                "external:file:absolute-document-reference",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "document.section:file%3Adocs%2Fnotes.txt:%2Fsections%2Fpaths",
+                "references",
+                "unknown:file:repo-escaping-document-reference",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "document.section:file%3Adocs%2Fnotes.txt:%2Fsections%2Fpaths",
+                "references",
+                "dynamic:file:dynamic-document-reference",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "document.latex_command:file%3Apaper.tex:%2Fcommands%2Finput%3A2",
+                "references",
+                "file:chapter.tex",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "document.latex_command:file%3Apaper.tex:%2Fcommands%2Fhref%3A1",
+                "references",
+                "external.url:https%3A%2F%2Fexample.com%2Fhref",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "document.latex_command:file%3Alinks.tex:%2Fcommands%2Furl%3A1",
+                "references",
+                "unknown:document.reference:unsupported-scheme",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "document.latex_command:file%3Alinks.tex:%2Fcommands%2Fhref%3A2",
+                "references",
+                "external.url:mailto%3Adev%40example.com",
+            ),
+            edges,
+        )
+        self.assertEqual(
+            [observation.kind for observation in observations].count(
+                "document.parse_error"
+            ),
+            1,
+        )
+
+    def test_docs1_canonicalization_diagnostic_contracts(self):
+        missing_target = canonicalize_observations(
+            [
+                RawObservation(
+                    kind="document.reference",
+                    source_id="notes.txt#missing-target",
+                    path="notes.txt",
+                    confidence="heuristic",
+                    extractor="repo-documents",
+                    extractor_version="0.1.0",
+                    metadata={"source_key": "document.file:file%3Anotes.txt"},
+                )
+            ]
+        )
+        malformed_target = canonicalize_observations(
+            [
+                RawObservation(
+                    kind="document.reference",
+                    source_id="notes.txt#malformed-target",
+                    path="notes.txt",
+                    confidence="heuristic",
+                    extractor="repo-documents",
+                    extractor_version="0.1.0",
+                    target="not a canonical key",
+                    metadata={"source_key": "document.file:file%3Anotes.txt"},
+                )
+            ]
+        )
+        bad_source = canonicalize_observations(
+            [
+                RawObservation(
+                    kind="document.reference",
+                    source_id="notes.txt#bad-source",
+                    path="notes.txt",
+                    confidence="heuristic",
+                    extractor="repo-documents",
+                    extractor_version="0.1.0",
+                    target="file:target.txt",
+                    metadata={"source_key": "config.document:file%3Anotes.txt"},
+                )
+            ]
+        )
+        bad_table_parent = canonicalize_observations(
+            [
+                RawObservation(
+                    kind="document.table_column",
+                    source_id="data.csv#bad-table-key",
+                    path="data.csv",
+                    confidence="extracted",
+                    extractor="repo-documents",
+                    extractor_version="0.1.0",
+                    target="document.column:file%3Adata.csv:%2Ftable%2Fcolumns%2Fname",
+                    metadata={
+                        "pointer": "/table/columns/name",
+                        "table_key": "file:data.csv",
+                    },
+                )
+            ]
+        )
+
+        self.assertTrue(missing_target.ok)
+        self.assertEqual(
+            missing_target.graph.edges[0].target_key,
+            "unknown:document.reference:missing-target",
+        )
+        self.assertEqual(
+            missing_target.diagnostics[0].category,
+            "missing_required_metadata",
+        )
+        self.assertTrue(malformed_target.ok)
+        self.assertEqual(
+            malformed_target.graph.edges[0].target_key,
+            "unknown:document.reference:malformed-target",
+        )
+        self.assertFalse(bad_source.ok)
+        self.assertEqual(bad_source.diagnostics[0].category, "invalid_canonical_key")
+        self.assertFalse(bad_table_parent.ok)
+        self.assertEqual(
+            bad_table_parent.diagnostics[0].message,
+            "document.table_column table_key must be document.table",
         )
 
 

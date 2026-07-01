@@ -4,6 +4,7 @@ from repomap_kg.canonical import canonical_edge_key
 from repomap_kg.canonicalization import canonicalize_observations
 from repomap_kg.config_extractor import extract_config_file_observations
 from repomap_kg.css import extract_css_file_observations
+from repomap_kg.documents import extract_document_file_observations
 from repomap_kg.feed import extract_feed_file_observations
 from repomap_kg.html import extract_html_file_observations
 from repomap_kg.observations import RawObservation
@@ -2603,6 +2604,108 @@ class CanonicalizationUnitTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["evidence"], 2)
         self.assertEqual(payload["summary"]["node_evidence_links"], 0)
         self.assertEqual(payload["summary"]["edge_evidence_links"], 0)
+
+    def test_document_text_and_table_observations_define_document_nodes(self):
+        observations = (
+            *extract_document_file_observations(
+                "notes.txt",
+                "# Overview\nSee docs/guide.txt\n",
+                repository_paths=frozenset({"notes.txt", "docs/guide.txt"}),
+            ),
+            *extract_document_file_observations(
+                "data.csv",
+                "name,amount\nalpha,42\n",
+            ),
+        )
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        node_keys = {node["canonical_key"] for node in payload["nodes"]}
+        self.assertIn("document.file:file%3Anotes.txt", node_keys)
+        self.assertIn(
+            "document.section:file%3Anotes.txt:%2Fsections%2Foverview",
+            node_keys,
+        )
+        self.assertIn("document.table:file%3Adata.csv:%2Ftable", node_keys)
+        self.assertIn(
+            "document.column:file%3Adata.csv:%2Ftable%2Fcolumns%2Famount",
+            node_keys,
+        )
+        edges = {
+            (edge["source_key"], edge["kind"], edge["target_key"])
+            for edge in payload["edges"]
+        }
+        self.assertIn(
+            ("file:notes.txt", "defines", "document.file:file%3Anotes.txt"),
+            edges,
+        )
+        self.assertIn(
+            (
+                "document.file:file%3Anotes.txt",
+                "defines",
+                "document.section:file%3Anotes.txt:%2Fsections%2Foverview",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "document.table:file%3Adata.csv:%2Ftable",
+                "defines",
+                "document.column:file%3Adata.csv:%2Ftable%2Fcolumns%2Famount",
+            ),
+            edges,
+        )
+
+    def test_document_references_create_reference_edges(self):
+        observations = extract_document_file_observations(
+            "paper.tex",
+            r"""\section{Intro}
+\input{chapter}
+\url{https://example.com/paper}
+""",
+            repository_paths=frozenset({"paper.tex", "chapter.tex"}),
+        )
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        edges = {
+            (edge["source_key"], edge["kind"], edge["target_key"])
+            for edge in payload["edges"]
+        }
+        self.assertIn(
+            (
+                "document.latex_command:file%3Apaper.tex:%2Fcommands%2Finput%3A1",
+                "references",
+                "file:chapter.tex",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (
+                "document.latex_command:file%3Apaper.tex:%2Fcommands%2Furl%3A2",
+                "references",
+                "external.url:https%3A%2F%2Fexample.com%2Fpaper",
+            ),
+            edges,
+        )
+
+    def test_document_parse_error_is_evidence_only(self):
+        observations = extract_document_file_observations(
+            "bad.csv",
+            "name,amount\nalpha,1\nbeta,2,extra\n",
+        )
+
+        result = canonicalize_observations(observations)
+        payload = result.to_dict()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["summary"]["nodes"], 0)
+        self.assertEqual(payload["summary"]["edges"], 0)
+        self.assertEqual(payload["summary"]["evidence"], 1)
 
     def test_toml_config_observations_reuse_config_canonicalization_contract(self):
         observations = extract_config_file_observations(

@@ -12,6 +12,7 @@ from repomap_kg import __version__
 from repomap_kg.config_extractor import extract_config_file_observations
 from repomap_kg.css import extract_css_file_observations
 from repomap_kg.css_html_matching import extract_css_selector_match_observations
+from repomap_kg.documents import extract_document_file_observations
 from repomap_kg.feed import extract_feed_file_observations
 from repomap_kg.html import extract_html_file_observations
 from repomap_kg.markdown import (
@@ -49,6 +50,7 @@ LANGUAGE_BY_EXTENSION = {
     ".awk": "awk",
     ".bash": "shell",
     ".css": "css",
+    ".csv": "csv",
     ".htm": "html",
     ".html": "html",
     ".json": "json",
@@ -61,6 +63,10 @@ LANGUAGE_BY_EXTENSION = {
     ".rb": "ruby",
     ".sh": "shell",
     ".sql": "sql",
+    ".latex": "latex",
+    ".tex": "latex",
+    ".tsv": "tsv",
+    ".txt": "text",
     ".toml": "toml",
     ".xml": "xml",
     ".yaml": "yaml",
@@ -194,6 +200,14 @@ def discover_observations(
                     file_info.path,
                 )
             )
+        if file_info.language in ("text", "csv", "tsv", "latex"):
+            observations.extend(
+                extract_document_file_observations_from_file(
+                    repository_root,
+                    file_info.path,
+                    repository_paths=repository_paths,
+                )
+            )
     observations.extend(extract_css_selector_match_observations(observations))
     return observations
 
@@ -278,6 +292,39 @@ def extract_css_file_observations_from_file(
     except UnicodeDecodeError:
         return ()
     return extract_css_file_observations(relative_path, content)
+
+
+def extract_document_file_observations_from_file(
+    repository_root: Path,
+    relative_path: str,
+    *,
+    repository_paths: frozenset[str] | None = None,
+) -> tuple[RawObservation, ...]:
+    try:
+        content = (repository_root / relative_path).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return (
+            RawObservation(
+                kind="document.parse_error",
+                source_id=f"{relative_path}#document-parse-error:decode",
+                path=relative_path,
+                confidence="unknown",
+                extractor="repo-documents",
+                extractor_version=__version__,
+                metadata={
+                    "format": Path(relative_path).suffix.lower().lstrip(".") or "unknown",
+                    "parser": "stdlib-document-conservative",
+                    "error_kind": "decode-error",
+                    "message_summary": "file is not valid UTF-8",
+                    "recovered": False,
+                },
+            ),
+        )
+    return extract_document_file_observations(
+        relative_path,
+        content,
+        repository_paths=repository_paths,
+    )
 
 
 def extract_markdown_file_observations_from_file(
