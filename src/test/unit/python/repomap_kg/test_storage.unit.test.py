@@ -19,6 +19,7 @@ from repomap_kg.storage import (
     EdgeRecord,
     FileNodeRecord,
     FileNeighborhoodRecord,
+    JSSummaryRecord,
     NeighborhoodRecord,
     NodeRecord,
     RubySummaryRecord,
@@ -26,6 +27,7 @@ from repomap_kg.storage import (
     StorageSchemaError,
     build_canonical_storage_summary_query_sql,
     build_ingested_source_query_sql,
+    build_js_summary_query_sql,
     build_ruby_summary_query_sql,
     build_source_feed_item_query_sql,
     build_source_reference_query_sql,
@@ -52,6 +54,7 @@ from repomap_kg.storage import (
     format_file_neighborhood_table,
     format_neighborhood_table,
     format_node_table,
+    format_js_summary_table,
     format_ruby_summary_table,
     format_storage_summary_table,
     file_rows_from_observations,
@@ -61,6 +64,7 @@ from repomap_kg.storage import (
     query_file_neighborhood,
     query_neighborhood,
     query_node_records,
+    query_js_summary,
     query_ruby_summary,
     query_storage_summary,
     query_host_mutator_records,
@@ -85,6 +89,7 @@ from repomap_kg.storage import (
     source_reference_record_from_storage_payload,
     source_run_record_from_storage_payload,
     source_summary_from_storage_payload,
+    js_summary_from_storage_payload,
     ruby_summary_from_storage_payload,
     format_canonical_edge_table,
     format_canonical_edge_explanation_table,
@@ -97,6 +102,7 @@ from repomap_kg.storage import (
     query_canonical_node_records,
     query_canonical_storage_summary,
     query_ingested_source_records,
+    js_summary_to_jsonable,
     ruby_summary_to_jsonable,
     query_source_feed_item_records,
     query_source_reference_records,
@@ -2213,6 +2219,109 @@ SELECT 1;
             with self.assertRaisesRegex(StorageSchemaError, "ruby summary"):
                 query_ruby_summary(["-d", "postgres"], root_path="/tmp/fixture")
 
+    def test_query_js_summary_returns_profile_counts(self):
+        completed = SimpleNamespace(
+            stdout=(
+                '{"root_path":"/tmp/fixture",'
+                '"repository_name":"fixture",'
+                '"js_files":12,'
+                '"modules":12,'
+                '"functions":6,'
+                '"classes":3,'
+                '"methods":2,'
+                '"variables":8,'
+                '"components":5,'
+                '"routes":4,'
+                '"test_suites":2,'
+                '"test_cases":4,'
+                '"references":19,'
+                '"imports":10,'
+                '"exports":9,'
+                '"hooks":3,'
+                '"test_expectations":4,'
+                '"source_map_references":1,'
+                '"frontend_asset_files":2,'
+                '"saved_page_asset_files":1,'
+                '"test_report_asset_files":1,'
+                '"dynamic_diagnostics":6,'
+                '"parse_errors":0,'
+                '"profile_counts":{'
+                '"angular":2,'
+                '"generic_javascript":3,'
+                '"jest":2,'
+                '"react":3,'
+                '"test_report_asset":1,'
+                '"vue":1'
+                '},'
+                '"no_execution":true}\n'
+            )
+        )
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed) as run:
+            summary = query_js_summary(
+                ["-d", "postgres"],
+                root_path="/tmp/fixture",
+                psql_command="/bin/psql",
+            )
+
+        self.assertEqual(summary.repository_name, "fixture")
+        self.assertEqual(summary.js_files, 12)
+        self.assertEqual(summary.components, 5)
+        self.assertEqual(summary.test_cases, 4)
+        self.assertEqual(summary.source_map_references, 1)
+        self.assertEqual(summary.frontend_asset_files, 2)
+        self.assertEqual(summary.test_report_asset_files, 1)
+        self.assertEqual(summary.dynamic_diagnostics, 6)
+        self.assertEqual(summary.profile_counts["react"], 3)
+        self.assertTrue(summary.no_execution)
+        self.assertIn("-qAt", run.call_args.args[0])
+        self.assertIn("canonical_nodes.kind LIKE 'js.%'", run.call_args.kwargs["input"])
+
+    def test_query_js_summary_rejects_malformed_json(self):
+        completed = SimpleNamespace(stdout='{"root_path": "/tmp/fixture"}\n')
+
+        with patch("repomap_kg.storage.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(StorageSchemaError, "js summary"):
+                query_js_summary(["-d", "postgres"], root_path="/tmp/fixture")
+
+    def test_js_summary_payload_parser_preserves_safe_counts(self):
+        summary = js_summary_from_storage_payload(
+            {
+                "root_path": "/tmp/fixture",
+                "repository_name": "fixture",
+                "js_files": 5,
+                "modules": 5,
+                "functions": 2,
+                "classes": 1,
+                "methods": 1,
+                "variables": 4,
+                "components": 3,
+                "routes": 2,
+                "test_suites": 1,
+                "test_cases": 2,
+                "references": 8,
+                "imports": 4,
+                "exports": 3,
+                "hooks": 2,
+                "test_expectations": 2,
+                "source_map_references": 1,
+                "frontend_asset_files": 1,
+                "saved_page_asset_files": 0,
+                "test_report_asset_files": 1,
+                "dynamic_diagnostics": 3,
+                "parse_errors": 0,
+                "profile_counts": {"jest": 1, "react": 2},
+                "no_execution": True,
+            }
+        )
+
+        self.assertEqual(summary.root_path, "/tmp/fixture")
+        self.assertEqual(summary.profile_counts, {"jest": 1, "react": 2})
+        self.assertEqual(summary.components, 3)
+        self.assertEqual(summary.source_map_references, 1)
+        self.assertTrue(summary.no_execution)
+        self.assertEqual(js_summary_to_jsonable(summary), summary.to_dict())
+
     def test_ruby_summary_payload_parser_preserves_safe_counts(self):
         summary = ruby_summary_from_storage_payload(
             {
@@ -2690,6 +2799,25 @@ SELECT 1;
         self.assertIn("profile_counts", sql)
         self.assertIn("'no_execution', true", sql)
 
+    def test_build_js_summary_query_sql_counts_js_profiles_and_evidence(self):
+        sql = build_js_summary_query_sql("/tmp/fixture's repo")
+
+        self.assertIn("fixture''s repo", sql)
+        self.assertIn("COUNT(*) FILTER (WHERE kind = 'js.file')", sql)
+        self.assertIn("COUNT(*) FILTER (WHERE kind = 'js.component')", sql)
+        self.assertIn("COUNT(*) FILTER (WHERE kind = 'js.test_case')", sql)
+        self.assertIn("canonical_edges.edge_kind = 'references'", sql)
+        self.assertIn("raw_observations.kind = 'js.import'", sql)
+        self.assertIn("raw_observations.kind = 'js.export'", sql)
+        self.assertIn("raw_observations.kind = 'js.hook'", sql)
+        self.assertIn("raw_observations.kind = 'js.test_expectation'", sql)
+        self.assertIn("raw_observations.kind = 'js.parse_error'", sql)
+        self.assertIn("source_map_references", sql)
+        self.assertIn("frontend_asset_files", sql)
+        self.assertIn("test_report_asset_files", sql)
+        self.assertIn("profile_counts", sql)
+        self.assertIn("'no_execution', true", sql)
+
     def test_format_edge_table_uses_edge_columns(self):
         table = format_edge_table(
             [
@@ -2792,6 +2920,46 @@ SELECT 1;
         self.assertIn("gem_dependencies", table)
         self.assertIn("profile_counts", table)
         self.assertIn("minitest=2", table)
+        self.assertIn("no_execution", table)
+
+    def test_format_js_summary_table_uses_profile_and_readback_columns(self):
+        table = format_js_summary_table(
+            JSSummaryRecord(
+                root_path="/tmp/fixture",
+                repository_name="fixture",
+                js_files=12,
+                modules=12,
+                functions=6,
+                classes=3,
+                methods=2,
+                variables=8,
+                components=5,
+                routes=4,
+                test_suites=2,
+                test_cases=4,
+                references=19,
+                imports=10,
+                exports=9,
+                hooks=3,
+                test_expectations=4,
+                source_map_references=1,
+                frontend_asset_files=2,
+                saved_page_asset_files=1,
+                test_report_asset_files=1,
+                dynamic_diagnostics=6,
+                parse_errors=0,
+                profile_counts={"jest": 2, "react": 3},
+                no_execution=True,
+            )
+        )
+
+        self.assertIn("js_files", table)
+        self.assertIn("components", table)
+        self.assertIn("test_cases", table)
+        self.assertIn("source_map_references", table)
+        self.assertIn("frontend_asset_files", table)
+        self.assertIn("profile_counts", table)
+        self.assertIn("react=3", table)
         self.assertIn("no_execution", table)
 
     def test_format_node_table_uses_node_columns(self):

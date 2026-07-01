@@ -482,6 +482,38 @@ class RubySummaryRecord:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class JSSummaryRecord:
+    root_path: str
+    repository_name: str | None
+    js_files: int
+    modules: int
+    functions: int
+    classes: int
+    methods: int
+    variables: int
+    components: int
+    routes: int
+    test_suites: int
+    test_cases: int
+    references: int
+    imports: int
+    exports: int
+    hooks: int
+    test_expectations: int
+    source_map_references: int
+    frontend_asset_files: int
+    saved_page_asset_files: int
+    test_report_asset_files: int
+    dynamic_diagnostics: int
+    parse_errors: int
+    profile_counts: dict[str, int]
+    no_execution: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 CHANGESET_PATTERN = re.compile(r"^--changeset\s+(\S+)")
 
 
@@ -1135,6 +1167,21 @@ def query_ruby_summary(
     )
     return ruby_summary_from_storage_payload(
         parse_psql_json(result.stdout, "ruby summary")
+    )
+
+
+def query_js_summary(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    psql_command: str = "psql",
+) -> JSSummaryRecord:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_js_summary_query_sql(root_path),
+    )
+    return js_summary_from_storage_payload(
+        parse_psql_json(result.stdout, "js summary")
     )
 
 
@@ -2307,6 +2354,106 @@ def build_ruby_summary_query_sql(root_path: str) -> str:
         "false)), "
         "'parse_errors', (SELECT COUNT(*) FROM ruby_raw raw_observations "
         "WHERE raw_observations.kind = 'ruby.parse_error' "
+        "AND NOT COALESCE("
+        "(raw_observations.payload_json->'metadata'->>'dynamic')::boolean, "
+        "false)), "
+        "'profile_counts', COALESCE(("
+        "SELECT json_object_agg(profile, profile_count ORDER BY profile) "
+        "FROM profile_rows"
+        "), '{}'::json), "
+        "'no_execution', true"
+        ")::text;"
+    )
+
+
+def build_js_summary_query_sql(root_path: str) -> str:
+    quoted_root = sql_literal(root_path)
+    return (
+        "WITH repo AS ("
+        "SELECT id, name, root_path FROM repositories "
+        f"WHERE repositories.root_path = {quoted_root}"
+        "), "
+        "js_nodes AS ("
+        "SELECT canonical_nodes.* FROM canonical_nodes "
+        "JOIN repo ON repo.id = canonical_nodes.repository_id "
+        "WHERE canonical_nodes.graph_key_version = 1 "
+        "AND canonical_nodes.kind LIKE 'js.%'"
+        "), "
+        "js_raw AS ("
+        "SELECT raw_observations.* FROM raw_observations "
+        "JOIN repo ON repo.id = raw_observations.repository_id "
+        "WHERE raw_observations.kind LIKE 'js.%'"
+        "), "
+        "js_references AS ("
+        "SELECT canonical_edges.* FROM canonical_edges "
+        "JOIN repo ON repo.id = canonical_edges.repository_id "
+        "WHERE canonical_edges.graph_key_version = 1 "
+        "AND canonical_edges.edge_kind = 'references' "
+        "AND canonical_edges.source_canonical_key LIKE 'js.%'"
+        "), "
+        "profile_rows AS ("
+        "SELECT COALESCE(metadata_json->>'profile', 'unknown') AS profile, "
+        "COUNT(*) AS profile_count "
+        "FROM js_nodes "
+        "WHERE kind = 'js.file' "
+        "GROUP BY COALESCE(metadata_json->>'profile', 'unknown')"
+        ") "
+        "SELECT json_build_object("
+        f"'root_path', {quoted_root}, "
+        "'repository_name', (SELECT name FROM repo), "
+        "'js_files', (SELECT COUNT(*) FILTER (WHERE kind = 'js.file') "
+        "FROM js_nodes), "
+        "'modules', (SELECT COUNT(*) FILTER (WHERE kind = 'js.module') "
+        "FROM js_nodes), "
+        "'functions', (SELECT COUNT(*) FILTER (WHERE kind = 'js.function') "
+        "FROM js_nodes), "
+        "'classes', (SELECT COUNT(*) FILTER (WHERE kind = 'js.class') "
+        "FROM js_nodes), "
+        "'methods', (SELECT COUNT(*) FILTER (WHERE kind = 'js.method') "
+        "FROM js_nodes), "
+        "'variables', (SELECT COUNT(*) FILTER (WHERE kind = 'js.variable') "
+        "FROM js_nodes), "
+        "'components', (SELECT COUNT(*) FILTER (WHERE kind = 'js.component') "
+        "FROM js_nodes), "
+        "'routes', (SELECT COUNT(*) FILTER (WHERE kind = 'js.route') "
+        "FROM js_nodes), "
+        "'test_suites', (SELECT COUNT(*) FILTER (WHERE kind = 'js.test_suite') "
+        "FROM js_nodes), "
+        "'test_cases', (SELECT COUNT(*) FILTER (WHERE kind = 'js.test_case') "
+        "FROM js_nodes), "
+        "'references', (SELECT COUNT(*) FROM js_references), "
+        "'imports', (SELECT COUNT(*) FROM js_raw raw_observations "
+        "WHERE raw_observations.kind = 'js.import'), "
+        "'exports', (SELECT COUNT(*) FROM js_raw raw_observations "
+        "WHERE raw_observations.kind = 'js.export'), "
+        "'hooks', (SELECT COUNT(*) FROM js_raw raw_observations "
+        "WHERE raw_observations.kind = 'js.hook'), "
+        "'test_expectations', COALESCE(("
+        "SELECT SUM(COALESCE(("
+        "raw_observations.payload_json->'metadata'->>'expectation_count'"
+        ")::int, 1)) FROM js_raw raw_observations "
+        "WHERE raw_observations.kind = 'js.test_expectation'"
+        "), 0), "
+        "'source_map_references', (SELECT COUNT(*) FROM js_raw raw_observations "
+        "WHERE raw_observations.kind = 'js.reference' "
+        "AND raw_observations.payload_json->'metadata'->>'reference_kind' = "
+        "'source_map'), "
+        "'frontend_asset_files', (SELECT COUNT(*) FROM js_nodes "
+        "WHERE kind = 'js.file' "
+        "AND metadata_json->>'profile' = 'frontend_asset'), "
+        "'saved_page_asset_files', (SELECT COUNT(*) FROM js_nodes "
+        "WHERE kind = 'js.file' "
+        "AND metadata_json->>'profile' = 'saved_page_asset'), "
+        "'test_report_asset_files', (SELECT COUNT(*) FROM js_nodes "
+        "WHERE kind = 'js.file' "
+        "AND metadata_json->>'profile' = 'test_report_asset'), "
+        "'dynamic_diagnostics', (SELECT COUNT(*) FROM js_raw raw_observations "
+        "WHERE raw_observations.kind = 'js.parse_error' "
+        "AND COALESCE("
+        "(raw_observations.payload_json->'metadata'->>'dynamic')::boolean, "
+        "false)), "
+        "'parse_errors', (SELECT COUNT(*) FROM js_raw raw_observations "
+        "WHERE raw_observations.kind = 'js.parse_error' "
         "AND NOT COALESCE("
         "(raw_observations.payload_json->'metadata'->>'dynamic')::boolean, "
         "false)), "
@@ -3965,6 +4112,83 @@ def ruby_summary_from_storage_payload(payload: Any) -> RubySummaryRecord:
     )
 
 
+def js_summary_from_storage_payload(payload: Any) -> JSSummaryRecord:
+    if not isinstance(payload, dict):
+        raise StorageSchemaError("psql returned a malformed js summary")
+    profile_counts_payload = payload_json_object(
+        payload,
+        "profile_counts",
+        label="js summary",
+    )
+    profile_counts: dict[str, int] = {}
+    for profile, count in profile_counts_payload.items():
+        if not isinstance(profile, str) or not profile:
+            raise StorageSchemaError(
+                "psql returned a malformed js summary: profile_counts"
+            )
+        try:
+            profile_counts[profile] = int(count)
+        except (TypeError, ValueError) as error:
+            raise StorageSchemaError(
+                "psql returned a malformed js summary: profile_counts"
+            ) from error
+    return JSSummaryRecord(
+        root_path=payload_text(payload, "root_path", label="js summary"),
+        repository_name=payload_optional_text(
+            payload,
+            "repository_name",
+            label="js summary",
+        ),
+        js_files=payload_int(payload, "js_files", label="js summary"),
+        modules=payload_int(payload, "modules", label="js summary"),
+        functions=payload_int(payload, "functions", label="js summary"),
+        classes=payload_int(payload, "classes", label="js summary"),
+        methods=payload_int(payload, "methods", label="js summary"),
+        variables=payload_int(payload, "variables", label="js summary"),
+        components=payload_int(payload, "components", label="js summary"),
+        routes=payload_int(payload, "routes", label="js summary"),
+        test_suites=payload_int(payload, "test_suites", label="js summary"),
+        test_cases=payload_int(payload, "test_cases", label="js summary"),
+        references=payload_int(payload, "references", label="js summary"),
+        imports=payload_int(payload, "imports", label="js summary"),
+        exports=payload_int(payload, "exports", label="js summary"),
+        hooks=payload_int(payload, "hooks", label="js summary"),
+        test_expectations=payload_int(
+            payload,
+            "test_expectations",
+            label="js summary",
+        ),
+        source_map_references=payload_int(
+            payload,
+            "source_map_references",
+            label="js summary",
+        ),
+        frontend_asset_files=payload_int(
+            payload,
+            "frontend_asset_files",
+            label="js summary",
+        ),
+        saved_page_asset_files=payload_int(
+            payload,
+            "saved_page_asset_files",
+            label="js summary",
+        ),
+        test_report_asset_files=payload_int(
+            payload,
+            "test_report_asset_files",
+            label="js summary",
+        ),
+        dynamic_diagnostics=payload_int(
+            payload,
+            "dynamic_diagnostics",
+            label="js summary",
+        ),
+        parse_errors=payload_int(payload, "parse_errors", label="js summary"),
+        profile_counts=dict(sorted(profile_counts.items())),
+        no_execution=payload_bool(payload, "no_execution", label="js summary"),
+    )
+
+
 def file_node_records_to_jsonable(
     records: Sequence[FileNodeRecord],
 ) -> list[dict[str, Any]]:
@@ -4022,6 +4246,10 @@ def canonical_storage_summary_to_jsonable(
 
 
 def ruby_summary_to_jsonable(record: RubySummaryRecord) -> dict[str, Any]:
+    return record.to_dict()
+
+
+def js_summary_to_jsonable(record: JSSummaryRecord) -> dict[str, Any]:
     return record.to_dict()
 
 
@@ -4414,6 +4642,49 @@ def format_ruby_summary_table(record: RubySummaryRecord) -> str:
         "vagrant_configs",
         "rake_tasks",
         "rake_namespaces",
+        "dynamic_diagnostics",
+        "parse_errors",
+        "profile_counts",
+        "no_execution",
+    )
+    rendered_row = {key: render_table_value(row[key]) for key in columns}
+    widths = {key: max(len(key), len(rendered_row[key])) for key in columns}
+    return "\n".join(
+        [
+            format_table_row(dict(zip(columns, columns, strict=True)), columns, widths),
+            format_table_row(rendered_row, columns, widths),
+        ]
+    )
+
+
+def format_js_summary_table(record: JSSummaryRecord) -> str:
+    row = record.to_dict()
+    row["profile_counts"] = ", ".join(
+        f"{profile}={count}"
+        for profile, count in sorted(record.profile_counts.items())
+    )
+    columns = (
+        "root_path",
+        "repository_name",
+        "js_files",
+        "modules",
+        "functions",
+        "classes",
+        "methods",
+        "variables",
+        "components",
+        "routes",
+        "test_suites",
+        "test_cases",
+        "references",
+        "imports",
+        "exports",
+        "hooks",
+        "test_expectations",
+        "source_map_references",
+        "frontend_asset_files",
+        "saved_page_asset_files",
+        "test_report_asset_files",
         "dynamic_diagnostics",
         "parse_errors",
         "profile_counts",

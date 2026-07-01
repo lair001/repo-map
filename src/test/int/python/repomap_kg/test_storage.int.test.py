@@ -30,6 +30,7 @@ from repomap_kg.storage import (
     query_canonical_edge_explanation,
     query_canonical_edge_records,
     query_canonical_node_records,
+    query_js_summary,
     query_ruby_summary,
     raw_observation_rows_from_observations,
     raw_observation_upsert_sql,
@@ -832,8 +833,50 @@ FROM canonical_edges;
                 identity_metadata_hash=references[0].identity_metadata_hash,
                 psql_command=postgres.psql_command,
             )
+            js_summary = query_js_summary(
+                postgres.psql_args,
+                root_path=root_path,
+                psql_command=postgres.psql_command,
+            )
+            summary_exit_code, summary_stdout, summary_stderr = (
+                run_repo_map_in_process(
+                    "storage",
+                    "js-summary",
+                    "--root-path",
+                    root_path,
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                    "--json",
+                )
+            )
+            table_exit_code, table_stdout, table_stderr = run_repo_map_in_process(
+                "storage",
+                "js-summary",
+                "--root-path",
+                root_path,
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+            )
 
         self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(summary_exit_code, 0, summary_stderr)
+        self.assertEqual(table_exit_code, 0, table_stderr)
         self.assertGreaterEqual(len(js_files), 10)
         self.assertEqual(
             [node.canonical_key for node in js_classes],
@@ -847,6 +890,34 @@ FROM canonical_edges;
         self.assertEqual(references[0].edge_kind, "references")
         self.assertIsNotNone(explanation.edge)
         self.assertEqual(explanation.edge.source_key, "js.module:file%3Asrc%2Findex.js")
+        self.assertGreaterEqual(js_summary.js_files, 10)
+        self.assertGreaterEqual(js_summary.components, 5)
+        self.assertGreaterEqual(js_summary.routes, 2)
+        self.assertGreaterEqual(js_summary.test_suites, 2)
+        self.assertGreaterEqual(js_summary.test_cases, 2)
+        self.assertGreaterEqual(js_summary.hooks, 2)
+        self.assertGreaterEqual(js_summary.test_expectations, 2)
+        self.assertGreaterEqual(js_summary.source_map_references, 1)
+        self.assertGreaterEqual(js_summary.dynamic_diagnostics, 5)
+        self.assertEqual(js_summary.profile_counts["jest"], 2)
+        self.assertGreaterEqual(js_summary.profile_counts["react"], 4)
+        self.assertEqual(js_summary.profile_counts["angular"], 2)
+        self.assertEqual(js_summary.profile_counts["vue"], 1)
+        self.assertEqual(js_summary.profile_counts["test_report_asset"], 1)
+        self.assertEqual(js_summary.test_report_asset_files, 1)
+        self.assertTrue(js_summary.no_execution)
+        summary_payload = json.loads(summary_stdout)
+        self.assertEqual(summary_payload["js_files"], js_summary.js_files)
+        self.assertEqual(summary_payload["components"], js_summary.components)
+        self.assertEqual(
+            summary_payload["profile_counts"]["react"],
+            js_summary.profile_counts["react"],
+        )
+        self.assertTrue(summary_payload["no_execution"])
+        self.assertIn("js_files", table_stdout)
+        self.assertIn("profile_counts", table_stdout)
+        self.assertIn("react=", table_stdout)
+        self.assertIn("no_execution", table_stdout)
         readback_payload = "\n".join(
             (
                 *(str(node.to_dict()) for node in js_files),
@@ -855,6 +926,9 @@ FROM canonical_edges;
                 *(str(node.to_dict()) for node in routes),
                 *(str(edge.to_dict()) for edge in references),
                 str(explanation.to_dict()),
+                str(js_summary.to_dict()),
+                summary_stdout,
+                table_stdout,
             )
         )
         self.assertNotIn("placeholder", readback_payload)
