@@ -796,6 +796,85 @@ class CliIntegrationTests(unittest.TestCase):
             {error["metadata"]["error_kind"] for error in parse_errors},
         )
 
+    def test_discover_command_emits_python_ecosystem_observations_from_fixture(self):
+        fixture = REPO_ROOT / "src" / "test" / "fixtures" / "python_ecosystem"
+
+        exit_code, stdout, stderr = self.run_module_entrypoint(
+            "discover", str(fixture), "--jsonl"
+        )
+
+        self.assertEqual(exit_code, 0, stderr)
+        observations = [
+            json.loads(line)
+            for line in stdout.splitlines()
+            if line.strip()
+        ]
+        kinds = {observation["kind"] for observation in observations}
+        self.assertTrue(
+            {
+                "python.package_file",
+                "python.requirement",
+                "python.reference",
+                "python.pyproject",
+                "python.build_system",
+                "python.dependency_group",
+                "python.entry_point",
+                "python.tool_config",
+                "python.test_file",
+                "python.test_function",
+                "python.test_method",
+                "python.test_fixture",
+                "python.test_parametrize",
+                "python.test_assertion",
+                "python.unittest_case",
+                "python.pytest_test",
+                "python.pytest_fixture",
+                "python.parse_error",
+                "python.redaction",
+                "config.document",
+                "config.path",
+            }.issubset(kinds)
+        )
+        self.assertNotIn("fake-python-index-secret", stdout)
+        self.assertNotIn("fake-python-direct-secret", stdout)
+        self.assertNotIn("fake-pyproject-secret", stdout)
+        self.assertNotIn("fake-pyproject-index-secret", stdout)
+        self.assertNotIn("user:fake", stdout)
+
+        redaction_reasons = {
+            observation["metadata"]["redaction_reason"]
+            for observation in observations
+            if observation["kind"] == "python.redaction"
+        }
+        self.assertIn("credentialed-url", redaction_reasons)
+
+        references = [
+            observation
+            for observation in observations
+            if observation["kind"] == "python.reference"
+        ]
+        self.assertTrue(any(item["metadata"]["not_fetched"] for item in references))
+        self.assertTrue(
+            any(
+                item["metadata"]["reference_kind"] in {"include_file", "constraint_file"}
+                and item["target"].startswith("file:")
+                for item in references
+            )
+        )
+
+        parse_error_kinds = {
+            observation["metadata"]["error_kind"]
+            for observation in observations
+            if observation["kind"] == "python.parse_error"
+        }
+        self.assertTrue(
+            {
+                "malformed-python-requirement",
+                "malformed-pyproject-toml",
+                "malformed-python",
+            }.issubset(parse_error_kinds)
+        )
+
     def test_discover_command_emits_terraform_hcl_observations_from_fixture(self):
         fixture = REPO_ROOT / "src" / "test" / "fixtures" / "terraform_hcl" / "basic"
 

@@ -3998,6 +3998,124 @@ FROM raw_observations;
             set(),
         )
 
+    def test_storage_loads_python_ecosystem_profile_observations_as_raw_evidence(self):
+        require_postgres_binaries()
+        fixture_root = python_ecosystem_fixture("dogfood")
+
+        discover_exit_code, discover_stdout, discover_stderr = (
+            run_repo_map_in_process(
+                "discover",
+                str(fixture_root),
+                "--jsonl",
+            )
+        )
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as jsonl_file:
+            jsonl_file.write(discover_stdout)
+            jsonl_file.flush()
+
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                storage_args = (
+                    "--root-path",
+                    str(fixture_root),
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                )
+                load_exit_code, _load_stdout, load_stderr = (
+                    run_repo_map_in_process(
+                        "storage",
+                        "load-files",
+                        jsonl_file.name,
+                        "--repository-name",
+                        "py1-dogfood-fixture",
+                        *storage_args,
+                        "--json",
+                    )
+                )
+                raw_kinds_json = postgres.psql_scalar(
+                    """
+SELECT COALESCE(jsonb_agg(payload_json->>'kind' ORDER BY ordinal)::text, '[]')
+FROM raw_observations;
+"""
+                )
+                raw_payload = postgres.psql_scalar(
+                    """
+SELECT COALESCE(jsonb_agg(payload_json ORDER BY ordinal)::text, '[]')
+FROM raw_observations;
+"""
+                )
+                canonical_kinds = {
+                    record.kind
+                    for record in query_canonical_node_records(
+                        postgres.psql_args,
+                        root_path=str(fixture_root),
+                        psql_command=postgres.psql_command,
+                    )
+                }
+                canonical_edges = query_canonical_edge_records(
+                    postgres.psql_args,
+                    root_path=str(fixture_root),
+                    psql_command=postgres.psql_command,
+                )
+
+        self.assertEqual(discover_exit_code, 0, discover_stderr)
+        self.assertEqual(load_exit_code, 0, load_stderr)
+        discovered = [
+            json.loads(line)
+            for line in discover_stdout.splitlines()
+            if line.strip()
+        ]
+        discovered_kinds = {record["kind"] for record in discovered}
+        self.assertTrue(
+            {
+                "python.package_file",
+                "python.requirement",
+                "python.pyproject",
+                "python.build_system",
+                "python.tool_config",
+                "python.test_file",
+                "python.unittest_case",
+                "python.pytest_test",
+            }.issubset(discovered_kinds)
+        )
+
+        raw_kinds = set(json.loads(raw_kinds_json))
+        self.assertTrue(
+            {
+                "python.package_file",
+                "python.requirement",
+                "python.pyproject",
+                "python.build_system",
+                "python.tool_config",
+                "python.test_file",
+                "python.unittest_case",
+                "python.pytest_test",
+            }.issubset(raw_kinds)
+        )
+        self.assertIn("python.module", canonical_kinds)
+        self.assertIn("python.method", canonical_kinds)
+        self.assertIn("config.document", canonical_kinds)
+        self.assertNotIn("python.requirement", canonical_kinds)
+        self.assertNotIn("python.pytest_test", canonical_kinds)
+        self.assertEqual(
+            {edge.edge_kind for edge in canonical_edges}
+            - {"defines", "references", "imports"},
+            set(),
+        )
+        self.assertNotIn("fake-python", raw_payload)
+
     def test_storage_loads_tfhcl_profile_observations_as_raw_evidence(self):
         require_postgres_binaries()
         fixture_root = terraform_hcl_fixture("basic")
@@ -9498,6 +9616,10 @@ def openapi_fixture(name: str) -> Path:
 
 def terraform_hcl_fixture(name: str) -> Path:
     return Path(__file__).parents[3] / "fixtures" / "terraform_hcl" / name
+
+
+def python_ecosystem_fixture(name: str) -> Path:
+    return Path(__file__).parents[3] / "fixtures" / "python_ecosystem" / name
 
 
 def source_fixture(filename: str) -> Path:

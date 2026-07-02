@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -108,8 +109,10 @@ CONFIG_FILENAMES = frozenset(
         "flake.lock",
         "flake.nix",
         "pyproject.toml",
-        "requirements.txt",
     }
+)
+PYTHON_REQUIREMENTS_NAME_PATTERN = re.compile(
+    r"^(?:requirements(?:-[0-9A-Za-z_.-]+)?|dev-requirements|test-requirements)\.txt$"
 )
 
 
@@ -188,7 +191,14 @@ def discover_observations(
             observations.extend(
                 extract_shell_file_observations(repository_root, file_info.path)
             )
-        if file_info.language == "python":
+        if is_python_requirements_file_name(file_info.path):
+            observations.extend(
+                extract_config_file_observations_from_file(
+                    repository_root,
+                    file_info.path,
+                )
+            )
+        elif file_info.language == "python":
             observations.extend(
                 extract_python_file_observations_from_file(
                     repository_root,
@@ -575,6 +585,8 @@ def classify_path(
 
 
 def detect_language(path: Path) -> str:
+    if is_python_requirements_file_name(path.name):
+        return "python"
     if path.name in RUBY_FILENAMES:
         return "ruby"
     language = LANGUAGE_BY_EXTENSION.get(path.suffix)
@@ -602,6 +614,7 @@ def detect_role(relative_path: str, *, executable: bool, generated: bool) -> str
         return "documentation"
     if (
         filename in CONFIG_FILENAMES
+        or is_python_requirements_file_name(filename)
         or filename.endswith(".plist")
         or filename.endswith(".tf")
         or filename.endswith(".tfvars")
@@ -613,6 +626,10 @@ def detect_role(relative_path: str, *, executable: bool, generated: bool) -> str
     if relative_path.startswith("src/"):
         return "source"
     return "unknown"
+
+
+def is_python_requirements_file_name(relative_path: str) -> bool:
+    return bool(PYTHON_REQUIREMENTS_NAME_PATTERN.match(Path(relative_path).name))
 
 
 def is_generated(relative_path: str) -> bool:

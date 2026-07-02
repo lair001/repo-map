@@ -318,6 +318,63 @@ class DiscoveryUnitTests(unittest.TestCase):
         self.assertNotIn("fake-tfhcl-tfvars-secret", payload)
         self.assertNotIn("fake-tfhcl-import-secret", payload)
 
+    def test_discover_observations_includes_python_ecosystem_profile_facts(self):
+        fixture_root = (
+            Path(__file__).parents[3]
+            / "fixtures"
+            / "python_ecosystem"
+            / "dogfood"
+        )
+
+        observations = discover_observations(fixture_root)
+
+        kinds = {observation.kind for observation in observations}
+        languages = {
+            observation.path: observation.metadata.get("language")
+            for observation in observations
+            if observation.kind == "file"
+        }
+
+        self.assertEqual(languages["requirements.txt"], "python")
+        self.assertEqual(languages["requirements-dev.txt"], "python")
+        self.assertEqual(languages["pyproject.toml"], "toml")
+        self.assertIn("python.package_file", kinds)
+        self.assertIn("python.requirement", kinds)
+        self.assertIn("python.pyproject", kinds)
+        self.assertIn("python.build_system", kinds)
+        self.assertIn("python.tool_config", kinds)
+        self.assertIn("python.test_file", kinds)
+        self.assertIn("python.unittest_case", kinds)
+        self.assertIn("python.pytest_test", kinds)
+        self.assertEqual(
+            [
+                observation
+                for observation in observations
+                if observation.kind == "python.parse_error"
+                and observation.path.startswith("requirements")
+            ],
+            [],
+        )
+
+    def test_discover_repository_classifies_python_requirement_files_as_config(self):
+        fixture_root = (
+            Path(__file__).parents[3]
+            / "fixtures"
+            / "python_ecosystem"
+            / "requirements"
+            / "basic"
+        )
+
+        file_infos = discover_repository(fixture_root)
+
+        by_path = {file_info.path: file_info for file_info in file_infos}
+        self.assertEqual(by_path["requirements.txt"].language, "python")
+        self.assertEqual(by_path["requirements.txt"].role, "config")
+        self.assertEqual(by_path["dev-requirements.txt"].language, "python")
+        self.assertEqual(by_path["dev-requirements.txt"].role, "config")
+        self.assertEqual(by_path["test-requirements.txt"].language, "python")
+        self.assertEqual(by_path["test-requirements.txt"].role, "config")
+
     def test_discover_repository_classifies_terraform_hcl_as_config(self):
         fixture_root = Path(__file__).parents[3] / "fixtures" / "terraform_hcl" / "basic"
 

@@ -161,6 +161,20 @@ OPENAPI_MAX_EXAMPLES = 128
 OPENAPI_MAX_METADATA_STRING = 160
 OPENAPI_TEXT_KEYS = frozenset(("description", "summary"))
 OPENAPI_EXAMPLE_KEYS = frozenset(("example", "examples", "default"))
+PYTHON_REQUIREMENTS_FORMAT = "python-requirements"
+PYTHON_REQUIREMENTS_PROFILE = "python"
+PYTHON_REQUIREMENTS_NAME_PATTERN = re.compile(
+    r"^(?:requirements(?:-[0-9A-Za-z_.-]+)?|dev-requirements|test-requirements)\.txt$"
+)
+PYTHON_REQUIREMENT_NAME_PATTERN = re.compile(
+    r"^(?P<name>[A-Za-z0-9][A-Za-z0-9_.-]*)"
+    r"(?P<extras>\[[A-Za-z0-9_, .-]+\])?"
+    r"(?P<specifier>.*)$"
+)
+PYTHON_MAX_REQUIREMENTS = 256
+PYTHON_MAX_REQUIREMENT_REFERENCES = 128
+PYTHON_MAX_REQUIREMENT_DIAGNOSTICS = 64
+PYTHON_MAX_METADATA_STRING = 160
 
 
 class JsoncNormalizationError(ValueError):
@@ -238,11 +252,27 @@ class _TerraformHclAttribute:
     start_line: int
 
 
+@dataclass(frozen=True)
+class _PythonRequirement:
+    package_name: str | None
+    specifier: str | None
+    extras: tuple[str, ...]
+    environment_marker: str | None
+    source: str | None
+    editable: bool
+    direct_url: bool
+    local_path: bool
+    line_number: int
+    raw_kind: str
+
+
 def extract_config_file_observations(
     relative_path: str,
     content: str,
 ) -> tuple[RawObservation, ...]:
     suffix = PurePosixPath(relative_path).suffix.lower()
+    if _is_python_requirements_file_name(relative_path):
+        return _extract_python_requirements_observations(relative_path, content)
     if _is_terraform_hcl_file_name(relative_path):
         return _extract_terraform_hcl_observations(relative_path, content)
     if _is_terraform_tfvars_hcl_file_name(relative_path):
@@ -470,23 +500,47 @@ def _extract_toml_observations(
     try:
         parsed = tomllib.loads(content)
     except tomllib.TOMLDecodeError as error:
-        return (
-            _parse_error_observation(
-                relative_path,
-                format_name="toml",
-                error_kind="malformed-toml",
-                message=str(error),
-                start_line=getattr(error, "lineno", None),
-                recovered=False,
-            ),
+        parse_error = _parse_error_observation(
+            relative_path,
+            format_name="toml",
+            error_kind="malformed-toml",
+            message=str(error),
+            start_line=getattr(error, "lineno", None),
+            recovered=False,
         )
+        if _is_pyproject_file_name(relative_path):
+            return (
+                parse_error,
+                _python_parse_error_observation(
+                    relative_path,
+                    error_kind="malformed-pyproject-toml",
+                    message=str(error),
+                    start_line=getattr(error, "lineno", None),
+                    source_suffix="pyproject",
+                ),
+            )
+        return (parse_error,)
+    metadata_overrides = (
+        _python_pyproject_metadata_overrides(parsed)
+        if _is_pyproject_file_name(relative_path)
+        else None
+    )
     path_observations, reference_observations = _structure_observations(
         relative_path,
         parsed,
         format_name="toml",
         confidence="extracted",
         content=content,
+        metadata_overrides=metadata_overrides,
     )
+    profile_observations: tuple[RawObservation, ...] = ()
+    if _is_pyproject_file_name(relative_path):
+        profile_observations = _python_pyproject_observations(
+            relative_path,
+            parsed,
+            format_name="toml",
+            confidence="extracted",
+        )
     document = _document_observation(
         relative_path,
         format_name="toml",
@@ -497,7 +551,7 @@ def _extract_toml_observations(
         record_count=None,
         parse_error_count=0,
     )
-    return (document, *path_observations, *reference_observations)
+    return (document, *profile_observations, *path_observations, *reference_observations)
 
 
 def _extract_yaml_observations(
@@ -1594,6 +1648,864 @@ def _profile_observation(
         extractor_version=__version__,
         metadata=full_metadata,
     )
+
+
+def _extract_python_requirements_observations(
+    relative_path: str,
+    content: str,
+) -> tuple[RawObservation, ...]:
+    observations: list[RawObservation] = []
+    requirement_count = 0
+    reference_count = 0
+    redaction_count = 0
+    parse_error_count = 0
+    for line_number, line in enumerate(content.splitlines(), start=1):
+        stripped = _python_requirement_line_without_comment(line)
+        if not stripped:
+            continue
+        if stripped.startswith(("-r ", "--requirement ")):
+            path_value = stripped.split(maxsplit=1)[1].strip()
+            refs, errors = _python_requirement_file_reference_observations(
+                relative_path,
+                path_value,
+                line_number=line_number,
+                reference_kind="include_file",
+            )
+            observations.extend(refs)
+            observations.extend(errors)
+            reference_count += len(refs)
+            parse_error_count += len(errors)
+            continue
+        if stripped.startswith(("-c ", "--constraint ")):
+            path_value = stripped.split(maxsplit=1)[1].strip()
+            refs, errors = _python_requirement_file_reference_observations(
+                relative_path,
+                path_value,
+                line_number=line_number,
+                reference_kind="constraint_file",
+            )
+            observations.extend(refs)
+            observations.extend(errors)
+            reference_count += len(refs)
+            parse_error_count += len(errors)
+            continue
+        if stripped.startswith(("--index-url ", "--extra-index-url ", "--find-links ")):
+            option, value = stripped.split(maxsplit=1)
+            refs, redactions = _python_requirement_url_reference_observations(
+                relative_path,
+                value.strip(),
+                line_number=line_number,
+                reference_kind=option.lstrip("-").replace("-", "_"),
+                redact_all=True,
+            )
+            observations.extend(refs)
+            observations.extend(redactions)
+            reference_count += len(refs)
+            redaction_count += len(redactions)
+            continue
+        if stripped.startswith("--hash=") or stripped.startswith("--"):
+            continue
+        requirement = _parse_python_requirement_line(stripped, line_number=line_number)
+        if requirement is None:
+            observations.append(
+                _python_parse_error_observation(
+                    relative_path,
+                    error_kind="malformed-python-requirement",
+                    message="requirement line is not statically supported",
+                    start_line=line_number,
+                    source_suffix=f"requirement:{line_number}",
+                )
+            )
+            parse_error_count += 1
+            continue
+        if requirement_count >= PYTHON_MAX_REQUIREMENTS:
+            observations.append(
+                _python_parse_error_observation(
+                    relative_path,
+                    error_kind="python-requirements-limit",
+                    message="requirements file exceeds dependency limit",
+                    start_line=line_number,
+                    source_suffix=f"requirement-limit:{line_number}",
+                )
+            )
+            parse_error_count += 1
+            break
+        observations.append(_python_requirement_observation(relative_path, requirement))
+        requirement_count += 1
+        refs, redactions = _python_requirement_source_observations(
+            relative_path,
+            requirement,
+        )
+        observations.extend(refs)
+        observations.extend(redactions)
+        reference_count += len(refs)
+        redaction_count += len(redactions)
+    package_file = _python_package_file_observation(
+        relative_path,
+        requirement_count=requirement_count,
+        reference_count=reference_count,
+        redaction_count=redaction_count,
+        parse_error_count=parse_error_count,
+    )
+    return (package_file, *observations)
+
+
+def _python_package_file_observation(
+    relative_path: str,
+    *,
+    requirement_count: int,
+    reference_count: int,
+    redaction_count: int,
+    parse_error_count: int,
+) -> RawObservation:
+    return _profile_observation(
+        "python.package_file",
+        relative_path,
+        profile=PYTHON_REQUIREMENTS_PROFILE,
+        format_name=PYTHON_REQUIREMENTS_FORMAT,
+        confidence="extracted",
+        metadata={
+            "file_family": _python_requirement_file_family(relative_path),
+            "source_format": PYTHON_REQUIREMENTS_FORMAT,
+            "requirement_count": requirement_count,
+            "reference_count": reference_count,
+            "redaction_count": redaction_count,
+            "parse_error_count": parse_error_count,
+            "raw_profile_only": True,
+        },
+        name=PurePosixPath(relative_path).name,
+        source_suffix="python-package-file",
+    )
+
+
+def _python_requirement_line_without_comment(line: str) -> str:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return ""
+    if " #" in stripped:
+        return stripped.split(" #", 1)[0].strip()
+    return stripped
+
+
+def _parse_python_requirement_line(
+    stripped: str,
+    *,
+    line_number: int | None,
+) -> _PythonRequirement | None:
+    editable = False
+    value = stripped
+    if value.startswith(("-e ", "--editable ")):
+        editable = True
+        value = value.split(maxsplit=1)[1].strip()
+    package_part: str | None = None
+    source: str | None = None
+    if " @ " in value:
+        package_part, source = value.split(" @ ", 1)
+    elif _python_requirement_is_direct_source(value) or editable:
+        source = value
+        package_part = _python_requirement_package_from_source(value)
+    else:
+        package_part = value
+    if package_part is None:
+        return None
+    marker: str | None = None
+    if ";" in package_part:
+        package_part, marker = (item.strip() for item in package_part.split(";", 1))
+    match = PYTHON_REQUIREMENT_NAME_PATTERN.match(package_part.strip())
+    if match is None:
+        return None
+    package_name = match.group("name")
+    specifier = match.group("specifier").strip()
+    if specifier and not specifier.startswith(("=", "!", "~", ">", "<")):
+        return None
+    extras = _python_requirement_extras(match.group("extras"))
+    if source is not None and ";" in source:
+        source, source_marker = (item.strip() for item in source.split(";", 1))
+        marker = marker or source_marker
+    return _PythonRequirement(
+        package_name=package_name,
+        specifier=specifier or None,
+        extras=extras,
+        environment_marker=marker,
+        source=source,
+        editable=editable,
+        direct_url=_python_requirement_is_direct_source(source or ""),
+        local_path=_python_requirement_is_local_path(source or ""),
+        line_number=line_number,
+        raw_kind="requirement",
+    )
+
+
+def _python_requirement_extras(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    inner = value.strip()[1:-1]
+    return tuple(sorted(item.strip() for item in inner.split(",") if item.strip()))
+
+
+def _python_requirement_package_from_source(value: str) -> str | None:
+    if "#egg=" in value:
+        egg = value.split("#egg=", 1)[1].split("&", 1)[0].strip()
+        if PYTHON_REQUIREMENT_NAME_PATTERN.match(egg):
+            return egg
+    name = PurePosixPath(value.rstrip("/")).name
+    if name.endswith((".git", ".zip", ".tar.gz", ".tgz", ".whl")):
+        name = name.split(".", 1)[0]
+    if PYTHON_REQUIREMENT_NAME_PATTERN.match(name):
+        return name
+    return None
+
+
+def _python_requirement_observation(
+    relative_path: str,
+    requirement: _PythonRequirement,
+    *,
+    dependency_group: str = "requirements",
+    source_suffix_prefix: str = "python-requirement",
+) -> RawObservation:
+    metadata: dict[str, Any] = {
+        "profile": "python",
+        "file_family": _python_requirement_file_family(relative_path),
+        "source_format": PYTHON_REQUIREMENTS_FORMAT,
+        "dependency_group": dependency_group,
+        "editable": requirement.editable,
+        "direct_url": requirement.direct_url,
+        "local_path": requirement.local_path,
+        "not_fetched": requirement.direct_url,
+        "raw_profile_only": True,
+    }
+    if requirement.line_number is not None:
+        metadata["line"] = requirement.line_number
+    if requirement.package_name is not None:
+        metadata["package_name"] = _python_bounded_string(requirement.package_name)
+    if requirement.specifier is not None:
+        metadata["specifier"] = _python_bounded_string(requirement.specifier)
+    if requirement.extras:
+        metadata["extras"] = list(requirement.extras)
+    if requirement.environment_marker is not None:
+        metadata["environment_marker"] = _python_bounded_string(
+            requirement.environment_marker
+        )
+    if requirement.source is not None:
+        metadata.update(_python_dependency_source_metadata(requirement.source))
+    return RawObservation(
+        kind="python.requirement",
+        source_id=(
+            f"{relative_path}#{source_suffix_prefix}:"
+            f"{requirement.line_number or 'document'}:"
+            f"{_python_slug(requirement.package_name or 'source')}"
+        ),
+        path=relative_path,
+        start_line=requirement.line_number,
+        end_line=requirement.line_number,
+        name=requirement.package_name,
+        confidence="extracted",
+        extractor=EXTRACTOR_NAME,
+        extractor_version=__version__,
+        metadata=metadata,
+    )
+
+
+def _python_requirement_source_observations(
+    relative_path: str,
+    requirement: _PythonRequirement,
+) -> tuple[list[RawObservation], list[RawObservation]]:
+    if requirement.source is None:
+        return [], []
+    if requirement.local_path:
+        refs, errors = _python_requirement_file_reference_observations(
+            relative_path,
+            _python_requirement_local_path_value(requirement.source),
+            line_number=requirement.line_number,
+            reference_kind="local_path",
+        )
+        return refs, errors
+    return _python_requirement_url_reference_observations(
+        relative_path,
+        requirement.source,
+        line_number=requirement.line_number,
+        reference_kind="direct_url",
+        redact_all=False,
+    )
+
+
+def _python_requirement_file_reference_observations(
+    relative_path: str,
+    value: str,
+    *,
+    line_number: int | None,
+    reference_kind: str,
+) -> tuple[list[RawObservation], list[RawObservation]]:
+    target = _python_requirement_local_path_target(relative_path, value)
+    if target is None:
+        return [], [
+            _python_parse_error_observation(
+                relative_path,
+                error_kind="repo-escaping-requirement-reference",
+                message="requirement file reference escapes repository root",
+                start_line=line_number,
+                source_suffix=f"requirement-reference:{reference_kind}:{line_number}",
+            )
+        ]
+    return [
+        _python_reference_observation(
+            relative_path,
+            reference_kind=reference_kind,
+            target=target,
+            line_number=line_number,
+            metadata={
+                "resolution": "local",
+                "not_fetched": False,
+                "redacted": False,
+            },
+        )
+    ], []
+
+
+def _python_requirement_url_reference_observations(
+    relative_path: str,
+    value: str,
+    *,
+    line_number: int | None,
+    reference_kind: str,
+    redact_all: bool,
+) -> tuple[list[RawObservation], list[RawObservation]]:
+    redacted = redact_all or _url_has_credentials(value)
+    if redacted:
+        target = external_key("url", f"redacted-python-{reference_kind}")
+    elif _is_url(value) or _python_requirement_is_vcs_source(value):
+        target = external_url_key(value)
+    else:
+        target = external_key("python.source", "unknown-direct-source")
+    metadata = {
+        "not_fetched": True,
+        "redacted": redacted,
+        **_python_dependency_source_metadata(value),
+    }
+    if redacted:
+        metadata["redaction_reason"] = (
+            "credentialed-url" if _url_has_credentials(value) else "index-url"
+        )
+    references = [
+        _python_reference_observation(
+            relative_path,
+            reference_kind=reference_kind,
+            target=target,
+            line_number=line_number,
+            metadata=metadata,
+        )
+    ]
+    redactions = []
+    if redacted:
+        redactions.append(
+            _python_redaction_observation(
+                relative_path,
+                redaction_kind=reference_kind,
+                reason=metadata["redaction_reason"],
+                line_number=line_number,
+            )
+        )
+    return references, redactions
+
+
+def _python_reference_observation(
+    relative_path: str,
+    *,
+    reference_kind: str,
+    target: str,
+    line_number: int | None,
+    metadata: dict[str, Any],
+) -> RawObservation:
+    return RawObservation(
+        kind="python.reference",
+        source_id=f"{relative_path}#python-reference:{reference_kind}:{line_number}",
+        path=relative_path,
+        start_line=line_number,
+        end_line=line_number,
+        name=reference_kind,
+        target=target,
+        confidence="extracted",
+        extractor=EXTRACTOR_NAME,
+        extractor_version=__version__,
+        metadata={
+            "profile": "python",
+            "source_format": PYTHON_REQUIREMENTS_FORMAT,
+            "reference_kind": reference_kind,
+            "raw_profile_only": True,
+            **metadata,
+        },
+    )
+
+
+def _python_pyproject_metadata_overrides(
+    value: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    overrides: dict[str, dict[str, Any]] = {}
+    for pointer_segments, item in _python_pyproject_walk(value):
+        pointer = json_pointer(pointer_segments)
+        if _python_pyproject_value_requires_redaction(pointer_segments, item):
+            overrides[pointer] = {
+                "redacted": True,
+                "redaction_reason": "python-profile-redaction",
+            }
+            if pointer_segments:
+                parent_pointer = json_pointer(pointer_segments[:-1])
+                if parent_pointer:
+                    overrides[parent_pointer] = {
+                        "redacted": True,
+                        "redaction_reason": "python-profile-redaction",
+                    }
+    return overrides
+
+
+def _python_pyproject_observations(
+    relative_path: str,
+    value: dict[str, Any],
+    *,
+    format_name: str,
+    confidence: str,
+) -> tuple[RawObservation, ...]:
+    observations: list[RawObservation] = []
+    project = value.get("project")
+    if isinstance(project, dict):
+        metadata: dict[str, Any] = {
+            "source_format": "pyproject.toml",
+            "raw_profile_only": True,
+            "dependency_count": _python_sequence_count(project.get("dependencies")),
+        }
+        name_summary = _safe_value_summary(project.get("name"))
+        if isinstance(name_summary, str) and not _is_secret_key(name_summary):
+            metadata["project_name"] = _python_bounded_string(name_summary)
+        version_summary = _safe_value_summary(project.get("version"))
+        if isinstance(version_summary, str):
+            metadata["project_version"] = _python_bounded_string(version_summary)
+        dynamic = project.get("dynamic")
+        if isinstance(dynamic, list):
+            metadata["dynamic_metadata"] = [
+                _python_bounded_string(str(item))
+                for item in dynamic
+                if isinstance(item, str) and not _is_secret_key(item)
+            ]
+        optional = project.get("optional-dependencies")
+        if isinstance(optional, dict):
+            metadata["optional_dependency_groups"] = sorted(str(key) for key in optional)
+        observations.append(
+            _profile_observation(
+                "python.pyproject",
+                relative_path,
+                profile="python",
+                format_name=format_name,
+                confidence=confidence,
+                metadata=metadata,
+                name=metadata.get("project_name", "pyproject.toml"),
+                source_suffix="python-pyproject",
+            )
+        )
+        observations.extend(
+            _python_requirement_observations_from_values(
+                relative_path,
+                project.get("dependencies"),
+                dependency_group="project.dependencies",
+                source_suffix_prefix="python-pyproject-dependency",
+            )
+        )
+        if isinstance(optional, dict):
+            for group in sorted(str(key) for key in optional):
+                observations.append(
+                    _profile_observation(
+                        "python.dependency_group",
+                        relative_path,
+                        profile="python",
+                        format_name=format_name,
+                        confidence=confidence,
+                        metadata={
+                            "source_format": "pyproject.toml",
+                            "dependency_group": f"project.optional-dependencies.{group}",
+                            "optional_group": group,
+                            "dependency_count": _python_sequence_count(
+                                optional.get(group)
+                            ),
+                            "raw_profile_only": True,
+                        },
+                        name=group,
+                        source_suffix=f"python-dependency-group:{group}",
+                    )
+                )
+                observations.extend(
+                    _python_requirement_observations_from_values(
+                        relative_path,
+                        optional.get(group),
+                        dependency_group=f"project.optional-dependencies.{group}",
+                        source_suffix_prefix=f"python-pyproject-optional:{group}",
+                    )
+                )
+        for section_name in ("scripts", "gui-scripts"):
+            observations.extend(
+                _python_entry_point_observations(
+                    relative_path,
+                    project.get(section_name),
+                    entry_point_group=f"project.{section_name}",
+                    format_name=format_name,
+                    confidence=confidence,
+                )
+            )
+        entry_points = project.get("entry-points")
+        if isinstance(entry_points, dict):
+            for group in sorted(str(key) for key in entry_points):
+                observations.extend(
+                    _python_entry_point_observations(
+                        relative_path,
+                        entry_points.get(group),
+                        entry_point_group=f"project.entry-points.{group}",
+                        format_name=format_name,
+                        confidence=confidence,
+                    )
+                )
+    build_system = value.get("build-system")
+    if isinstance(build_system, dict):
+        requires = build_system.get("requires")
+        metadata = {
+            "source_format": "pyproject.toml",
+            "requires_count": _python_sequence_count(requires),
+            "raw_profile_only": True,
+        }
+        backend_summary = _safe_value_summary(build_system.get("build-backend"))
+        if isinstance(backend_summary, str):
+            metadata["build_backend"] = _python_bounded_string(backend_summary)
+        observations.append(
+            _profile_observation(
+                "python.build_system",
+                relative_path,
+                profile="python",
+                format_name=format_name,
+                confidence=confidence,
+                metadata=metadata,
+                name=metadata.get("build_backend", "build-system"),
+                source_suffix="python-build-system",
+            )
+        )
+        observations.extend(
+            _python_requirement_observations_from_values(
+                relative_path,
+                requires,
+                dependency_group="build-system.requires",
+                source_suffix_prefix="python-build-system-requirement",
+            )
+        )
+    tool = value.get("tool")
+    if isinstance(tool, dict):
+        for tool_name in sorted(str(key) for key in tool):
+            if len(observations) >= PYTHON_MAX_REQUIREMENTS:
+                break
+            observations.append(
+                _profile_observation(
+                    "python.tool_config",
+                    relative_path,
+                    profile="python",
+                    format_name=format_name,
+                    confidence=confidence,
+                    metadata={
+                        "source_format": "pyproject.toml",
+                        "tool_name": _python_bounded_string(tool_name),
+                        "tool_section": f"tool.{tool_name}",
+                        "raw_profile_only": True,
+                    },
+                    name=tool_name,
+                    source_suffix=f"python-tool-config:{tool_name}",
+                )
+            )
+    groups = value.get("dependency-groups")
+    if isinstance(groups, dict):
+        for group in sorted(str(key) for key in groups):
+            observations.extend(
+                _python_requirement_observations_from_values(
+                    relative_path,
+                    groups.get(group),
+                    dependency_group=f"dependency-groups.{group}",
+                    source_suffix_prefix=f"python-dependency-group:{group}",
+                )
+            )
+    return tuple(observations)
+
+
+def _python_requirement_observations_from_values(
+    relative_path: str,
+    value: Any,
+    *,
+    dependency_group: str,
+    source_suffix_prefix: str,
+) -> list[RawObservation]:
+    if not isinstance(value, list):
+        return []
+    observations: list[RawObservation] = []
+    for index, item in enumerate(value[:PYTHON_MAX_REQUIREMENTS]):
+        if not isinstance(item, str):
+            observations.append(
+                _python_parse_error_observation(
+                    relative_path,
+                    error_kind="unsupported-pyproject-dependency",
+                    message="dependency entry is not a string",
+                    start_line=None,
+                    source_suffix=f"{source_suffix_prefix}:{index}:unsupported",
+                )
+            )
+            continue
+        requirement = _parse_python_requirement_line(item, line_number=None)
+        if requirement is None:
+            observations.append(
+                _python_parse_error_observation(
+                    relative_path,
+                    error_kind="malformed-pyproject-dependency",
+                    message="dependency entry is not statically supported",
+                    start_line=None,
+                    source_suffix=f"{source_suffix_prefix}:{index}:malformed",
+                )
+            )
+            continue
+        observations.append(
+            _python_requirement_observation(
+                relative_path,
+                requirement,
+                dependency_group=dependency_group,
+                source_suffix_prefix=f"{source_suffix_prefix}:{index}",
+            )
+        )
+        refs, redactions = _python_requirement_source_observations(
+            relative_path,
+            requirement,
+        )
+        observations.extend(refs)
+        observations.extend(redactions)
+    return observations
+
+
+def _python_entry_point_observations(
+    relative_path: str,
+    value: Any,
+    *,
+    entry_point_group: str,
+    format_name: str,
+    confidence: str,
+) -> list[RawObservation]:
+    if not isinstance(value, dict):
+        return []
+    observations = []
+    for entry_point_name in sorted(str(key) for key in value):
+        target_summary = _safe_value_summary(value.get(entry_point_name))
+        metadata = {
+            "source_format": "pyproject.toml",
+            "entry_point_group": entry_point_group,
+            "entry_point_name": _python_bounded_string(entry_point_name),
+            "raw_profile_only": True,
+        }
+        if isinstance(target_summary, str) and not _looks_like_secret_scalar(
+            target_summary
+        ):
+            metadata["entry_point_target"] = _python_bounded_string(target_summary)
+        observations.append(
+            _profile_observation(
+                "python.entry_point",
+                relative_path,
+                profile="python",
+                format_name=format_name,
+                confidence=confidence,
+                metadata=metadata,
+                name=entry_point_name,
+                source_suffix=f"python-entry-point:{entry_point_group}:{entry_point_name}",
+            )
+        )
+    return observations
+
+
+def _python_parse_error_observation(
+    relative_path: str,
+    *,
+    error_kind: str,
+    message: str,
+    start_line: int | None,
+    source_suffix: str,
+) -> RawObservation:
+    return RawObservation(
+        kind="python.parse_error",
+        source_id=f"{relative_path}#python-parse-error:{source_suffix}",
+        path=relative_path,
+        start_line=start_line,
+        end_line=start_line,
+        confidence="unknown",
+        extractor=EXTRACTOR_NAME,
+        extractor_version=__version__,
+        metadata={
+            "profile": "python",
+            "source_format": "pyproject.toml"
+            if _is_pyproject_file_name(relative_path)
+            else PYTHON_REQUIREMENTS_FORMAT,
+            "error_kind": error_kind,
+            "message_summary": _safe_error_message(None, message),
+            "recovered": False,
+            "raw_profile_only": True,
+        },
+    )
+
+
+def _python_redaction_observation(
+    relative_path: str,
+    *,
+    redaction_kind: str,
+    reason: str,
+    line_number: int | None,
+) -> RawObservation:
+    return RawObservation(
+        kind="python.redaction",
+        source_id=f"{relative_path}#python-redaction:{redaction_kind}:{line_number or 'document'}",
+        path=relative_path,
+        start_line=line_number,
+        end_line=line_number,
+        confidence="extracted",
+        extractor=EXTRACTOR_NAME,
+        extractor_version=__version__,
+        metadata={
+            "profile": "python",
+            "source_format": "pyproject.toml"
+            if _is_pyproject_file_name(relative_path)
+            else PYTHON_REQUIREMENTS_FORMAT,
+            "redaction_kind": redaction_kind,
+            "redaction_reason": reason,
+            "redacted": True,
+            "raw_profile_only": True,
+        },
+    )
+
+
+def _python_dependency_source_metadata(value: str) -> dict[str, Any]:
+    parsed = urlsplit(value)
+    credentialed = _url_has_credentials(value)
+    metadata: dict[str, Any] = {
+        "source_present": True,
+        "source_length": len(value),
+        "source_sha256": _stable_text_sha256(value),
+    }
+    if parsed.scheme:
+        metadata["source_scheme"] = _python_bounded_string(parsed.scheme)
+    if parsed.hostname and not credentialed:
+        metadata["source_host"] = _python_bounded_string(parsed.hostname)
+    if credentialed:
+        metadata["redacted"] = True
+        metadata["redaction_reason"] = "credentialed-url"
+    return metadata
+
+
+def _python_requirement_file_family(relative_path: str) -> str:
+    name = PurePosixPath(relative_path).name
+    if name == "requirements.txt":
+        return "requirements.txt"
+    if name == "dev-requirements.txt":
+        return "dev-requirements.txt"
+    if name == "test-requirements.txt":
+        return "test-requirements.txt"
+    if name.startswith("requirements-") and name.endswith(".txt"):
+        return "requirements-variant"
+    return "requirements"
+
+
+def _python_requirement_is_direct_source(value: str) -> bool:
+    return (
+        _is_url(value)
+        or value.startswith("file:")
+        or _python_requirement_is_vcs_source(value)
+    )
+
+
+def _python_requirement_is_vcs_source(value: str) -> bool:
+    return value.startswith(("git+", "hg+", "svn+", "bzr+"))
+
+
+def _python_requirement_is_local_path(value: str) -> bool:
+    if value.startswith("file:"):
+        return not _is_url(value.removeprefix("file:"))
+    return value.startswith(("./", "../", "/")) and not _is_url(value)
+
+
+def _python_requirement_local_path_value(value: str) -> str:
+    return value.removeprefix("file:")
+
+
+def _python_requirement_local_path_target(
+    relative_path: str,
+    value: str,
+) -> str | None:
+    local_value = _python_requirement_local_path_value(value)
+    if local_value.startswith("/"):
+        return None
+    if local_value.startswith(("./", "../")):
+        resolved = _resolve_repo_path(relative_path, local_value)
+    else:
+        resolved = _normalize_repo_path(local_value)
+    if resolved is None:
+        return None
+    return file_key(resolved)
+
+
+def _python_pyproject_walk(
+    value: Any,
+    pointer_segments: tuple[str, ...] = (),
+) -> tuple[tuple[tuple[str, ...], Any], ...]:
+    items: list[tuple[tuple[str, ...], Any]] = [(pointer_segments, value)]
+    if isinstance(value, dict):
+        for key, item in value.items():
+            items.extend(_python_pyproject_walk(item, (*pointer_segments, str(key))))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            items.extend(_python_pyproject_walk(item, (*pointer_segments, str(index))))
+    return tuple(items)
+
+
+def _python_pyproject_value_requires_redaction(
+    pointer_segments: tuple[str, ...],
+    value: Any,
+) -> bool:
+    if any(_is_secret_key(segment) for segment in pointer_segments):
+        return True
+    if isinstance(value, str):
+        if (
+            _url_has_credentials(value)
+            or _python_value_has_credentialed_url_fragment(value)
+            or _looks_like_secret_scalar(value)
+        ):
+            return True
+        if pointer_segments and _normalized_key(pointer_segments[-1]) in (
+            "index_url",
+            "extra_index_url",
+            "url",
+        ):
+            return _is_url(value)
+    return False
+
+
+def _python_value_has_credentialed_url_fragment(value: str) -> bool:
+    fragments = re.findall(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s,]+", value)
+    return any(_url_has_credentials(fragment.strip("\"'")) for fragment in fragments)
+
+
+def _python_sequence_count(value: Any) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
+def _python_bounded_string(value: str) -> str:
+    if len(value) <= PYTHON_MAX_METADATA_STRING:
+        return value
+    return f"<string:{len(value)}>"
+
+
+def _python_slug(value: str) -> str:
+    return re.sub(r"[^0-9A-Za-z_.-]+", "-", value).strip("-") or "unknown"
+
+
+def _is_python_requirements_file_name(relative_path: str) -> bool:
+    return bool(PYTHON_REQUIREMENTS_NAME_PATTERN.match(PurePosixPath(relative_path).name))
+
+
+def _is_pyproject_file_name(relative_path: str) -> bool:
+    return PurePosixPath(relative_path).name == "pyproject.toml"
 
 
 def _package_json_observations(
