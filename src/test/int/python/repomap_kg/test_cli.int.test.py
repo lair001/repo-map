@@ -875,6 +875,100 @@ class CliIntegrationTests(unittest.TestCase):
             }.issubset(parse_error_kinds)
         )
 
+    def test_discover_command_emits_python_web_observations_from_fixture(self):
+        fixture = REPO_ROOT / "src" / "test" / "fixtures" / "python_web"
+
+        exit_code, stdout, stderr = self.run_module_entrypoint(
+            "discover", str(fixture), "--jsonl"
+        )
+
+        self.assertEqual(exit_code, 0, stderr)
+        observations = [
+            json.loads(line)
+            for line in stdout.splitlines()
+            if line.strip()
+        ]
+        kinds = {observation["kind"] for observation in observations}
+        self.assertTrue(
+            {
+                "python.flask_app",
+                "python.flask_blueprint",
+                "python.flask_route",
+                "python.fastapi_app",
+                "python.fastapi_router",
+                "python.fastapi_route",
+                "python.fastapi_dependency",
+                "python.django_app",
+                "python.django_urlpattern",
+                "python.django_view",
+                "python.django_model",
+                "python.django_setting_reference",
+                "python.reference",
+                "python.parse_error",
+                "python.redaction",
+            }.issubset(kinds)
+        )
+
+        flask_route = next(
+            observation
+            for observation in observations
+            if observation["kind"] == "python.flask_route"
+            and observation["metadata"].get("route_path") == "/health"
+        )
+        fastapi_route = next(
+            observation
+            for observation in observations
+            if observation["kind"] == "python.fastapi_route"
+            and observation["metadata"].get("route_path") == "/items/{item_id}"
+        )
+        django_url = next(
+            observation
+            for observation in observations
+            if observation["kind"] == "python.django_urlpattern"
+            and observation["metadata"].get("route_path") == "users/"
+        )
+        dynamic_diagnostics = [
+            observation
+            for observation in observations
+            if observation["kind"] == "python.parse_error"
+            and observation["metadata"].get("error_kind") == "dynamic-python-web-route"
+        ]
+        references = [
+            observation
+            for observation in observations
+            if observation["kind"] == "python.reference"
+        ]
+
+        self.assertEqual(flask_route["metadata"]["http_methods"], ["GET"])
+        self.assertEqual(fastapi_route["metadata"]["http_methods"], ["GET"])
+        self.assertTrue(fastapi_route["metadata"]["summary_present"])
+        self.assertIn("summary_sha256", fastapi_route["metadata"])
+        self.assertEqual(django_url["metadata"]["urlpattern_kind"], "path")
+        self.assertTrue(dynamic_diagnostics)
+        self.assertTrue(
+            {
+                "flask_route_handler",
+                "fastapi_route_handler",
+                "fastapi_dependency",
+                "django_urlpattern_view",
+                "django_include",
+            }.issubset(
+                {
+                    reference["metadata"]["reference_kind"]
+                    for reference in references
+                }
+            )
+        )
+        self.assertNotIn("fake-flask-web-secret", stdout)
+        self.assertNotIn("fake-flask-db-secret", stdout)
+        self.assertNotIn("fake-fastapi-default-secret", stdout)
+        self.assertNotIn("fake-fastapi-token-secret", stdout)
+        self.assertNotIn("fake-django-web-secret", stdout)
+        self.assertNotIn("fake-django-redaction-secret", stdout)
+        self.assertNotIn("fake-django-uri-secret", stdout)
+        self.assertNotIn("fixture item summary", stdout)
+        self.assertNotIn("fixture bulk description", stdout)
+
     def test_discover_command_emits_terraform_hcl_observations_from_fixture(self):
         fixture = REPO_ROOT / "src" / "test" / "fixtures" / "terraform_hcl" / "basic"
 

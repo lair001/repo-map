@@ -6,6 +6,7 @@
 .idea/
 .pytest_cache/
 .ruff_cache/
+.serena/
 .venv/
 .vscode/
 __pycache__/
