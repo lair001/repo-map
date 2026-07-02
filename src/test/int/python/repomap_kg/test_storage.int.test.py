@@ -150,6 +150,79 @@ SELECT path FROM files WHERE role = 'entrypoint';
         )
         self.assertEqual(inserted_path, "bin/tool")
 
+    def test_ops_config_check_cli_probes_postgres_status_read_only(self):
+        require_postgres_binaries()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "repomap.local.toml"
+            graph_root = Path(tmpdir) / "repo-map"
+            graph_root.mkdir()
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                before_count = postgres.psql_scalar("SELECT count(*) FROM repositories;")
+                config_path.write_text(
+                    f"""\
+schema_version = 1
+
+[service]
+mode = "local"
+mcp_transport = "stdio"
+log_level = "info"
+
+[postgres]
+host = "{postgres.socket_dir}"
+port = {postgres.port}
+database = "postgres"
+user = "{postgres.user}"
+password_env = "REPOMAP_PG_PASSWORD"
+
+[[graphs]]
+id = "repo-map"
+name = "RepoMap"
+root_path = "{graph_root}"
+repository_name = "repo-map"
+privacy = "public-dev"
+enabled = true
+mcp_visible = true
+extractor_profile = "default"
+refresh_policy = "manual"
+
+[server_memory]
+enabled = false
+path = "~/.codex/codex-vc/mcp/server-memory"
+mode = "read_only"
+""",
+                    encoding="utf-8",
+                )
+
+                exit_code, stdout, stderr = run_repo_map_in_process(
+                    "ops",
+                    "config-check",
+                    "--config",
+                    str(config_path),
+                    "--check-db",
+                    "--psql-command",
+                    postgres.psql_command,
+                    "--json",
+                )
+                after_count = postgres.psql_scalar("SELECT count(*) FROM repositories;")
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertTrue(payload["postgres_status"]["db_checked"])
+        self.assertTrue(payload["postgres_status"]["connected"])
+        self.assertTrue(payload["postgres_status"]["schema_available"])
+        self.assertTrue(payload["postgres_status"]["required_tables"]["repositories"])
+        self.assertEqual(before_count, "0")
+        self.assertEqual(after_count, before_count)
+        self.assertTrue(payload["safety"]["no_destructive_operations"])
+        self.assertNotIn("DROP", stdout.upper())
+        self.assertEqual(stderr, "")
+
     def test_raw_observation_upsert_is_idempotent_for_same_payload_hash(self):
         require_postgres_binaries()
         observation = RawObservation(

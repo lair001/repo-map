@@ -84,6 +84,190 @@ class CliUnitTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("usage: repomap-kg", stdout.getvalue())
 
+    def test_ops_config_check_prints_redacted_json_without_db_check(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "repomap.local.toml"
+            config_path.write_text(
+                """\
+schema_version = 1
+
+[service]
+mode = "local"
+mcp_transport = "stdio"
+log_level = "info"
+
+[postgres]
+host = "127.0.0.1"
+port = 5432
+database = "repomap"
+user = "admin"
+password = "mcp-ops1-fake-password"
+
+[[graphs]]
+id = "repo-map"
+name = "RepoMap"
+root_path = "/placeholder/repo-map"
+repository_name = "repo-map"
+privacy = "public-dev"
+enabled = true
+mcp_visible = true
+extractor_profile = "default"
+refresh_policy = "manual"
+
+[server_memory]
+enabled = false
+path = "~/.codex/codex-vc/mcp/server-memory"
+mode = "read_only"
+""",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    ["ops", "config-check", "--config", str(config_path), "--json"]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["valid"])
+        self.assertFalse(payload["postgres_status"]["db_checked"])
+        self.assertEqual(payload["postgres"]["password"], "[REDACTED]")
+        self.assertNotIn("mcp-ops1-fake-password", stdout.getvalue())
+
+    def test_ops_config_check_text_output_stays_local_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "repomap.local.toml"
+            config_path.write_text(
+                """\
+schema_version = 1
+
+[service]
+mode = "local"
+mcp_transport = "stdio"
+log_level = "info"
+
+[postgres]
+host = "127.0.0.1"
+port = 5432
+database = "repomap"
+user = "admin"
+password_env = "REPOMAP_PG_PASSWORD"
+
+[[graphs]]
+id = "repo-map"
+name = "RepoMap"
+root_path = "/placeholder/repo-map"
+repository_name = "repo-map"
+privacy = "public-dev"
+enabled = true
+mcp_visible = true
+extractor_profile = "default"
+refresh_policy = "manual"
+
+[server_memory]
+enabled = false
+path = "~/.codex/codex-vc/mcp/server-memory"
+mode = "read_only"
+""",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(["ops", "config-check", "--config", str(config_path)])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("RepoMap ops config status", stdout.getvalue())
+        self.assertIn("local_only=true", stdout.getvalue())
+        self.assertIn("no_public_tunnel=true", stdout.getvalue())
+        self.assertIn("no_destructive_operations=true", stdout.getvalue())
+
+    def test_ops_config_check_can_run_explicit_read_only_db_probe(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "repomap.local.toml"
+            config_path.write_text(
+                """\
+schema_version = 1
+
+[service]
+mode = "local"
+mcp_transport = "stdio"
+log_level = "info"
+
+[postgres]
+host = "127.0.0.1"
+port = 5432
+database = "repomap"
+user = "admin"
+password_env = "REPOMAP_PG_PASSWORD"
+
+[[graphs]]
+id = "repo-map"
+name = "RepoMap"
+root_path = "/placeholder/repo-map"
+repository_name = "repo-map"
+privacy = "public-dev"
+enabled = true
+mcp_visible = true
+extractor_profile = "default"
+refresh_policy = "manual"
+
+[server_memory]
+enabled = false
+path = "~/.codex/codex-vc/mcp/server-memory"
+mode = "read_only"
+""",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with patch("repomap_kg.cli.check_ops_postgres_status") as check_db:
+                check_db.return_value.to_jsonable.return_value = {
+                    "db_checked": True,
+                    "connected": True,
+                    "schema_available": True,
+                    "required_tables": {"repositories": True},
+                    "error": None,
+                }
+                with redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            "ops",
+                            "config-check",
+                            "--config",
+                            str(config_path),
+                            "--check-db",
+                            "--json",
+                        ]
+                    )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["postgres_status"]["db_checked"])
+        check_db.assert_called_once()
+
+    def test_ops_config_check_reports_validation_errors_without_secret_leakage(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "repomap.local.toml"
+            config_path.write_text(
+                """\
+[postgres]
+password = "mcp-ops1-fake-password"
+""",
+                encoding="utf-8",
+            )
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    ["ops", "config-check", "--config", str(config_path), "--json"]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("schema_version is required", stderr.getvalue())
+        self.assertNotIn("mcp-ops1-fake-password", stderr.getvalue())
+
     def test_help_mentions_identity_command_and_project_purpose(self):
         help_text = build_parser().format_help()
 

@@ -16,6 +16,38 @@ from repomap_kg.observations import RawObservation, write_observations_jsonl
 REPO_ROOT = Path(__file__).resolve().parents[5]
 SOURCE_ROOT = REPO_ROOT / "src" / "main" / "python"
 
+OPS_CONFIG_TEMPLATE = """\
+schema_version = 1
+
+[service]
+mode = "local"
+mcp_transport = "stdio"
+log_level = "info"
+
+[postgres]
+host = "127.0.0.1"
+port = 5432
+database = "repomap"
+user = "admin"
+password_env = "REPOMAP_PG_PASSWORD"
+
+[[graphs]]
+id = "repo-map"
+name = "RepoMap"
+root_path = "./repo-map"
+repository_name = "repo-map"
+privacy = "public-dev"
+enabled = true
+mcp_visible = true
+extractor_profile = "default"
+refresh_policy = "manual"
+
+[server_memory]
+enabled = false
+path = "./server-memory"
+mode = "read_only"
+"""
+
 
 class CliIntegrationTests(unittest.TestCase):
     def run_cli(self, *args, input_text=None):
@@ -54,6 +86,290 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["name"], "RepoMap")
         self.assertEqual(payload["cli"], "repomap-kg")
         self.assertEqual(payload["database"], "Postgres")
+        self.assertEqual(stderr, "")
+
+    def test_ops_config_check_reads_example_without_db_check(self):
+        exit_code, stdout, stderr = self.run_module_entrypoint(
+            "ops",
+            "config-check",
+            "--config",
+            "examples/repomap.local.example.toml",
+            "--json",
+        )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout)
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertFalse(payload["postgres_status"]["db_checked"])
+        self.assertEqual(payload["graph_counts"]["total"], 4)
+        self.assertTrue(payload["safety"]["local_only"])
+        self.assertTrue(payload["safety"]["no_destructive_operations"])
+        self.assertNotIn("admin/admin", stdout)
+        self.assertNotIn("/Users/", stdout)
+        self.assertEqual(stderr, "")
+
+    def test_ops_config_check_accepts_minimal_config_without_sources(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self.write_ops_config(Path(tmpdir), OPS_CONFIG_TEMPLATE)
+
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "ops", "config-check", "--config", str(config_path), "--json"
+            )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["sources"]["counts"], {"feed": 0, "github": 0, "api": 0})
+        self.assertTrue(payload["compatibility"]["legacy_json_mcp_config_supported"])
+        self.assertTrue(payload["compatibility"]["legacy_source_toml_supported"])
+        self.assertEqual(stderr, "")
+
+    def test_ops_config_check_text_output_redacts_literal_password(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self.write_ops_config(
+                Path(tmpdir),
+                OPS_CONFIG_TEMPLATE.replace(
+                    'password_env = "REPOMAP_PG_PASSWORD"',
+                    'password = "mcp-ops1-fake-password"',
+                ),
+            )
+
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "ops", "config-check", "--config", str(config_path)
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("RepoMap ops config status", stdout)
+        self.assertIn("password=[REDACTED]", stdout)
+        self.assertIn("diagnostics: warning=1", stdout)
+        self.assertNotIn("mcp-ops1-fake-password", stdout)
+        self.assertEqual(stderr, "")
+
+    def test_ops_config_check_json_reports_deferred_private_sections(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self.write_ops_config(
+                Path(tmpdir),
+                OPS_CONFIG_TEMPLATE.replace(
+                    """[server_memory]
+enabled = false
+path = "./server-memory"
+mode = "read_only"
+""",
+                    """[server_memory]
+enabled = true
+path = "~/.codex/codex-vc/mcp/server-memory"
+mode = "read_only"
+""",
+                )
+                + """
+
+[[graphs]]
+id = "codex-vc"
+name = "Codex VC"
+root_path = "~/.codex/codex-vc"
+repository_name = "codex-vc"
+privacy = "private-ops"
+enabled = true
+mcp_visible = false
+extractor_profile = "private-ops"
+refresh_policy = "watch"
+
+[[sources.feed]]
+id = "private-feed"
+graph_id = "repo-map"
+url = "https://agent:mcp-ops1-fake-token@example.invalid/feed.xml"
+enabled = true
+
+[[sources.github]]
+id = "public-github"
+graph_id = "repo-map"
+owner = "example"
+repo = "repo"
+mode = "public_readonly"
+enabled = true
+
+[[sources.api]]
+id = "api-placeholder"
+graph_id = "repo-map"
+source_class = "api.rest"
+credential = "mcp-ops1-fake-credential"
+enabled = true
+""",
+            )
+
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "ops", "config-check", "--config", str(config_path), "--json"
+            )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout)
+        codes = {diagnostic["code"] for diagnostic in payload["diagnostics"]}
+        self.assertIn("private-graph-enabled", codes)
+        self.assertIn("refresh-policy-deferred", codes)
+        self.assertIn("server-memory-bridge-deferred", codes)
+        self.assertIn("source-acquisition-deferred", codes)
+        self.assertEqual(payload["graph_counts"]["private_enabled"], 1)
+        self.assertTrue(payload["server_memory"]["enabled"])
+        self.assertFalse(payload["server_memory"]["bridge_implemented"])
+        self.assertFalse(payload["sources"]["feed"][0]["acquisition_implemented"])
+        self.assertIn("[REDACTED]", json.dumps(payload["sources"], sort_keys=True))
+        self.assertTrue(payload["safety"]["no_server_memory_read"])
+        self.assertTrue(payload["safety"]["no_source_acquisition"])
+        self.assertNotIn("mcp-ops1-fake-token", stdout)
+        self.assertNotIn("mcp-ops1-fake-credential", stdout)
+        self.assertEqual(stderr, "")
+
+    def test_ops_config_check_reports_unknown_fields_as_warnings(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self.write_ops_config(
+                Path(tmpdir),
+                OPS_CONFIG_TEMPLATE
+                + """
+
+[experimental]
+secret_token = "mcp-ops1-fake-token"
+
+[service.extra]
+ignored = true
+""",
+            )
+
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "ops", "config-check", "--config", str(config_path), "--json"
+            )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout)
+        codes = {diagnostic["code"] for diagnostic in payload["diagnostics"]}
+        self.assertIn("unknown-top-level-section", codes)
+        self.assertIn("unknown-service-field", codes)
+        self.assertNotIn("mcp-ops1-fake-token", stdout)
+        self.assertEqual(stderr, "")
+
+    def test_ops_config_check_reports_validation_errors_without_secret_leakage(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self.write_ops_config(
+                Path(tmpdir),
+                OPS_CONFIG_TEMPLATE.replace('mode = "local"', 'mode = "cloud"')
+                + """
+
+[experimental]
+secret_token = "mcp-ops1-fake-token"
+""",
+            )
+
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "ops", "config-check", "--config", str(config_path), "--json"
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("ERROR:", stderr)
+        self.assertIn("service.mode", stderr)
+        self.assertNotIn("mcp-ops1-fake-token", stderr)
+
+    def test_ops_config_check_reports_missing_and_unsupported_schema_versions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing_path = self.write_ops_config(
+                Path(tmpdir), OPS_CONFIG_TEMPLATE.replace("schema_version = 1\n\n", "")
+            )
+            bad_path = self.write_ops_config(
+                Path(tmpdir), OPS_CONFIG_TEMPLATE.replace("schema_version = 1", "schema_version = 2"),
+                name="repomap.bad.toml",
+            )
+
+            missing_exit, _missing_stdout, missing_stderr = self.run_module_entrypoint(
+                "ops", "config-check", "--config", str(missing_path), "--json"
+            )
+            bad_exit, _bad_stdout, bad_stderr = self.run_module_entrypoint(
+                "ops", "config-check", "--config", str(bad_path), "--json"
+            )
+
+        self.assertEqual(missing_exit, 1)
+        self.assertIn("schema_version is required", missing_stderr)
+        self.assertEqual(bad_exit, 1)
+        self.assertIn("unsupported schema_version", bad_stderr)
+
+    def test_ops_config_check_reports_invalid_section_shapes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bad_sections = self.write_ops_config(
+                Path(tmpdir),
+                """\
+schema_version = 1
+service = "bad"
+postgres = "bad"
+graphs = "bad"
+server_memory = "bad"
+sources = "bad"
+""",
+            )
+            bad_entries = self.write_ops_config(
+                Path(tmpdir),
+                OPS_CONFIG_TEMPLATE
+                + """
+
+[[sources.feed]]
+id = 12
+enabled = "yes"
+""",
+                name="bad-entries.toml",
+            )
+
+            section_exit, _section_stdout, section_stderr = self.run_module_entrypoint(
+                "ops", "config-check", "--config", str(bad_sections), "--json"
+            )
+            entry_exit, _entry_stdout, entry_stderr = self.run_module_entrypoint(
+                "ops", "config-check", "--config", str(bad_entries), "--json"
+            )
+
+        self.assertEqual(section_exit, 1)
+        self.assertIn("service must be a table", section_stderr)
+        self.assertEqual(entry_exit, 1)
+        self.assertIn("sources.feed[0].id", entry_stderr)
+        self.assertIn("sources.feed[0].enabled", entry_stderr)
+
+    def test_ops_config_check_reports_invalid_toml_and_missing_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            invalid_path = Path(tmpdir) / "repomap.local.toml"
+            missing_path = Path(tmpdir) / "missing.toml"
+            invalid_path.write_text("schema_version = [", encoding="utf-8")
+
+            invalid_exit, invalid_stdout, invalid_stderr = self.run_module_entrypoint(
+                "ops", "config-check", "--config", str(invalid_path), "--json"
+            )
+            missing_exit, missing_stdout, missing_stderr = self.run_module_entrypoint(
+                "ops", "config-check", "--config", str(missing_path), "--json"
+            )
+
+        self.assertEqual(invalid_exit, 1)
+        self.assertEqual(invalid_stdout, "")
+        self.assertIn("invalid TOML", invalid_stderr)
+        self.assertEqual(missing_exit, 1)
+        self.assertEqual(missing_stdout, "")
+        self.assertIn("could not read config", missing_stderr)
+
+    def test_ops_config_check_reports_failed_read_only_db_probe(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self.write_ops_config(Path(tmpdir), OPS_CONFIG_TEMPLATE)
+
+            exit_code, stdout, stderr = self.run_module_entrypoint(
+                "ops",
+                "config-check",
+                "--config",
+                str(config_path),
+                "--check-db",
+                "--psql-command",
+                "/usr/bin/false",
+                "--json",
+            )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout)
+        self.assertTrue(payload["postgres_status"]["db_checked"])
+        self.assertFalse(payload["postgres_status"]["connected"])
+        self.assertFalse(payload["postgres_status"]["schema_available"])
+        self.assertIn("psql failed", payload["postgres_status"]["error"])
+        self.assertTrue(payload["safety"]["no_destructive_operations"])
         self.assertEqual(stderr, "")
 
     def test_observation_normalization_command_accepts_fixture_jsonl(self):
@@ -2156,6 +2472,11 @@ script_dirs = ["scripts"]
     def write_fixture(self, path, content):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
+
+    def write_ops_config(self, directory, content, *, name="repomap.local.toml"):
+        path = directory / name
+        path.write_text(content, encoding="utf-8")
+        return path
 
 
 if __name__ == "__main__":

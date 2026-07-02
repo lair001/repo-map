@@ -54,6 +54,13 @@ from repomap_kg.host_mutators import (
 )
 from repomap_kg.normalization import normalize_observations
 from repomap_kg.observations import ObservationValidationError, read_observations_jsonl
+from repomap_kg.ops_config import (
+    OpsConfigError,
+    check_ops_postgres_status,
+    format_ops_config_status_table,
+    load_ops_config,
+    ops_config_status_to_jsonable,
+)
 from repomap_kg.profiles import ProfileValidationError, load_profile
 from repomap_kg.project_identity import PROJECT_IDENTITY
 from repomap_kg.source_ingestion import (
@@ -449,6 +456,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit GitHub API acquisition summary as JSON",
+    )
+
+    ops = subparsers.add_parser(
+        "ops",
+        help="validate local operations configuration",
+    )
+    ops_subcommands = ops.add_subparsers(dest="ops_command")
+    config_check = ops_subcommands.add_parser(
+        "config-check",
+        help="validate a unified local operations TOML config",
+    )
+    config_check.add_argument(
+        "--config",
+        required=True,
+        help="path to repomap.local.toml or another operations config",
+    )
+    config_check.add_argument(
+        "--check-db",
+        action="store_true",
+        help="run a read-only Postgres schema readiness probe",
+    )
+    config_check.add_argument(
+        "--psql-command",
+        default="psql",
+        help="psql executable to use for --check-db",
+    )
+    config_check.add_argument(
+        "--json",
+        action="store_true",
+        help="emit operations config status as JSON",
     )
 
     storage = subparsers.add_parser(
@@ -1330,6 +1367,36 @@ def main(argv: list[str] | None = None) -> int:
                 f"{summary.load_summary.repository_id} run "
                 f"{summary.load_summary.run_id} "
                 f"({summary.observations} observations)"
+            )
+        return 0
+
+    if args.command == "ops" and args.ops_command == "config-check":
+        try:
+            config = load_ops_config(args.config)
+            postgres_status = (
+                check_ops_postgres_status(config, psql_command=args.psql_command)
+                if args.check_db
+                else None
+            )
+        except OpsConfigError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(
+                json.dumps(
+                    ops_config_status_to_jsonable(
+                        config,
+                        postgres_status=postgres_status,
+                    ),
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(
+                format_ops_config_status_table(
+                    config,
+                    postgres_status=postgres_status,
+                )
             )
         return 0
 

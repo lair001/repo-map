@@ -1,0 +1,86 @@
+# Safe example for a private local RepoMap operations config.
+# Copy to repomap.local.toml, keep that local file ignored/private, and adjust
+# paths and credentials for the local machine.
+
+schema_version = 1
+
+[service]
+mode = "local"
+mcp_transport = "stdio"
+log_level = "info"
+
+[postgres]
+host = "127.0.0.1"
+port = 5432
+database = "repomap"
+user = "admin"
+password_env = "REPOMAP_PG_PASSWORD"
+
+[[graphs]]
+id = "repo-map"
+name = "RepoMap"
+root_path = "./repo-map"
+repository_name = "repo-map"
+privacy = "public-dev"
+enabled = true
+mcp_visible = true
+extractor_profile = "default"
+refresh_policy = "manual"
+
+[[graphs]]
+id = "codex-vc"
+name = "Codex VC"
+root_path = "./private-placeholder/codex-vc"
+repository_name = "codex-vc"
+privacy = "private-ops"
+enabled = false
+mcp_visible = false
+extractor_profile = "private-ops"
+refresh_policy = "manual"
+
+[[graphs]]
+id = "codex-memories"
+name = "Codex Memories"
+root_path = "./private-placeholder/codex-memories"
+repository_name = "codex-memories"
+privacy = "private-memory"
+enabled = false
+mcp_visible = false
+extractor_profile = "private-memory"
+refresh_policy = "manual"
+
+[[graphs]]
+id = "flakes"
+name = "Flakes"
+root_path = "./private-placeholder/flakes"
+repository_name = "flakes"
+privacy = "private-config"
+enabled = false
+mcp_visible = false
+extractor_profile = "nix-config"
+refresh_policy = "manual"
+
+[server_memory]
+enabled = false
+path = "./private-placeholder/server-memory"
+mode = "read_only"
+
+[[sources.feed]]
+id = "example-feed"
+graph_id = "repo-map"
+url = "https://example.invalid/feed.xml"
+enabled = false
+
+[[sources.github]]
+id = "example-github"
+graph_id = "repo-map"
+owner = "example"
+repo = "repo"
+mode = "public_readonly"
+enabled = false
+
+[[sources.api]]
+id = "example-api"
+graph_id = "repo-map"
+source_class = "api.rest"
+enabled = false
