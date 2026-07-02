@@ -6,9 +6,14 @@ from unittest.mock import patch
 
 from repomap_kg.ops_config import (
     OpsConfigError,
+    OpsGraphStorageStatus,
+    build_graph_storage_status_sql,
+    check_ops_graph_storage_status,
     check_ops_postgres_status,
+    format_ops_graph_registry_table,
     format_ops_config_status_table,
     load_ops_config,
+    ops_graph_registry_status_to_jsonable,
     ops_config_status_to_jsonable,
 )
 
@@ -191,6 +196,65 @@ refresh_policy = "manual"
             [diagnostic.code for diagnostic in config.diagnostics],
         )
 
+    def test_graph_id_validation_rejects_non_slug_values(self):
+        for graph_id in ("RepoMap", "repo map", "repo/map", "../repo-map"):
+            with self.subTest(graph_id=graph_id):
+                with self.assertRaises(OpsConfigError) as caught:
+                    load_ops_config(
+                        self.write_config(
+                            VALID_CONFIG.replace('id = "repo-map"', f'id = "{graph_id}"', 1)
+                        )
+                    )
+                self.assertEqual(caught.exception.diagnostics[0].code, "invalid-graph-id")
+
+    def test_duplicate_graph_id_is_validation_error(self):
+        with self.assertRaises(OpsConfigError) as caught:
+            load_ops_config(
+                self.write_config(
+                    VALID_CONFIG
+                    + """
+
+[[graphs]]
+id = "repo-map"
+name = "Duplicate RepoMap"
+root_path = "/placeholder/other"
+repository_name = "repo-map-copy"
+privacy = "public-dev"
+enabled = false
+mcp_visible = false
+extractor_profile = "default"
+refresh_policy = "manual"
+"""
+                )
+            )
+
+        self.assertEqual(caught.exception.diagnostics[0].code, "duplicate-graph-id")
+
+    def test_graph_visibility_warnings_are_reported(self):
+        config = load_ops_config(
+            self.write_config(
+                VALID_CONFIG.replace("enabled = true\nmcp_visible = true", "enabled = false\nmcp_visible = true")
+                + """
+
+[[graphs]]
+id = "codex-vc"
+name = "Codex VC"
+root_path = "~/.codex/codex-vc"
+repository_name = "codex-vc"
+privacy = "private-ops"
+enabled = false
+mcp_visible = true
+extractor_profile = "private-ops"
+refresh_policy = "watch"
+"""
+            )
+        )
+
+        codes = [diagnostic.code for diagnostic in config.diagnostics]
+        self.assertIn("mcp-visible-disabled-graph", codes)
+        self.assertIn("private-graph-mcp-visible", codes)
+        self.assertIn("refresh-policy-deferred", codes)
+
     def test_graph_privacy_and_refresh_policy_validation(self):
         for old, new, code in (
             ("privacy = \"public-dev\"", "privacy = \"secret-cloud\"", "unsupported-graph-privacy"),
@@ -222,6 +286,62 @@ refresh_policy = "manual"
         self.assertTrue(payload["safety"]["no_destructive_operations"])
         self.assertTrue(payload["compatibility"]["legacy_json_mcp_config_supported"])
         self.assertTrue(payload["compatibility"]["legacy_source_toml_supported"])
+
+    def test_graph_registry_status_json_defaults_to_no_db_check(self):
+        config = load_ops_config(self.write_config(VALID_CONFIG))
+        payload = ops_graph_registry_status_to_jsonable(config)
+
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["graph_count"], 1)
+        self.assertEqual(payload["enabled_graph_count"], 1)
+        self.assertEqual(payload["mcp_visible_graph_count"], 1)
+        self.assertEqual(payload["private_graph_count"], 0)
+        self.assertFalse(payload["db_checked"])
+        self.assertTrue(payload["security"]["private_roots_read"] is False)
+        self.assertTrue(payload["security"]["destructive_db_actions"] is False)
+        graph = payload["graphs"][0]
+        self.assertEqual(graph["id"], "repo-map")
+        self.assertEqual(graph["repository_name"], "repo-map")
+        self.assertEqual(graph["refresh_policy_status"], "implemented")
+        self.assertEqual(graph["root_path_display"], "/placeholder/repo-map")
+        self.assertFalse(graph["root_path_checked"])
+        self.assertIsNone(graph["storage_status"])
+
+    def test_graph_registry_status_json_can_include_db_status(self):
+        config = load_ops_config(self.write_config(VALID_CONFIG))
+        storage_status = {
+            "repo-map": OpsGraphStorageStatus(
+                db_checked=True,
+                repository_name="repo-map",
+                schema_available=True,
+                repository_exists=True,
+                raw_observations=3,
+                canonical_nodes=2,
+                canonical_edges=1,
+            )
+        }
+
+        payload = ops_graph_registry_status_to_jsonable(
+            config, graph_storage_status=storage_status
+        )
+
+        graph_status = payload["graphs"][0]["storage_status"]
+        self.assertTrue(payload["db_checked"])
+        self.assertTrue(graph_status["db_checked"])
+        self.assertTrue(graph_status["repository_exists"])
+        self.assertEqual(graph_status["raw_observations"], 3)
+        self.assertEqual(graph_status["canonical_nodes"], 2)
+        self.assertEqual(graph_status["canonical_edges"], 1)
+
+    def test_graph_registry_table_summarizes_graphs(self):
+        config = load_ops_config(self.write_config(VALID_CONFIG))
+
+        table = format_ops_graph_registry_table(config)
+
+        self.assertIn("RepoMap ops graph registry", table)
+        self.assertIn("id | repository | privacy | enabled | mcp_visible | refresh | db | warnings", table)
+        self.assertIn("repo-map | repo-map | public-dev | true | true | manual/implemented | unchecked | 0", table)
+        self.assertIn("security: private_roots_read=false", table)
 
     def test_status_table_redacts_and_summarizes_counts(self):
         config = load_ops_config(
@@ -259,3 +379,31 @@ refresh_policy = "manual"
         self.assertIn("to_regclass", run_psql.call_args.kwargs["input_text"])
         self.assertNotIn("DROP", run_psql.call_args.kwargs["input_text"].upper())
         self.assertNotIn("CREATE", run_psql.call_args.kwargs["input_text"].upper())
+
+    def test_graph_storage_status_sql_is_read_only(self):
+        sql = build_graph_storage_status_sql(["repo-map", "codex-vc"])
+
+        self.assertIn("SELECT json_build_object", sql)
+        self.assertIn("'repo-map'", sql)
+        self.assertIn("'codex-vc'", sql)
+        for destructive in ("DROP", "CREATE", "DELETE", "INSERT", "UPDATE", "TRUNCATE"):
+            self.assertNotIn(destructive, sql.upper())
+
+    def test_check_graph_storage_status_uses_read_only_queries(self):
+        config = load_ops_config(self.write_config(VALID_CONFIG))
+
+        with patch("repomap_kg.ops_config.run_psql") as run_psql:
+            run_psql.side_effect = [
+                type("Result", (), {"stdout": '{"connected": true, "schema_available": true, "required_tables": {"repositories": true, "raw_observations": true, "canonical_nodes": true, "canonical_edges": true}}\n'})(),
+                type("Result", (), {"stdout": '{"graphs": [{"repository_name": "repo-map", "repository_exists": true, "raw_observations": 4, "canonical_nodes": 3, "canonical_edges": 2}]}\n'})(),
+            ]
+            status = check_ops_graph_storage_status(config, psql_command="/bin/psql")
+
+        self.assertTrue(status["repo-map"].db_checked)
+        self.assertTrue(status["repo-map"].repository_exists)
+        self.assertEqual(status["repo-map"].raw_observations, 4)
+        self.assertEqual(status["repo-map"].canonical_nodes, 3)
+        self.assertEqual(status["repo-map"].canonical_edges, 2)
+        self.assertEqual(run_psql.call_count, 2)
+        sql = run_psql.call_args_list[1].kwargs["input_text"]
+        self.assertNotIn("DROP", sql.upper())

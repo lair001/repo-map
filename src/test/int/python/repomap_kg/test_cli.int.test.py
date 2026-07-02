@@ -109,6 +109,47 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertNotIn("/Users/", stdout)
         self.assertEqual(stderr, "")
 
+    def test_ops_graphs_reads_example_without_db_check(self):
+        exit_code, stdout, stderr = self.run_module_entrypoint(
+            "ops",
+            "graphs",
+            "--config",
+            "examples/repomap.local.example.toml",
+            "--json",
+        )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["graph_count"], 4)
+        self.assertEqual(payload["enabled_graph_count"], 1)
+        self.assertEqual(payload["mcp_visible_graph_count"], 1)
+        self.assertEqual(payload["private_graph_count"], 3)
+        self.assertFalse(payload["db_checked"])
+        self.assertFalse(payload["security"]["private_roots_read"])
+        self.assertFalse(payload["security"]["destructive_db_actions"])
+        self.assertEqual(payload["graphs"][0]["id"], "repo-map")
+        self.assertFalse(payload["graphs"][1]["enabled"])
+        self.assertNotIn("admin/admin", stdout)
+        self.assertNotIn("/Users/", stdout)
+        self.assertEqual(stderr, "")
+
+    def test_ops_graphs_table_lists_example_graphs(self):
+        exit_code, stdout, stderr = self.run_module_entrypoint(
+            "ops",
+            "graphs",
+            "--config",
+            "examples/repomap.local.example.toml",
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("RepoMap ops graph registry", stdout)
+        self.assertIn("repo-map | repo-map | public-dev | true | true", stdout)
+        self.assertIn("codex-vc | codex-vc | private-ops | false | false", stdout)
+        self.assertIn("private_roots_read=false", stdout)
+        self.assertNotIn("/Users/", stdout)
+        self.assertEqual(stderr, "")
+
     def test_ops_config_check_accepts_minimal_config_without_sources(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = self.write_ops_config(Path(tmpdir), OPS_CONFIG_TEMPLATE)

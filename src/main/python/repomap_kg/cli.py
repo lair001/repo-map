@@ -56,9 +56,12 @@ from repomap_kg.normalization import normalize_observations
 from repomap_kg.observations import ObservationValidationError, read_observations_jsonl
 from repomap_kg.ops_config import (
     OpsConfigError,
+    check_ops_graph_storage_status,
     check_ops_postgres_status,
+    format_ops_graph_registry_table,
     format_ops_config_status_table,
     load_ops_config,
+    ops_graph_registry_status_to_jsonable,
     ops_config_status_to_jsonable,
 )
 from repomap_kg.profiles import ProfileValidationError, load_profile
@@ -486,6 +489,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit operations config status as JSON",
+    )
+    ops_graphs = ops_subcommands.add_parser(
+        "graphs",
+        help="list configured unified TOML graph registry entries",
+    )
+    ops_graphs.add_argument(
+        "--config",
+        required=True,
+        help="path to repomap.local.toml or another operations config",
+    )
+    ops_graphs.add_argument(
+        "--check-db",
+        action="store_true",
+        help="run read-only storage namespace readiness checks",
+    )
+    ops_graphs.add_argument(
+        "--psql-command",
+        default="psql",
+        help="psql executable to use for --check-db",
+    )
+    ops_graphs.add_argument(
+        "--json",
+        action="store_true",
+        help="emit configured graph registry status as JSON",
     )
 
     storage = subparsers.add_parser(
@@ -1396,6 +1423,39 @@ def main(argv: list[str] | None = None) -> int:
                 format_ops_config_status_table(
                     config,
                     postgres_status=postgres_status,
+                )
+        )
+        return 0
+
+    if args.command == "ops" and args.ops_command == "graphs":
+        try:
+            config = load_ops_config(args.config)
+            graph_storage_status = (
+                check_ops_graph_storage_status(
+                    config,
+                    psql_command=args.psql_command,
+                )
+                if args.check_db
+                else None
+            )
+        except OpsConfigError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(
+                json.dumps(
+                    ops_graph_registry_status_to_jsonable(
+                        config,
+                        graph_storage_status=graph_storage_status,
+                    ),
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(
+                format_ops_graph_registry_table(
+                    config,
+                    graph_storage_status=graph_storage_status,
                 )
             )
         return 0

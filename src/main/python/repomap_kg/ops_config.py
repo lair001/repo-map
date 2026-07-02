@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
-from repomap_kg.storage import StorageSchemaError, parse_psql_json, run_psql
+from repomap_kg.storage import StorageSchemaError, parse_psql_json, run_psql, sql_literal
 
 SUPPORTED_SCHEMA_VERSION = 1
 SUPPORTED_SERVICE_MODES = frozenset(("local",))
@@ -24,6 +24,7 @@ PRIVATE_PRIVACY = frozenset(
 )
 SUPPORTED_REFRESH_POLICIES = frozenset(("manual", "startup_check", "watch"))
 SUPPORTED_SERVER_MEMORY_MODES = frozenset(("read_only",))
+GRAPH_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 KNOWN_TOP_LEVEL_SECTIONS = frozenset(
     ("schema_version", "service", "postgres", "graphs", "server_memory", "sources")
 )
@@ -267,6 +268,32 @@ class OpsPostgresStatus:
             "connected": self.connected,
             "schema_available": self.schema_available,
             "required_tables": dict(self.required_tables or {}),
+            "error": redact_text(self.error) if self.error else None,
+        }
+
+
+@dataclass(frozen=True)
+class OpsGraphStorageStatus:
+    db_checked: bool
+    repository_name: str
+    schema_available: bool | None = None
+    repository_exists: bool | None = None
+    repository_id: int | None = None
+    raw_observations: int | None = None
+    canonical_nodes: int | None = None
+    canonical_edges: int | None = None
+    error: str | None = None
+
+    def to_jsonable(self) -> dict[str, Any]:
+        return {
+            "db_checked": self.db_checked,
+            "repository_name": self.repository_name,
+            "schema_available": self.schema_available,
+            "repository_exists": self.repository_exists,
+            "repository_id": self.repository_id,
+            "raw_observations": self.raw_observations,
+            "canonical_nodes": self.canonical_nodes,
+            "canonical_edges": self.canonical_edges,
             "error": redact_text(self.error) if self.error else None,
         }
 
@@ -515,6 +542,15 @@ def parse_graphs_section(
             item, "refresh_policy", f"{path}.refresh_policy", diagnostics
         )
         if graph_id:
+            if not GRAPH_ID_PATTERN.fullmatch(graph_id):
+                diagnostics.append(
+                    OpsConfigDiagnostic(
+                        "error",
+                        "invalid-graph-id",
+                        f"{path}.id",
+                        "graph id must use lowercase letters, numbers, hyphen, underscore, or dot",
+                    )
+                )
             if graph_id in seen_ids:
                 diagnostics.append(
                     OpsConfigDiagnostic(
@@ -550,6 +586,24 @@ def parse_graphs_section(
                     "private-graph-enabled",
                     f"{path}.enabled",
                     f"private graph {graph_id!r} is enabled for local operations",
+                )
+            )
+        if mcp_visible and not enabled:
+            diagnostics.append(
+                OpsConfigDiagnostic(
+                    "warning",
+                    "mcp-visible-disabled-graph",
+                    f"{path}.mcp_visible",
+                    f"graph {graph_id!r} is MCP-visible but disabled",
+                )
+            )
+        if mcp_visible and privacy in PRIVATE_PRIVACY:
+            diagnostics.append(
+                OpsConfigDiagnostic(
+                    "warning",
+                    "private-graph-mcp-visible",
+                    f"{path}.mcp_visible",
+                    f"private graph {graph_id!r} is MCP-visible for local read-only use",
                 )
             )
         if refresh_policy in ("startup_check", "watch"):
@@ -762,6 +816,111 @@ def build_postgres_status_sql() -> str:
     )
 
 
+def check_ops_graph_storage_status(
+    config: OpsConfig,
+    *,
+    psql_command: str = "psql",
+) -> dict[str, OpsGraphStorageStatus]:
+    postgres_status = check_ops_postgres_status(config, psql_command=psql_command)
+    if not postgres_status.connected or not postgres_status.schema_available:
+        return {
+            graph.id: OpsGraphStorageStatus(
+                db_checked=True,
+                repository_name=graph.repository_name,
+                schema_available=bool(postgres_status.schema_available),
+                repository_exists=False,
+                error=postgres_status.error,
+            )
+            for graph in config.graphs
+        }
+
+    try:
+        result = run_psql(
+            [psql_command, *config.postgres.psql_args(), "-qAt", "-v", "ON_ERROR_STOP=1"],
+            input_text=build_graph_storage_status_sql(
+                [graph.repository_name for graph in config.graphs]
+            ),
+        )
+        payload = parse_psql_json(result.stdout, "operations graph storage status")
+    except StorageSchemaError as error:
+        return {
+            graph.id: OpsGraphStorageStatus(
+                db_checked=True,
+                repository_name=graph.repository_name,
+                schema_available=True,
+                repository_exists=False,
+                error=str(error),
+            )
+            for graph in config.graphs
+        }
+
+    rows = payload.get("graphs", [])
+    if not isinstance(rows, list):
+        rows = []
+    by_repository: dict[str, Mapping[str, Any]] = {}
+    for row in rows:
+        if isinstance(row, dict) and isinstance(row.get("repository_name"), str):
+            by_repository[row["repository_name"]] = row
+    statuses: dict[str, OpsGraphStorageStatus] = {}
+    for graph in config.graphs:
+        row = by_repository.get(graph.repository_name, {})
+        repository_id = row.get("repository_id")
+        statuses[graph.id] = OpsGraphStorageStatus(
+            db_checked=True,
+            repository_name=graph.repository_name,
+            schema_available=True,
+            repository_exists=bool(row.get("repository_exists")),
+            repository_id=repository_id if isinstance(repository_id, int) else None,
+            raw_observations=int(row.get("raw_observations") or 0),
+            canonical_nodes=int(row.get("canonical_nodes") or 0),
+            canonical_edges=int(row.get("canonical_edges") or 0),
+        )
+    return statuses
+
+
+def build_graph_storage_status_sql(repository_names: Sequence[str]) -> str:
+    if repository_names:
+        values = ", ".join(
+            f"({sql_literal(repository_name)})"
+            for repository_name in repository_names
+        )
+        configured = f"configured(repository_name) AS (VALUES {values})"
+    else:
+        configured = (
+            "configured(repository_name) AS ("
+            "SELECT NULL::text AS repository_name WHERE false)"
+        )
+    return (
+        f"WITH {configured}, "
+        "repo AS ("
+        "SELECT configured.repository_name, repositories.id AS repository_id "
+        "FROM configured "
+        "LEFT JOIN repositories "
+        "ON repositories.name = configured.repository_name"
+        ") "
+        "SELECT json_build_object("
+        "'graphs', COALESCE(json_agg(json_build_object("
+        "'repository_name', repo.repository_name, "
+        "'repository_exists', repo.repository_id IS NOT NULL, "
+        "'repository_id', repo.repository_id, "
+        "'raw_observations', ("
+        "SELECT COUNT(*) FROM raw_observations "
+        "WHERE raw_observations.repository_id = repo.repository_id"
+        "), "
+        "'canonical_nodes', ("
+        "SELECT COUNT(*) FROM canonical_nodes "
+        "WHERE canonical_nodes.repository_id = repo.repository_id"
+        "), "
+        "'canonical_edges', ("
+        "SELECT COUNT(*) FROM canonical_edges "
+        "WHERE canonical_edges.repository_id = repo.repository_id"
+        ")"
+        ") ORDER BY repo.repository_name), '[]'::json)"
+        ")::text "
+        "FROM repo;"
+    )
+
+
 def ops_config_status_to_jsonable(
     config: OpsConfig,
     *,
@@ -807,6 +966,146 @@ def ops_config_status_to_jsonable(
             "no_source_acquisition": True,
         },
     }
+
+
+def ops_graph_registry_status_to_jsonable(
+    config: OpsConfig,
+    *,
+    graph_storage_status: Mapping[str, OpsGraphStorageStatus] | None = None,
+) -> dict[str, Any]:
+    storage_status = graph_storage_status or {}
+    db_checked = any(status.db_checked for status in storage_status.values())
+    warnings = [
+        diagnostic.to_jsonable()
+        for diagnostic in config.diagnostics
+        if diagnostic.severity == "warning"
+    ]
+    diagnostics = [diagnostic.to_jsonable() for diagnostic in config.diagnostics]
+    graphs: list[dict[str, Any]] = []
+    for index, graph in enumerate(config.graphs):
+        graph_path = f"graphs[{index}]"
+        graph_warnings = [
+            diagnostic.to_jsonable()
+            for diagnostic in config.diagnostics
+            if diagnostic.severity == "warning" and diagnostic.path.startswith(graph_path)
+        ]
+        graph_status = storage_status.get(graph.id)
+        graphs.append(
+            {
+                "id": graph.id,
+                "name": redact_text(graph.name),
+                "repository_name": graph.repository_name,
+                "privacy": graph.privacy,
+                "enabled": graph.enabled,
+                "mcp_visible": graph.mcp_visible,
+                "extractor_profile": graph.extractor_profile,
+                "refresh_policy": graph.refresh_policy,
+                "refresh_policy_status": (
+                    "implemented" if graph.refresh_policy == "manual" else "deferred"
+                ),
+                "root_path_display": graph.root_path,
+                "root_path_expanded": graph.root_path_expanded,
+                "root_path_checked": False,
+                "private": graph.privacy in PRIVATE_PRIVACY,
+                "warnings": graph_warnings,
+                "storage_status": (
+                    graph_status.to_jsonable() if graph_status is not None else None
+                ),
+            }
+        )
+    return {
+        "config_path": config.config_path,
+        "schema_version": config.schema_version,
+        "graph_count": len(config.graphs),
+        "enabled_graph_count": sum(1 for graph in config.graphs if graph.enabled),
+        "mcp_visible_graph_count": sum(
+            1 for graph in config.graphs if graph.mcp_visible
+        ),
+        "private_graph_count": sum(
+            1 for graph in config.graphs if graph.privacy in PRIVATE_PRIVACY
+        ),
+        "db_checked": db_checked,
+        "graphs": graphs,
+        "warnings": warnings,
+        "diagnostics": diagnostics,
+        "compatibility": {
+            "legacy_json_mcp_config_supported": True,
+            "legacy_project_profile_toml_supported": True,
+            "legacy_source_toml_supported": True,
+            "migration_required": False,
+        },
+        "security": {
+            "private_roots_read": False,
+            "source_trees_mutated": False,
+            "destructive_db_actions": False,
+            "remote_exposure": False,
+            "server_memory_read": False,
+            "source_acquisition": False,
+            "graph_refresh": False,
+        },
+    }
+
+
+def format_ops_graph_registry_table(
+    config: OpsConfig,
+    *,
+    graph_storage_status: Mapping[str, OpsGraphStorageStatus] | None = None,
+) -> str:
+    payload = ops_graph_registry_status_to_jsonable(
+        config, graph_storage_status=graph_storage_status
+    )
+    lines = [
+        "RepoMap ops graph registry",
+        (
+            "graphs: "
+            f"total={payload['graph_count']} "
+            f"enabled={payload['enabled_graph_count']} "
+            f"mcp_visible={payload['mcp_visible_graph_count']} "
+            f"private={payload['private_graph_count']} "
+            f"db_checked={bool_text(payload['db_checked'])}"
+        ),
+        "id | repository | privacy | enabled | mcp_visible | refresh | db | warnings",
+    ]
+    for graph in payload["graphs"]:
+        lines.append(
+            " | ".join(
+                (
+                    graph["id"],
+                    graph["repository_name"],
+                    graph["privacy"],
+                    bool_text(bool(graph["enabled"])),
+                    bool_text(bool(graph["mcp_visible"])),
+                    f"{graph['refresh_policy']}/{graph['refresh_policy_status']}",
+                    graph_storage_label(graph["storage_status"]),
+                    str(len(graph["warnings"])),
+                )
+            )
+        )
+    lines.append(
+        "security: "
+        "private_roots_read=false "
+        "source_trees_mutated=false "
+        "destructive_db_actions=false "
+        "remote_exposure=false"
+    )
+    return "\n".join(lines)
+
+
+def graph_storage_label(storage_status: Mapping[str, Any] | None) -> str:
+    if storage_status is None:
+        return "unchecked"
+    if storage_status.get("error"):
+        return "error"
+    if not storage_status.get("schema_available"):
+        return "schema-missing"
+    if storage_status.get("repository_exists"):
+        return (
+            "ready("
+            f"raw={storage_status.get('raw_observations', 0)},"
+            f"nodes={storage_status.get('canonical_nodes', 0)},"
+            f"edges={storage_status.get('canonical_edges', 0)})"
+        )
+    return "missing"
 
 
 def format_ops_config_status_table(
