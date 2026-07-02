@@ -18,6 +18,16 @@ from repomap_kg.cli import (
 )
 from repomap_kg.graph_keys import GRAPH_KEY_VERSION
 from repomap_kg.graph_keys import parse_key
+from repomap_kg.mcp_ops import (
+    McpOpsError,
+    graph_status_payload,
+    list_graphs_payload,
+    neighborhood_payload,
+    project_summary_payload,
+    refresh_status_payload,
+    search_payload,
+    summary_payload,
+)
 from repomap_kg.storage import (
     StorageSchemaError,
     canonical_edge_explanation_to_jsonable,
@@ -824,6 +834,124 @@ def validate_psql_command(command: str) -> None:
         raise RepoMapMcpError("psql_command must name a psql executable")
 
 
+def ops_payload(function: Any, *args: Any, **kwargs: Any) -> Any:
+    try:
+        return function(*args, **kwargs)
+    except McpOpsError as error:
+        raise RepoMapMcpError(str(error)) from error
+    except StorageSchemaError as error:
+        raise RepoMapMcpError(str(error)) from error
+
+
+def repomap_list_graphs() -> dict[str, Any]:
+    return ops_payload(list_graphs_payload)
+
+
+def repomap_graph_status(*, graph_id: str) -> dict[str, Any]:
+    return ops_payload(graph_status_payload, graph_id)
+
+
+def repomap_search_nodes(
+    *,
+    graph_id: str,
+    query: str,
+    kind: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict[str, Any]:
+    return ops_payload(
+        search_payload,
+        graph_id,
+        target="nodes",
+        query=query,
+        kind=kind,
+        limit=limit,
+        offset=offset,
+    )
+
+
+def repomap_search_observations(
+    *,
+    graph_id: str,
+    query: str,
+    kind: str | None = None,
+    path: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+    include_raw: bool = False,
+) -> dict[str, Any]:
+    return ops_payload(
+        search_payload,
+        graph_id,
+        target="observations",
+        query=query,
+        kind=kind,
+        path=path,
+        limit=limit,
+        offset=offset,
+        include_raw=include_raw,
+    )
+
+
+def repomap_search_files(
+    *,
+    graph_id: str,
+    query: str,
+    path: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict[str, Any]:
+    return ops_payload(
+        search_payload,
+        graph_id,
+        target="files",
+        query=query,
+        path=path,
+        limit=limit,
+        offset=offset,
+    )
+
+
+def repomap_neighborhood(
+    *,
+    graph_id: str,
+    node: str,
+    direction: str = "both",
+    depth: int = 1,
+) -> dict[str, Any]:
+    return ops_payload(
+        neighborhood_payload,
+        graph_id,
+        node=node,
+        direction=direction,
+        depth=depth,
+    )
+
+
+def repomap_project_summary(*, graph_id: str) -> dict[str, Any]:
+    return ops_payload(project_summary_payload, graph_id)
+
+
+def repomap_python_summary(*, graph_id: str) -> dict[str, Any]:
+    return ops_payload(summary_payload, graph_id, summary_kind="python")
+
+
+def repomap_terraform_summary(*, graph_id: str) -> dict[str, Any]:
+    return ops_payload(summary_payload, graph_id, summary_kind="terraform")
+
+
+def repomap_openapi_summary(*, graph_id: str) -> dict[str, Any]:
+    return ops_payload(summary_payload, graph_id, summary_kind="openapi")
+
+
+def repomap_js_framework_summary(*, graph_id: str) -> dict[str, Any]:
+    return ops_payload(summary_payload, graph_id, summary_kind="js_framework")
+
+
+def repomap_refresh_status(graph_id: str | None = None) -> dict[str, Any]:
+    return ops_payload(refresh_status_payload, graph_id=graph_id)
+
+
 def tool_definitions() -> list[dict[str, Any]]:
     return [
         tool_definition(
@@ -946,6 +1074,105 @@ def tool_definitions() -> list[dict[str, Any]]:
             },
             required=("source_id",),
         ),
+        ops_tool_definition(
+            "repomap_list_graphs",
+            "List enabled MCP-visible graphs from unified TOML config.",
+            {},
+        ),
+        ops_tool_definition(
+            "repomap_graph_status",
+            "Read stored status for one configured MCP-visible graph.",
+            {"graph_id": {"type": "string"}},
+            required=("graph_id",),
+        ),
+        ops_tool_definition(
+            "repomap_search_nodes",
+            "Search stored canonical nodes for one MCP-visible graph.",
+            {
+                "graph_id": {"type": "string"},
+                "query": {"type": "string"},
+                "kind": {"type": "string"},
+                "limit": {"type": "integer", "default": 20},
+                "offset": {"type": "integer", "default": 0},
+            },
+            required=("graph_id", "query"),
+        ),
+        ops_tool_definition(
+            "repomap_search_observations",
+            "Search stored raw observations for one MCP-visible graph.",
+            {
+                "graph_id": {"type": "string"},
+                "query": {"type": "string"},
+                "kind": {"type": "string"},
+                "path": {"type": "string"},
+                "limit": {"type": "integer", "default": 20},
+                "offset": {"type": "integer", "default": 0},
+                "include_raw": {"type": "boolean", "default": False},
+            },
+            required=("graph_id", "query"),
+        ),
+        ops_tool_definition(
+            "repomap_search_files",
+            "Search stored file records for one MCP-visible graph.",
+            {
+                "graph_id": {"type": "string"},
+                "query": {"type": "string"},
+                "path": {"type": "string"},
+                "limit": {"type": "integer", "default": 20},
+                "offset": {"type": "integer", "default": 0},
+            },
+            required=("graph_id", "query"),
+        ),
+        ops_tool_definition(
+            "repomap_neighborhood",
+            "Read a bounded canonical neighborhood for one MCP-visible graph.",
+            {
+                "graph_id": {"type": "string"},
+                "node": {"type": "string"},
+                "direction": {
+                    "type": "string",
+                    "enum": ["both", "in", "out"],
+                    "default": "both",
+                },
+                "depth": {"type": "integer", "default": 1},
+            },
+            required=("graph_id", "node"),
+        ),
+        ops_tool_definition(
+            "repomap_project_summary",
+            "Read stored project counts for one MCP-visible graph.",
+            {"graph_id": {"type": "string"}},
+            required=("graph_id",),
+        ),
+        ops_tool_definition(
+            "repomap_python_summary",
+            "Read stored Python summary for one MCP-visible graph.",
+            {"graph_id": {"type": "string"}},
+            required=("graph_id",),
+        ),
+        ops_tool_definition(
+            "repomap_terraform_summary",
+            "Read stored Terraform summary for one MCP-visible graph.",
+            {"graph_id": {"type": "string"}},
+            required=("graph_id",),
+        ),
+        ops_tool_definition(
+            "repomap_openapi_summary",
+            "Read stored OpenAPI summary for one MCP-visible graph.",
+            {"graph_id": {"type": "string"}},
+            required=("graph_id",),
+        ),
+        ops_tool_definition(
+            "repomap_js_framework_summary",
+            "Read stored JS framework summary for one MCP-visible graph.",
+            {"graph_id": {"type": "string"}},
+            required=("graph_id",),
+        ),
+        ops_tool_definition(
+            "repomap_refresh_status",
+            "Read stored refresh status for MCP-visible graphs.",
+            {"graph_id": {"type": "string"}},
+        ),
     ]
 
 
@@ -977,6 +1204,25 @@ def tool_definition(
     }
 
 
+def ops_tool_definition(
+    name: str,
+    description: str,
+    properties: dict[str, Any],
+    *,
+    required: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "description": description,
+        "inputSchema": {
+            "type": "object",
+            "properties": properties,
+            "required": list(required),
+            "additionalProperties": False,
+        },
+    }
+
+
 TOOL_FUNCTIONS: dict[str, str] = {
     "repomap_projects": "repomap_projects",
     "repomap_status": "repomap_status",
@@ -990,6 +1236,18 @@ TOOL_FUNCTIONS: dict[str, str] = {
     "repomap_source_feed_items": "repomap_source_feed_items",
     "repomap_explain_source_feed_item": "repomap_explain_source_feed_item",
     "repomap_source_references": "repomap_source_references",
+    "repomap_list_graphs": "repomap_list_graphs",
+    "repomap_graph_status": "repomap_graph_status",
+    "repomap_search_nodes": "repomap_search_nodes",
+    "repomap_search_observations": "repomap_search_observations",
+    "repomap_search_files": "repomap_search_files",
+    "repomap_neighborhood": "repomap_neighborhood",
+    "repomap_project_summary": "repomap_project_summary",
+    "repomap_python_summary": "repomap_python_summary",
+    "repomap_terraform_summary": "repomap_terraform_summary",
+    "repomap_openapi_summary": "repomap_openapi_summary",
+    "repomap_js_framework_summary": "repomap_js_framework_summary",
+    "repomap_refresh_status": "repomap_refresh_status",
 }
 
 
@@ -1007,6 +1265,8 @@ def handle_tool_call(name: str, arguments: dict[str, Any] | None) -> dict[str, A
         payload = function(**arguments)
     except TypeError as error:
         raise RepoMapMcpError(f"invalid tool arguments: {error}") from error
+    except McpOpsError as error:
+        raise RepoMapMcpError(str(error)) from error
     except StorageSchemaError as error:
         raise RepoMapMcpError(str(error)) from error
     return {

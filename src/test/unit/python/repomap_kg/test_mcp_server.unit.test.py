@@ -2,6 +2,7 @@ import json
 from io import StringIO
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -11,12 +12,17 @@ from repomap_kg.storage import (
     CanonicalEdgeRecord,
     CanonicalNeighborhoodRecord,
     CanonicalNodeRecord,
+    JSFrameworkSummaryRecord,
     IngestedSourceRecord,
+    OpenAPISummaryRecord,
+    PythonSummaryRecord,
     SourceFeedItemRecord,
     SourceReferenceRecord,
     SourceRunRecord,
     SourceSummaryRecord,
     StorageSummaryRecord,
+    StorageSchemaError,
+    TerraformSummaryRecord,
     identity_metadata_hash,
 )
 
@@ -28,6 +34,79 @@ class McpServerUnitTests(unittest.TestCase):
         config_path = Path(tmpdir.name) / "config.json"
         config_path.write_text(json.dumps(payload))
         return config_path
+
+    def write_ops_config(self, body: str):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        config_path = Path(tmpdir.name) / "repomap.local.toml"
+        config_path.write_text(body, encoding="utf-8")
+        return config_path
+
+    def visible_ops_config(self) -> str:
+        return """
+schema_version = 1
+
+[service]
+mode = "local"
+mcp_transport = "stdio"
+log_level = "info"
+
+[postgres]
+host = "127.0.0.1"
+port = 5432
+database = "repomap"
+user = "repo_map"
+password_env = "REPOMAP_PG_PASSWORD"
+
+[[graphs]]
+id = "repo-map"
+name = "RepoMap"
+root_path = "/tmp/fixture"
+repository_name = "fixture"
+privacy = "public-dev"
+enabled = true
+mcp_visible = true
+extractor_profile = "default"
+refresh_policy = "manual"
+
+[[graphs]]
+id = "private-visible"
+name = "Private Visible"
+root_path = "~/private-visible"
+repository_name = "private-visible"
+privacy = "private-ops"
+enabled = true
+mcp_visible = true
+extractor_profile = "private"
+refresh_policy = "manual"
+
+[[graphs]]
+id = "disabled"
+name = "Disabled"
+root_path = "~/disabled"
+repository_name = "disabled"
+privacy = "private-memory"
+enabled = false
+mcp_visible = true
+extractor_profile = "private"
+refresh_policy = "manual"
+
+[[graphs]]
+id = "hidden"
+name = "Hidden"
+root_path = "~/hidden"
+repository_name = "hidden"
+privacy = "public-dev"
+enabled = true
+mcp_visible = false
+extractor_profile = "default"
+refresh_policy = "manual"
+
+[server_memory]
+enabled = false
+path = "~/.codex/codex-vc/mcp/server-memory"
+mode = "read_only"
+"""
 
     def test_load_mcp_config_reads_environment_override(self):
         from repomap_kg.mcp_server import load_mcp_config
@@ -100,6 +179,468 @@ class McpServerUnitTests(unittest.TestCase):
             payload["projects"][1]["pg_database"],
             "repomap_repo_map",
         )
+
+    def test_ops_mcp_list_graphs_exposes_only_enabled_visible_graphs(self):
+        from repomap_kg.mcp_server import repomap_list_graphs
+
+        config_path = self.write_ops_config(self.visible_ops_config())
+
+        with patch.dict("os.environ", {"REPOMAP_OPS_CONFIG": str(config_path)}):
+            payload = repomap_list_graphs()
+
+        self.assertTrue(payload["read_only"])
+        self.assertEqual(payload["graph_count"], 2)
+        self.assertEqual(payload["hidden_graph_count"], 2)
+        self.assertEqual(
+            [graph["graph_id"] for graph in payload["graphs"]],
+            ["repo-map", "private-visible"],
+        )
+        self.assertEqual(payload["graphs"][0]["privacy"], "public-dev")
+        self.assertFalse(payload["graphs"][0]["private"])
+        self.assertTrue(payload["graphs"][1]["private"])
+        self.assertTrue(payload["graphs"][1]["warnings"])
+        serialized = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("~/.codex/codex-vc/mcp/server-memory", serialized)
+
+    def test_ops_mcp_graph_selection_rejects_disabled_or_hidden_graphs(self):
+        from repomap_kg.mcp_server import RepoMapMcpError, repomap_project_summary
+
+        config_path = self.write_ops_config(self.visible_ops_config())
+
+        with patch.dict("os.environ", {"REPOMAP_OPS_CONFIG": str(config_path)}):
+            with patch("repomap_kg.mcp_ops.query_storage_summary") as query:
+                with self.assertRaisesRegex(RepoMapMcpError, "not enabled"):
+                    repomap_project_summary(graph_id="disabled")
+                with self.assertRaisesRegex(RepoMapMcpError, "not MCP-visible"):
+                    repomap_project_summary(graph_id="hidden")
+
+        query.assert_not_called()
+
+    def test_ops_mcp_project_summary_uses_unified_toml_storage_profile(self):
+        from repomap_kg.mcp_server import repomap_project_summary
+
+        config_path = self.write_ops_config(self.visible_ops_config())
+        with patch.dict(
+            "os.environ",
+            {
+                "REPOMAP_OPS_CONFIG": str(config_path),
+                "REPOMAP_PSQL_COMMAND": "/usr/local/bin/psql",
+            },
+        ):
+            with patch(
+                "repomap_kg.mcp_ops.query_storage_summary",
+                return_value=StorageSummaryRecord(
+                    root_path="/tmp/fixture",
+                    repository_id=10,
+                    repository_name="fixture",
+                    latest_run_id=22,
+                    runs=2,
+                    files=3,
+                    nodes=5,
+                    edges=7,
+                    evidence=11,
+                ),
+            ) as query:
+                payload = repomap_project_summary(graph_id="repo-map")
+
+        self.assertEqual(payload["graph"]["graph_id"], "repo-map")
+        self.assertEqual(payload["graph"]["repository_name"], "fixture")
+        self.assertEqual(payload["summary"]["counts"]["nodes"], 5)
+        self.assertTrue(payload["safety"]["read_only"])
+        self.assertEqual(
+            query.call_args.args[0],
+            ["-h", "127.0.0.1", "-p", "5432", "-U", "repo_map", "-d", "repomap"],
+        )
+        self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+        self.assertEqual(query.call_args.kwargs["psql_command"], "/usr/local/bin/psql")
+
+    def test_ops_mcp_searches_are_bounded_and_redacted(self):
+        from repomap_kg.mcp_server import (
+            repomap_search_files,
+            repomap_search_nodes,
+            repomap_search_observations,
+        )
+
+        config_path = self.write_ops_config(self.visible_ops_config())
+        node_payload = {
+            "results": [
+                {
+                    "canonical_key": "python.module:pkg.app",
+                    "kind": "python.module",
+                    "display_name": "pkg.app",
+                    "metadata": {"token": "mcp-ops4-fake-token"},
+                }
+            ],
+            "total": 1,
+        }
+        observation_payload = {
+            "results": [
+                {
+                    "ordinal": 1,
+                    "kind": "python.import",
+                    "path": "pkg/app.py",
+                    "source_id": "pkg/app.py#python-import:1",
+                    "metadata": {"secret": "mcp-ops4-fake-secret"},
+                    "payload": {"metadata": {"secret": "mcp-ops4-fake-secret"}},
+                }
+            ],
+            "total": 1,
+        }
+        files_payload = {
+            "results": [{"path": "pkg/app.py", "language": "python"}],
+            "total": 1,
+        }
+
+        with patch.dict("os.environ", {"REPOMAP_OPS_CONFIG": str(config_path)}):
+            with patch(
+                "repomap_kg.mcp_ops.query_mcp_search",
+                side_effect=[node_payload, observation_payload, files_payload],
+            ) as query:
+                nodes = repomap_search_nodes(
+                    graph_id="repo-map",
+                    query="pkg",
+                    limit=500,
+                    offset=0,
+                )
+                observations = repomap_search_observations(
+                    graph_id="repo-map",
+                    query="python.import",
+                    include_raw=True,
+                )
+                files = repomap_search_files(graph_id="repo-map", query="app")
+
+        self.assertEqual(nodes["limit"], 100)
+        self.assertTrue(nodes["has_more"] is False)
+        self.assertEqual(nodes["results"][0]["canonical_key"], "python.module:pkg.app")
+        self.assertNotIn("mcp-ops4-fake-token", json.dumps(nodes, sort_keys=True))
+        self.assertNotIn("mcp-ops4-fake-secret", json.dumps(observations, sort_keys=True))
+        self.assertEqual(files["results"][0]["path"], "pkg/app.py")
+        self.assertEqual(
+            [call.kwargs["target"] for call in query.call_args_list],
+            ["nodes", "observations", "files"],
+        )
+        self.assertTrue(all(call.kwargs["limit"] <= 100 for call in query.call_args_list))
+
+    def test_ops_mcp_summary_wrappers_include_graph_context(self):
+        from repomap_kg.mcp_server import (
+            repomap_js_framework_summary,
+            repomap_openapi_summary,
+            repomap_python_summary,
+            repomap_terraform_summary,
+        )
+
+        config_path = self.write_ops_config(self.visible_ops_config())
+        with patch.dict("os.environ", {"REPOMAP_OPS_CONFIG": str(config_path)}):
+            with patch(
+                "repomap_kg.mcp_ops.query_python_summary",
+                return_value=PythonSummaryRecord(
+                    root_path="/tmp/fixture",
+                    repository_name="fixture",
+                    python_observations=3,
+                    package_files={"requirements": 1, "pyproject": 1},
+                    packaging={},
+                    tests={},
+                    frameworks={},
+                    references={},
+                    redactions={},
+                    diagnostics={},
+                    generic_python={},
+                    generic_config={},
+                    dogfooding={},
+                    safety={"no_execution": True},
+                ),
+            ):
+                python_payload = repomap_python_summary(graph_id="repo-map")
+            with patch(
+                "repomap_kg.mcp_ops.query_terraform_summary",
+                return_value=TerraformSummaryRecord(
+                    root_path="/tmp/fixture",
+                    repository_name="fixture",
+                    terraform_observations=4,
+                    terraform_files=2,
+                    file_families={},
+                    terraform={},
+                    references={},
+                    tfvars={"literal_values_exposed": False},
+                    redactions={},
+                    diagnostics={},
+                    generic_config={},
+                    safety={"no_execution": True},
+                ),
+            ):
+                terraform_payload = repomap_terraform_summary(graph_id="repo-map")
+            with patch(
+                "repomap_kg.mcp_ops.query_openapi_summary",
+                return_value=OpenAPISummaryRecord(
+                    root_path="/tmp/fixture",
+                    repository_name="fixture",
+                    openapi_observations=5,
+                    openapi_documents=1,
+                    spec_families={"openapi3": 1},
+                    openapi={},
+                    methods={},
+                    references={},
+                    redactions={},
+                    diagnostics={},
+                    generic_config={},
+                    safety={"no_fetch": True},
+                ),
+            ):
+                openapi_payload = repomap_openapi_summary(graph_id="repo-map")
+            with patch(
+                "repomap_kg.mcp_ops.query_js_framework_summary",
+                return_value=JSFrameworkSummaryRecord(
+                    root_path="/tmp/fixture",
+                    repository_name="fixture",
+                    framework_observations=6,
+                    framework_profiles={"node": 1},
+                    node={},
+                    express={},
+                    nest={},
+                    next={},
+                    jest={},
+                    jquery={},
+                    generic_js={},
+                    diagnostics={},
+                    safety={"no_execution": True},
+                ),
+            ):
+                js_payload = repomap_js_framework_summary(graph_id="repo-map")
+
+        self.assertEqual(python_payload["summary"]["python_observations"], 3)
+        self.assertEqual(terraform_payload["summary"]["terraform_observations"], 4)
+        self.assertEqual(openapi_payload["summary"]["openapi_observations"], 5)
+        self.assertEqual(js_payload["summary"]["framework_observations"], 6)
+        self.assertEqual(js_payload["graph"]["privacy"], "public-dev")
+
+    def test_ops_mcp_refresh_status_reads_existing_storage_only(self):
+        from repomap_kg.mcp_server import repomap_refresh_status
+        from repomap_kg.ops_refresh import OpsRefreshGraphStatus
+
+        config_path = self.write_ops_config(self.visible_ops_config())
+        with patch.dict("os.environ", {"REPOMAP_OPS_CONFIG": str(config_path)}):
+            with patch(
+                "repomap_kg.mcp_ops.query_refresh_status",
+                return_value={
+                    "repo-map": OpsRefreshGraphStatus(
+                        graph_id="repo-map",
+                        repository_name="fixture",
+                        privacy="public-dev",
+                        enabled=True,
+                        mcp_visible=True,
+                        refresh_policy="manual",
+                        root_path_display="/tmp/fixture",
+                        root_path_expanded="/tmp/fixture",
+                        repository_exists=True,
+                        latest_run_id=12,
+                        latest_run_status="success",
+                        raw_observations=9,
+                        canonical_nodes=8,
+                        canonical_edges=7,
+                    ),
+                    "disabled": OpsRefreshGraphStatus(
+                        graph_id="disabled",
+                        repository_name="disabled",
+                        privacy="private-memory",
+                        enabled=False,
+                        mcp_visible=True,
+                        refresh_policy="manual",
+                        root_path_display="~/disabled",
+                        root_path_expanded="/Users/example/disabled",
+                        repository_exists=False,
+                    ),
+                },
+            ) as query:
+                payload = repomap_refresh_status()
+
+        self.assertEqual(payload["graph_count"], 1)
+        self.assertEqual(payload["graphs"][0]["graph_id"], "repo-map")
+        self.assertEqual(payload["graphs"][0]["raw_observations"], 9)
+        self.assertTrue(payload["safety"]["no_refresh"])
+        query.assert_called_once()
+
+    def test_ops_mcp_graph_status_and_neighborhood_use_stored_readback(self):
+        from repomap_kg.mcp_server import repomap_graph_status, repomap_neighborhood
+        from repomap_kg.ops_refresh import OpsRefreshGraphStatus
+
+        config_path = self.write_ops_config(self.visible_ops_config())
+        neighborhood = CanonicalNeighborhoodRecord(
+            center=CanonicalNodeRecord(
+                canonical_key="python.module:pkg.app",
+                graph_key_version=1,
+                kind="python.module",
+                display_name="pkg.app",
+                confidence="extracted",
+                conflict=False,
+                metadata={"api_key": "mcp-ops4-fake-token"},
+                first_seen_run_id=1,
+                last_seen_run_id=2,
+            ),
+            nodes=(),
+            edges=(),
+        )
+        with patch.dict("os.environ", {"REPOMAP_OPS_CONFIG": str(config_path)}):
+            with patch(
+                "repomap_kg.mcp_ops.query_refresh_status",
+                return_value={
+                    "repo-map": OpsRefreshGraphStatus(
+                        graph_id="repo-map",
+                        repository_name="fixture",
+                        privacy="public-dev",
+                        enabled=True,
+                        mcp_visible=True,
+                        refresh_policy="manual",
+                        root_path_display="/tmp/fixture",
+                        root_path_expanded="/tmp/fixture",
+                        repository_exists=True,
+                        raw_observations=4,
+                        canonical_nodes=3,
+                        canonical_edges=2,
+                    )
+                },
+            ):
+                status = repomap_graph_status(graph_id="repo-map")
+            with patch(
+                "repomap_kg.mcp_ops.query_canonical_neighborhood",
+                return_value=neighborhood,
+            ) as query:
+                payload = repomap_neighborhood(
+                    graph_id="repo-map",
+                    node="python.module:pkg.app",
+                    direction="both",
+                    depth=1,
+                )
+
+        self.assertEqual(status["storage"]["raw_observations"], 4)
+        self.assertEqual(
+            payload["result"]["center"]["canonical_key"],
+            "python.module:pkg.app",
+        )
+        self.assertNotIn("mcp-ops4-fake-token", json.dumps(payload, sort_keys=True))
+        self.assertEqual(query.call_args.kwargs["node"], "python.module:pkg.app")
+
+    def test_ops_mcp_helper_validation_and_sql_are_bounded(self):
+        from repomap_kg.mcp_ops import (
+            McpOpsError,
+            build_mcp_search_sql,
+            like_escape,
+            psql_command_from_environment,
+            validate_limit,
+            validate_offset,
+            validate_query,
+        )
+
+        self.assertEqual(validate_limit(500), 100)
+        self.assertEqual(validate_offset("3"), 3)
+        self.assertEqual(validate_query("  pkg  "), "pkg")
+        self.assertEqual(like_escape(r"%pkg_app"), r"\%pkg\_app")
+        with self.assertRaisesRegex(McpOpsError, "query is required"):
+            validate_query("")
+        with self.assertRaisesRegex(McpOpsError, "positive integer"):
+            validate_limit(0)
+        with self.assertRaisesRegex(McpOpsError, "non-negative"):
+            validate_offset(-1)
+        with patch.dict("os.environ", {"REPOMAP_PSQL_COMMAND": "bad psql"}):
+            with self.assertRaisesRegex(McpOpsError, "whitespace"):
+                psql_command_from_environment()
+        with patch.dict("os.environ", {"REPOMAP_PSQL_COMMAND": "/bin/echo"}):
+            with self.assertRaisesRegex(McpOpsError, "psql executable"):
+                psql_command_from_environment()
+
+        nodes_sql = build_mcp_search_sql(
+            root_path="/tmp/fixture",
+            target="nodes",
+            query="pkg",
+            kind="python.module",
+            path=None,
+            limit=20,
+            offset=0,
+            include_raw=False,
+        )
+        observations_sql = build_mcp_search_sql(
+            root_path="/tmp/fixture",
+            target="observations",
+            query="python.import",
+            kind="python.import",
+            path="pkg/app.py",
+            limit=20,
+            offset=2,
+            include_raw=True,
+        )
+        files_sql = build_mcp_search_sql(
+            root_path="/tmp/fixture",
+            target="files",
+            query="README",
+            kind=None,
+            path="README.md",
+            limit=5,
+            offset=0,
+            include_raw=False,
+        )
+        self.assertIn("FROM canonical_nodes", nodes_sql)
+        self.assertIn("canonical_nodes.kind = 'python.module'", nodes_sql)
+        self.assertIn("raw_observations.payload_json AS payload", observations_sql)
+        self.assertIn("raw_observations.path = 'pkg/app.py'", observations_sql)
+        self.assertIn("FROM files", files_sql)
+        with self.assertRaisesRegex(McpOpsError, "search target"):
+            build_mcp_search_sql(
+                root_path="/tmp/fixture",
+                target="edges",
+                query="pkg",
+                kind=None,
+                path=None,
+                limit=1,
+                offset=0,
+                include_raw=False,
+            )
+
+    def test_ops_mcp_missing_config_unknown_graph_and_search_parse_are_safe(self):
+        from repomap_kg.mcp_server import RepoMapMcpError, repomap_list_graphs
+        from repomap_kg.mcp_ops import query_mcp_search
+
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(RepoMapMcpError, "REPOMAP_OPS_CONFIG"):
+                repomap_list_graphs()
+
+        config_path = self.write_ops_config(self.visible_ops_config())
+        with patch.dict("os.environ", {"REPOMAP_OPS_CONFIG": str(config_path)}):
+            from repomap_kg.mcp_server import repomap_project_summary
+
+            with self.assertRaisesRegex(RepoMapMcpError, "unknown graph_id"):
+                repomap_project_summary(graph_id="missing")
+
+        with patch(
+            "repomap_kg.mcp_ops.run_psql",
+            return_value=SimpleNamespace(stdout='[{"path":"one"},{"path":"two"}]'),
+        ) as run:
+            payload = query_mcp_search(
+                ["-d", "repomap"],
+                root_path="/tmp/fixture",
+                target="files",
+                query="path",
+                limit=1,
+                offset=5,
+                psql_command="/usr/bin/psql",
+            )
+
+        self.assertEqual(payload["results"], [{"path": "one"}])
+        self.assertEqual(payload["total"], 6)
+        self.assertTrue(payload["has_more"])
+        self.assertEqual(run.call_args.args[0][0], "/usr/bin/psql")
+
+        with patch(
+            "repomap_kg.mcp_ops.run_psql",
+            return_value=SimpleNamespace(stdout='{"not":"rows"}'),
+        ):
+            with self.assertRaises(StorageSchemaError):
+                query_mcp_search(
+                    ["-d", "repomap"],
+                    root_path="/tmp/fixture",
+                    target="files",
+                    query="path",
+                    limit=1,
+                    psql_command="psql",
+                )
 
     def test_status_uses_default_project_from_config(self):
         from repomap_kg.mcp_server import repomap_status
@@ -916,6 +1457,18 @@ class McpServerUnitTests(unittest.TestCase):
                 "repomap_source_feed_items",
                 "repomap_explain_source_feed_item",
                 "repomap_source_references",
+                "repomap_list_graphs",
+                "repomap_graph_status",
+                "repomap_search_nodes",
+                "repomap_search_observations",
+                "repomap_search_files",
+                "repomap_neighborhood",
+                "repomap_project_summary",
+                "repomap_python_summary",
+                "repomap_terraform_summary",
+                "repomap_openapi_summary",
+                "repomap_js_framework_summary",
+                "repomap_refresh_status",
             ],
         )
         serialized = json.dumps(tool_definitions(), sort_keys=True)
@@ -923,6 +1476,8 @@ class McpServerUnitTests(unittest.TestCase):
         self.assertNotIn("load-files", serialized)
         self.assertNotIn("ingest-feed", serialized)
         self.assertNotIn("fetch-feed", serialized)
+        self.assertNotIn("refresh_graph", serialized)
+        self.assertNotIn("refresh-enabled", serialized)
         self.assertNotIn("write", serialized)
         self.assertNotIn("url", serialized)
 

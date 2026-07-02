@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from repomap_kg import __version__
@@ -469,6 +470,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit GitHub API acquisition summary as JSON",
+    )
+
+    mcp = subparsers.add_parser(
+        "mcp",
+        help="serve local read-only MCP tools",
+    )
+    mcp_subcommands = mcp.add_subparsers(dest="mcp_command")
+    mcp_serve = mcp_subcommands.add_parser(
+        "serve",
+        help="serve read-only MCP over stdio",
+    )
+    mcp_serve.add_argument(
+        "--config",
+        help="path to repomap.local.toml for expanded operations tools",
     )
 
     ops = subparsers.add_parser(
@@ -1468,6 +1483,13 @@ def main(argv: list[str] | None = None) -> int:
                 f"({summary.observations} observations)"
             )
         return 0
+
+    if args.command == "mcp" and args.mcp_command == "serve":
+        if args.config:
+            os.environ["REPOMAP_OPS_CONFIG"] = args.config
+        from repomap_kg.mcp_server import serve_stdio
+
+        return serve_stdio()
 
     if args.command == "ops" and args.ops_command == "config-check":
         try:

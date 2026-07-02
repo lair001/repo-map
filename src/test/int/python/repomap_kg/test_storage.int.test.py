@@ -8595,6 +8595,18 @@ WHERE payload_json->>'kind' LIKE 'openapi.%';
                 "repomap_source_feed_items",
                 "repomap_explain_source_feed_item",
                 "repomap_source_references",
+                "repomap_list_graphs",
+                "repomap_graph_status",
+                "repomap_search_nodes",
+                "repomap_search_observations",
+                "repomap_search_files",
+                "repomap_neighborhood",
+                "repomap_project_summary",
+                "repomap_python_summary",
+                "repomap_terraform_summary",
+                "repomap_openapi_summary",
+                "repomap_js_framework_summary",
+                "repomap_refresh_status",
             ],
         )
         self.assertEqual(projects_payload["default_project"], "fixture")
@@ -8685,6 +8697,225 @@ WHERE payload_json->>'kind' LIKE 'openapi.%';
             "repomap_status",
         )
         self.assertEqual(json.loads(stdio_lines[1])["error"]["code"], -32700)
+
+    def test_mcp_ops4_tools_read_visible_unified_toml_graphs_only(self):
+        require_postgres_binaries()
+        raw_jsonl = canonicalization_fixture(
+            "python_package",
+            "raw_observations.jsonl",
+        )
+        files_jsonl = canonicalization_fixture(
+            "docs_text_table_basic",
+            "raw_observations.jsonl",
+        )
+        from repomap_kg.mcp_server import (
+            handle_jsonrpc_message,
+            repomap_graph_status,
+            repomap_list_graphs,
+            repomap_neighborhood,
+            repomap_openapi_summary,
+            repomap_project_summary,
+            repomap_python_summary,
+            repomap_refresh_status,
+            repomap_search_files,
+            repomap_search_nodes,
+            repomap_search_observations,
+            repomap_terraform_summary,
+        )
+
+        with temporary_postgres() as postgres:
+            apply_migrations(
+                default_rdbms_root(),
+                postgres.psql_args,
+                psql_command=postgres.psql_command,
+            )
+            load_exit_code, _load_stdout, load_stderr = run_repo_map_in_process(
+                "storage",
+                "load-files",
+                str(raw_jsonl),
+                "--repository-name",
+                "fixture",
+                "--root-path",
+                "/tmp/fixture",
+                "--pg-host",
+                str(postgres.socket_dir),
+                "--pg-port",
+                str(postgres.port),
+                "--pg-user",
+                postgres.user,
+                "--pg-database",
+                "postgres",
+                "--psql-command",
+                postgres.psql_command,
+                "--json",
+            )
+            self.assertEqual(load_exit_code, 0, load_stderr)
+            files_load_exit_code, _files_load_stdout, files_load_stderr = (
+                run_repo_map_in_process(
+                    "storage",
+                    "load-files",
+                    str(files_jsonl),
+                    "--repository-name",
+                    "fixture",
+                    "--root-path",
+                    "/tmp/fixture",
+                    "--pg-host",
+                    str(postgres.socket_dir),
+                    "--pg-port",
+                    str(postgres.port),
+                    "--pg-user",
+                    postgres.user,
+                    "--pg-database",
+                    "postgres",
+                    "--psql-command",
+                    postgres.psql_command,
+                    "--json",
+                )
+            )
+            self.assertEqual(files_load_exit_code, 0, files_load_stderr)
+
+            with tempfile.TemporaryDirectory() as ops_config_tmpdir:
+                ops_config_path = Path(ops_config_tmpdir) / "mcp-ops4.local.toml"
+                ops_config_path.write_text(
+                    f"""
+schema_version = 1
+
+[service]
+mode = "local"
+mcp_transport = "stdio"
+log_level = "info"
+
+[postgres]
+host = "{postgres.socket_dir}"
+port = {postgres.port}
+database = "postgres"
+user = "{postgres.user}"
+password_env = "REPOMAP_PG_PASSWORD"
+
+[[graphs]]
+id = "repo-map"
+name = "RepoMap"
+root_path = "/tmp/fixture"
+repository_name = "fixture"
+privacy = "public-dev"
+enabled = true
+mcp_visible = true
+extractor_profile = "default"
+refresh_policy = "manual"
+
+[[graphs]]
+id = "codex-vc"
+name = "Codex VC"
+root_path = "~/.codex/codex-vc"
+repository_name = "codex-vc"
+privacy = "private-ops"
+enabled = false
+mcp_visible = false
+extractor_profile = "private-ops"
+refresh_policy = "manual"
+
+[server_memory]
+enabled = false
+path = "~/.codex/codex-vc/mcp/server-memory"
+mode = "read_only"
+""",
+                    encoding="utf-8",
+                )
+
+                with patch.dict(
+                    "os.environ",
+                    {
+                        "REPOMAP_OPS_CONFIG": str(ops_config_path),
+                        "REPOMAP_PSQL_COMMAND": postgres.psql_command,
+                    },
+                    clear=False,
+                ):
+                    graphs = repomap_list_graphs()
+                    status = repomap_graph_status(graph_id="repo-map")
+                    nodes = repomap_search_nodes(
+                        graph_id="repo-map",
+                        query="pkg.app",
+                        limit=10,
+                    )
+                    observations = repomap_search_observations(
+                        graph_id="repo-map",
+                        query="python.import",
+                        limit=5,
+                    )
+                    files = repomap_search_files(
+                        graph_id="repo-map",
+                        query="notes",
+                        limit=5,
+                    )
+                    neighborhood = repomap_neighborhood(
+                        graph_id="repo-map",
+                        node="python.module:pkg.app",
+                        direction="out",
+                    )
+                    project_summary = repomap_project_summary(graph_id="repo-map")
+                    python_summary = repomap_python_summary(graph_id="repo-map")
+                    terraform_summary = repomap_terraform_summary(graph_id="repo-map")
+                    openapi_summary = repomap_openapi_summary(graph_id="repo-map")
+                    refresh_status = repomap_refresh_status()
+                    jsonrpc_nodes = handle_jsonrpc_message(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 31,
+                            "method": "tools/call",
+                            "params": {
+                                "name": "repomap_search_nodes",
+                                "arguments": {
+                                    "graph_id": "repo-map",
+                                    "query": "pkg.app",
+                                    "limit": 10,
+                                },
+                            },
+                        }
+                    )
+                    hidden_response = handle_jsonrpc_message(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 32,
+                            "method": "tools/call",
+                            "params": {
+                                "name": "repomap_project_summary",
+                                "arguments": {"graph_id": "codex-vc"},
+                            },
+                        }
+                    )
+
+        self.assertEqual([graph["graph_id"] for graph in graphs["graphs"]], ["repo-map"])
+        self.assertEqual(graphs["hidden_graph_count"], 1)
+        self.assertTrue(status["read_only"])
+        self.assertEqual(status["graph"]["repository_name"], "fixture")
+        self.assertGreaterEqual(status["storage"]["raw_observations"], 1)
+        self.assertIn(
+            "python.module:pkg.app",
+            {row["canonical_key"] for row in nodes["results"]},
+        )
+        self.assertLessEqual(nodes["limit"], 100)
+        self.assertTrue(
+            all("payload" not in result for result in observations["results"])
+        )
+        self.assertEqual(files["results"][0]["path"], "notes.txt")
+        self.assertEqual(
+            neighborhood["result"]["center"]["canonical_key"],
+            "python.module:pkg.app",
+        )
+        self.assertGreaterEqual(project_summary["summary"]["counts"]["nodes"], 2)
+        self.assertGreaterEqual(python_summary["summary"]["python_observations"], 1)
+        self.assertEqual(terraform_summary["summary"]["terraform_observations"], 0)
+        self.assertEqual(openapi_summary["summary"]["openapi_observations"], 0)
+        self.assertEqual(refresh_status["graphs"][0]["graph_id"], "repo-map")
+        self.assertIn(
+            "python.module:pkg.app",
+            {
+                row["canonical_key"]
+                for row in jsonrpc_nodes["result"]["structuredContent"]["results"]
+            },
+        )
+        self.assertTrue(hidden_response["result"]["isError"])
+        self.assertIn("not enabled", hidden_response["result"]["structuredContent"]["error"])
 
     def test_storage_load_files_retains_unsupported_future_observation(self):
         require_postgres_binaries()

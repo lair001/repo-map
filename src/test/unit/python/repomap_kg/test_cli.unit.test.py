@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import runpy
 import tempfile
 import unittest
@@ -85,6 +86,24 @@ class CliUnitTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("usage: repomap-kg", stdout.getvalue())
+
+    def test_mcp_serve_sets_ops_config_and_delegates_to_stdio_server(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "repomap.local.toml"
+            config_path.write_text("schema_version = 1\n", encoding="utf-8")
+
+            with patch.dict("os.environ", {}, clear=False):
+                with patch(
+                    "repomap_kg.mcp_server.serve_stdio",
+                    return_value=0,
+                ) as serve_stdio:
+                    exit_code = main(
+                        ["mcp", "serve", "--config", str(config_path)]
+                    )
+
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(os.environ["REPOMAP_OPS_CONFIG"], str(config_path))
+                serve_stdio.assert_called_once_with()
 
     def test_ops_config_check_prints_redacted_json_without_db_check(self):
         with tempfile.TemporaryDirectory() as tmpdir:
