@@ -31,6 +31,7 @@ from repomap_kg.storage import (
     LoadSummary,
     NeighborhoodRecord,
     NodeRecord,
+    PythonSummaryRecord,
     RubySummaryRecord,
     StorageSchemaError,
     StorageSummaryRecord,
@@ -139,6 +140,7 @@ class CliUnitTests(unittest.TestCase):
             ("js-summary", ["--root-path", "/tmp/fixture"]),
             ("js-framework-summary", ["--root-path", "/tmp/fixture"]),
             ("terraform-summary", ["--root-path", "/tmp/fixture"]),
+            ("python-summary", ["--root-path", "/tmp/fixture"]),
             ("email-summary", ["--root-path", "/tmp/fixture"]),
         )
 
@@ -4244,6 +4246,88 @@ class CliUnitTests(unittest.TestCase):
             stderr.getvalue(),
         )
 
+    def test_storage_python_summary_prints_json_record(self):
+        summary = python_summary_fixture()
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_python_summary",
+            return_value=summary,
+        ) as query:
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "python-summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                        "--pg-database",
+                        "postgres",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["root_path"], "/tmp/fixture")
+        self.assertEqual(payload["python_observations"], 250)
+        self.assertEqual(payload["package_files"]["requirements"], 3)
+        self.assertEqual(payload["packaging"]["requirements"], 20)
+        self.assertEqual(payload["tests"]["pytest_tests"], 20)
+        self.assertEqual(payload["frameworks"]["fastapi_routes"], 10)
+        self.assertEqual(payload["references"]["direct_urls_not_fetched"], 2)
+        self.assertTrue(payload["dogfooding"]["repo_map_profile_observed"])
+        self.assertTrue(payload["safety"]["no_imports"])
+        self.assertEqual(query.call_args.args[0], ["-d", "postgres"])
+        self.assertEqual(query.call_args.kwargs["root_path"], "/tmp/fixture")
+
+    def test_storage_python_summary_prints_table_record(self):
+        stdout = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_python_summary",
+            return_value=python_summary_fixture(),
+        ):
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "storage",
+                        "python-summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        table = stdout.getvalue()
+        self.assertIn("python_observations", table)
+        self.assertIn("pytest_tests=20", table)
+        self.assertIn("fastapi_routes=10", table)
+        self.assertIn("no_imports=true", table)
+
+    def test_storage_python_summary_reports_query_errors(self):
+        stderr = io.StringIO()
+
+        with patch(
+            "repomap_kg.cli.query_python_summary",
+            side_effect=StorageSchemaError("psql did not return python summary"),
+        ):
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "storage",
+                        "python-summary",
+                        "--root-path",
+                        "/tmp/fixture",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn(
+            "psql did not return python summary",
+            stderr.getvalue(),
+        )
+
     def test_storage_email_summary_prints_json_record(self):
         summary = EmailSummaryRecord(
             root_path="/tmp/fixture",
@@ -4843,6 +4927,94 @@ def terraform_summary_fixture() -> TerraformSummaryRecord:
             "no_module_download": True,
             "no_state_access": True,
             "tfvars_redacted": True,
+            "raw_profile_only": True,
+            "no_new_canonical_namespaces": True,
+        },
+    )
+
+
+def python_summary_fixture() -> PythonSummaryRecord:
+    return PythonSummaryRecord(
+        root_path="/tmp/fixture",
+        repository_name="fixture",
+        python_observations=250,
+        package_files={"requirements": 3, "pyproject": 1},
+        packaging={
+            "requirements": 20,
+            "dependency_groups": 4,
+            "build_systems": 1,
+            "entry_points": 3,
+            "tool_configs": 8,
+        },
+        tests={
+            "test_files": 12,
+            "unittest_cases": 3,
+            "pytest_tests": 20,
+            "test_functions": 18,
+            "test_methods": 5,
+            "fixtures": 6,
+            "parametrize": 2,
+            "assertions": 80,
+        },
+        frameworks={
+            "flask_apps": 1,
+            "flask_blueprints": 2,
+            "flask_routes": 8,
+            "fastapi_apps": 1,
+            "fastapi_routers": 2,
+            "fastapi_routes": 10,
+            "fastapi_dependencies": 5,
+            "django_projects": 1,
+            "django_apps": 2,
+            "django_urlpatterns": 12,
+            "django_views": 10,
+            "django_models": 4,
+            "django_setting_references": 8,
+        },
+        references={
+            "total": 35,
+            "package_refs": 15,
+            "local_file_refs": 4,
+            "direct_urls_not_fetched": 2,
+            "index_urls_not_fetched": 2,
+            "framework_refs": 12,
+        },
+        redactions={
+            "credentialed_urls": 1,
+            "private_indexes": 1,
+            "secret_like_config": 2,
+            "framework_settings": 1,
+        },
+        diagnostics={
+            "parse_errors": 2,
+            "limit_overflows": 1,
+            "dynamic_constructs": 3,
+        },
+        generic_python={
+            "modules": 20,
+            "classes": 30,
+            "functions": 80,
+            "methods": 60,
+            "imports": 40,
+        },
+        generic_config={
+            "config_documents": 1,
+            "config_paths": 60,
+            "config_references": 5,
+        },
+        dogfooding={
+            "repo_map_profile_observed": True,
+            "bounded": True,
+            "generated_report_committed": False,
+        },
+        safety={
+            "no_execution": True,
+            "no_imports": True,
+            "no_test_execution": True,
+            "no_framework_startup": True,
+            "no_fetch": True,
+            "no_package_install": True,
+            "no_openapi_fetch": True,
             "raw_profile_only": True,
             "no_new_canonical_namespaces": True,
         },

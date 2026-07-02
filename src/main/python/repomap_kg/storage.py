@@ -574,6 +574,27 @@ class TerraformSummaryRecord:
 
 
 @dataclass(frozen=True)
+class PythonSummaryRecord:
+    root_path: str
+    repository_name: str | None
+    python_observations: int
+    package_files: dict[str, int]
+    packaging: dict[str, int]
+    tests: dict[str, int]
+    frameworks: dict[str, int]
+    references: dict[str, int]
+    redactions: dict[str, int]
+    diagnostics: dict[str, int]
+    generic_python: dict[str, int]
+    generic_config: dict[str, int]
+    dogfooding: dict[str, bool]
+    safety: dict[str, bool]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class EmailSummaryRecord:
     root_path: str
     repository_name: str | None
@@ -1394,6 +1415,21 @@ def query_terraform_summary(
     )
     return terraform_summary_from_storage_payload(
         parse_psql_json(result.stdout, "terraform summary")
+    )
+
+
+def query_python_summary(
+    psql_args: Sequence[str],
+    *,
+    root_path: str,
+    psql_command: str = "psql",
+) -> PythonSummaryRecord:
+    result = run_psql(
+        [psql_command, *psql_args, "-qAt", "-v", "ON_ERROR_STOP=1"],
+        input_text=build_python_summary_query_sql(root_path),
+    )
+    return python_summary_from_storage_payload(
+        parse_psql_json(result.stdout, "python summary")
     )
 
 
@@ -3211,6 +3247,192 @@ def build_terraform_summary_query_sql(root_path: str) -> str:
         "'no_module_download', true, "
         "'no_state_access', true, "
         "'tfvars_redacted', true, "
+        "'raw_profile_only', true, "
+        "'no_new_canonical_namespaces', true)"
+        ")::text;"
+    )
+
+
+def build_python_summary_query_sql(root_path: str) -> str:
+    quoted_root = sql_literal(root_path)
+    return (
+        "WITH repo AS ("
+        "SELECT id, name, root_path FROM repositories "
+        f"WHERE repositories.root_path = {quoted_root}"
+        "), "
+        "raw AS ("
+        "SELECT raw_observations.* FROM raw_observations "
+        "JOIN repo ON repo.id = raw_observations.repository_id"
+        "), "
+        "python_raw AS ("
+        "SELECT * FROM raw WHERE kind LIKE 'python.%'"
+        "), "
+        "python_refs AS ("
+        "SELECT * FROM python_raw WHERE kind = 'python.reference'"
+        "), "
+        "python_redactions AS ("
+        "SELECT * FROM python_raw WHERE kind = 'python.redaction'"
+        "), "
+        "python_errors AS ("
+        "SELECT * FROM python_raw WHERE kind = 'python.parse_error'"
+        "), "
+        "canonical_python AS ("
+        "SELECT canonical_nodes.* FROM canonical_nodes "
+        "JOIN repo ON repo.id = canonical_nodes.repository_id "
+        "WHERE canonical_nodes.graph_key_version = 1 "
+        "AND canonical_nodes.kind IN ("
+        "'python.module', 'python.class', 'python.function', 'python.method')"
+        "), "
+        "canonical_config AS ("
+        "SELECT canonical_nodes.* FROM canonical_nodes "
+        "JOIN repo ON repo.id = canonical_nodes.repository_id "
+        "WHERE canonical_nodes.graph_key_version = 1 "
+        "AND canonical_nodes.kind IN ('config.document', 'config.path')"
+        ") "
+        "SELECT json_build_object("
+        f"'root_path', {quoted_root}, "
+        "'repository_name', (SELECT name FROM repo), "
+        "'python_observations', (SELECT COUNT(*) FROM python_raw), "
+        "'package_files', json_build_object("
+        "'requirements', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.package_file' "
+        "AND (payload_json->'metadata'->>'file_family' LIKE 'requirements%' "
+        "OR payload_json->'metadata'->>'source_format' = 'python-requirements')), "
+        "'pyproject', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.pyproject')), "
+        "'packaging', json_build_object("
+        "'requirements', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.requirement'), "
+        "'dependency_groups', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.dependency_group'), "
+        "'build_systems', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.build_system'), "
+        "'entry_points', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.entry_point'), "
+        "'tool_configs', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.tool_config')), "
+        "'tests', json_build_object("
+        "'test_files', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.test_file'), "
+        "'unittest_cases', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.unittest_case'), "
+        "'pytest_tests', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.pytest_test'), "
+        "'test_functions', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.test_function'), "
+        "'test_methods', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.test_method'), "
+        "'fixtures', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind IN ('python.test_fixture', 'python.pytest_fixture')), "
+        "'parametrize', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.test_parametrize'), "
+        "'assertions', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.test_assertion')), "
+        "'frameworks', json_build_object("
+        "'flask_apps', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.flask_app'), "
+        "'flask_blueprints', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.flask_blueprint'), "
+        "'flask_routes', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.flask_route'), "
+        "'fastapi_apps', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.fastapi_app'), "
+        "'fastapi_routers', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.fastapi_router'), "
+        "'fastapi_routes', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.fastapi_route'), "
+        "'fastapi_dependencies', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.fastapi_dependency'), "
+        "'django_projects', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.django_project'), "
+        "'django_apps', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.django_app'), "
+        "'django_urlpatterns', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.django_urlpattern'), "
+        "'django_views', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.django_view'), "
+        "'django_models', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.django_model'), "
+        "'django_setting_references', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.django_setting_reference')), "
+        "'references', json_build_object("
+        "'total', (SELECT COUNT(*) FROM python_refs), "
+        "'package_refs', (SELECT COUNT(*) FROM python_refs "
+        "WHERE payload_json->'metadata'->>'source_format' IN ("
+        "'python-requirements', 'pyproject.toml') "
+        "OR payload_json->'metadata'->>'reference_kind' IN ("
+        "'include_file', 'constraint_file', 'direct_url', 'vcs_url', "
+        "'editable_local_path', 'local_path', 'index_url', "
+        "'extra_index_url', 'find_links')), "
+        "'local_file_refs', (SELECT COUNT(*) FROM python_refs "
+        "WHERE payload_json->>'target' LIKE 'file:%' "
+        "OR payload_json->'metadata'->>'resolution' = 'local'), "
+        "'direct_urls_not_fetched', (SELECT COUNT(*) FROM python_refs "
+        "WHERE COALESCE((payload_json->'metadata'->>'not_fetched')::boolean, false) "
+        "AND (payload_json->'metadata'->>'reference_kind' IN ("
+        "'direct_url', 'vcs_url', 'dependency_url') "
+        "OR COALESCE((payload_json->'metadata'->>'direct_url')::boolean, false))), "
+        "'index_urls_not_fetched', (SELECT COUNT(*) FROM python_refs "
+        "WHERE COALESCE((payload_json->'metadata'->>'not_fetched')::boolean, false) "
+        "AND payload_json->'metadata'->>'reference_kind' IN ("
+        "'index_url', 'extra_index_url', 'find_links')), "
+        "'framework_refs', (SELECT COUNT(*) FROM python_refs "
+        "WHERE payload_json->'metadata'->>'framework' IN ("
+        "'flask', 'fastapi', 'django'))), "
+        "'redactions', json_build_object("
+        "'credentialed_urls', (SELECT COUNT(*) FROM python_redactions "
+        "WHERE payload_json->'metadata'->>'redaction_reason' LIKE '%credential%'), "
+        "'private_indexes', (SELECT COUNT(*) FROM python_redactions "
+        "WHERE payload_json->'metadata'->>'redaction_reason' LIKE '%index%'), "
+        "'secret_like_config', (SELECT COUNT(*) FROM python_redactions "
+        "WHERE payload_json->'metadata'->>'redaction_reason' LIKE '%secret%'), "
+        "'framework_settings', (SELECT COUNT(*) FROM python_redactions "
+        "WHERE payload_json->'metadata'->>'framework' IN ("
+        "'flask', 'fastapi', 'django') "
+        "OR payload_json->'metadata'->>'redaction_reason' LIKE '%django%' "
+        "OR payload_json->'metadata'->>'redaction_reason' LIKE '%flask%' "
+        "OR payload_json->'metadata'->>'redaction_reason' LIKE '%fastapi%')), "
+        "'diagnostics', json_build_object("
+        "'parse_errors', (SELECT COUNT(*) FROM python_errors), "
+        "'limit_overflows', (SELECT COUNT(*) FROM python_errors "
+        "WHERE payload_json->'metadata'->>'error_kind' LIKE '%limit%'), "
+        "'dynamic_constructs', (SELECT COUNT(*) FROM python_errors "
+        "WHERE COALESCE((payload_json->'metadata'->>'dynamic')::boolean, false) "
+        "OR payload_json->'metadata'->>'error_kind' LIKE 'dynamic-%')), "
+        "'generic_python', json_build_object("
+        "'modules', (SELECT COUNT(*) FROM canonical_python "
+        "WHERE kind = 'python.module'), "
+        "'classes', (SELECT COUNT(*) FROM canonical_python "
+        "WHERE kind = 'python.class'), "
+        "'functions', (SELECT COUNT(*) FROM canonical_python "
+        "WHERE kind = 'python.function'), "
+        "'methods', (SELECT COUNT(*) FROM canonical_python "
+        "WHERE kind = 'python.method'), "
+        "'imports', (SELECT COUNT(*) FROM python_raw "
+        "WHERE kind = 'python.import')), "
+        "'generic_config', json_build_object("
+        "'config_documents', (SELECT COUNT(*) FROM canonical_config "
+        "WHERE kind = 'config.document'), "
+        "'config_paths', (SELECT COUNT(*) FROM canonical_config "
+        "WHERE kind = 'config.path'), "
+        "'config_references', (SELECT COUNT(*) FROM raw "
+        "WHERE kind = 'config.reference')), "
+        "'dogfooding', json_build_object("
+        "'repo_map_profile_observed', EXISTS (SELECT 1 FROM python_raw "
+        "WHERE kind IN ('python.pyproject', 'python.package_file', 'python.test_file') "
+        "AND (payload_json->'metadata'->>'project_name' LIKE 'repo-map%' "
+        "OR payload_json->>'name' LIKE 'repo-map%' "
+        "OR payload_json->>'path' LIKE '%repomap_kg%')), "
+        "'bounded', true, "
+        "'generated_report_committed', false), "
+        "'safety', json_build_object("
+        "'no_execution', true, "
+        "'no_imports', true, "
+        "'no_test_execution', true, "
+        "'no_framework_startup', true, "
+        "'no_fetch', true, "
+        "'no_package_install', true, "
+        "'no_openapi_fetch', true, "
         "'raw_profile_only', true, "
         "'no_new_canonical_namespaces', true)"
         ")::text;"
@@ -5757,6 +5979,142 @@ def terraform_summary_from_storage_payload(payload: Any) -> TerraformSummaryReco
     )
 
 
+def python_summary_from_storage_payload(payload: Any) -> PythonSummaryRecord:
+    label = "python summary"
+    if not isinstance(payload, dict):
+        raise StorageSchemaError(f"psql returned a malformed {label}")
+    return PythonSummaryRecord(
+        root_path=payload_text(payload, "root_path", label=label),
+        repository_name=payload_optional_text(
+            payload,
+            "repository_name",
+            label=label,
+        ),
+        python_observations=payload_int(
+            payload,
+            "python_observations",
+            label=label,
+        ),
+        package_files=payload_required_count_map(
+            payload,
+            "package_files",
+            ("requirements", "pyproject"),
+            label=label,
+        ),
+        packaging=payload_required_count_map(
+            payload,
+            "packaging",
+            (
+                "requirements",
+                "dependency_groups",
+                "build_systems",
+                "entry_points",
+                "tool_configs",
+            ),
+            label=label,
+        ),
+        tests=payload_required_count_map(
+            payload,
+            "tests",
+            (
+                "test_files",
+                "unittest_cases",
+                "pytest_tests",
+                "test_functions",
+                "test_methods",
+                "fixtures",
+                "parametrize",
+                "assertions",
+            ),
+            label=label,
+        ),
+        frameworks=payload_required_count_map(
+            payload,
+            "frameworks",
+            (
+                "flask_apps",
+                "flask_blueprints",
+                "flask_routes",
+                "fastapi_apps",
+                "fastapi_routers",
+                "fastapi_routes",
+                "fastapi_dependencies",
+                "django_projects",
+                "django_apps",
+                "django_urlpatterns",
+                "django_views",
+                "django_models",
+                "django_setting_references",
+            ),
+            label=label,
+        ),
+        references=payload_required_count_map(
+            payload,
+            "references",
+            (
+                "total",
+                "package_refs",
+                "local_file_refs",
+                "direct_urls_not_fetched",
+                "index_urls_not_fetched",
+                "framework_refs",
+            ),
+            label=label,
+        ),
+        redactions=payload_required_count_map(
+            payload,
+            "redactions",
+            (
+                "credentialed_urls",
+                "private_indexes",
+                "secret_like_config",
+                "framework_settings",
+            ),
+            label=label,
+        ),
+        diagnostics=payload_required_count_map(
+            payload,
+            "diagnostics",
+            ("parse_errors", "limit_overflows", "dynamic_constructs"),
+            label=label,
+        ),
+        generic_python=payload_required_count_map(
+            payload,
+            "generic_python",
+            ("modules", "classes", "functions", "methods", "imports"),
+            label=label,
+        ),
+        generic_config=payload_required_count_map(
+            payload,
+            "generic_config",
+            ("config_documents", "config_paths", "config_references"),
+            label=label,
+        ),
+        dogfooding=payload_required_bool_map(
+            payload,
+            "dogfooding",
+            ("repo_map_profile_observed", "bounded", "generated_report_committed"),
+            label=label,
+        ),
+        safety=payload_required_bool_map(
+            payload,
+            "safety",
+            (
+                "no_execution",
+                "no_imports",
+                "no_test_execution",
+                "no_framework_startup",
+                "no_fetch",
+                "no_package_install",
+                "no_openapi_fetch",
+                "raw_profile_only",
+                "no_new_canonical_namespaces",
+            ),
+            label=label,
+        ),
+    )
+
+
 def email_summary_from_storage_payload(payload: Any) -> EmailSummaryRecord:
     if not isinstance(payload, dict):
         raise StorageSchemaError("psql returned a malformed email summary")
@@ -6200,6 +6558,10 @@ def openapi_summary_to_jsonable(record: OpenAPISummaryRecord) -> dict[str, Any]:
 
 
 def terraform_summary_to_jsonable(record: TerraformSummaryRecord) -> dict[str, Any]:
+    return record.to_dict()
+
+
+def python_summary_to_jsonable(record: PythonSummaryRecord) -> dict[str, Any]:
     return record.to_dict()
 
 
@@ -6779,6 +7141,49 @@ def format_terraform_summary_table(record: TerraformSummaryRecord) -> str:
         "redactions",
         "diagnostics",
         "generic_config",
+        "safety",
+    )
+    rendered_row = {key: render_table_value(row[key]) for key in columns}
+    widths = {key: max(len(key), len(rendered_row[key])) for key in columns}
+    return "\n".join(
+        [
+            format_table_row(dict(zip(columns, columns, strict=True)), columns, widths),
+            format_table_row(rendered_row, columns, widths),
+        ]
+    )
+
+
+def format_python_summary_table(record: PythonSummaryRecord) -> str:
+    row = {
+        "root_path": record.root_path,
+        "repository_name": record.repository_name,
+        "python_observations": record.python_observations,
+        "package_files": format_count_summary(record.package_files),
+        "packaging": format_count_summary(record.packaging),
+        "tests": format_count_summary(record.tests),
+        "frameworks": format_count_summary(record.frameworks),
+        "references": format_count_summary(record.references),
+        "redactions": format_count_summary(record.redactions),
+        "diagnostics": format_count_summary(record.diagnostics),
+        "generic_python": format_count_summary(record.generic_python),
+        "generic_config": format_count_summary(record.generic_config),
+        "dogfooding": format_bool_summary(record.dogfooding),
+        "safety": format_bool_summary(record.safety),
+    }
+    columns = (
+        "root_path",
+        "repository_name",
+        "python_observations",
+        "package_files",
+        "packaging",
+        "tests",
+        "frameworks",
+        "references",
+        "redactions",
+        "diagnostics",
+        "generic_python",
+        "generic_config",
+        "dogfooding",
         "safety",
     )
     rendered_row = {key: render_table_value(row[key]) for key in columns}
