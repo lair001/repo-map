@@ -14,6 +14,7 @@ from repomap_kg.files import FileRecord
 from repomap_kg.host_mutators import HostMutatorRecord
 from repomap_kg.observations import RawObservation, write_observations_jsonl
 from repomap_kg.ops_config import OpsGraphStorageStatus
+from repomap_kg.ops_refresh import OpsRefreshGraphResult, OpsRefreshGraphStatus
 from repomap_kg.storage import (
     APISummaryRecord,
     BulkSummaryRecord,
@@ -451,6 +452,228 @@ mode = "read_only"
         self.assertEqual(payload["graphs"][0]["storage_status"]["canonical_nodes"], 5)
         self.assertEqual(payload["graphs"][0]["storage_status"]["canonical_edges"], 3)
         check_db.assert_called_once()
+
+    def test_ops_refresh_graph_prints_json_result(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "repomap.local.toml"
+            config_path.write_text(
+                """\
+schema_version = 1
+
+[service]
+mode = "local"
+mcp_transport = "stdio"
+log_level = "info"
+
+[postgres]
+host = "127.0.0.1"
+port = 5432
+database = "repomap"
+user = "admin"
+password_env = "REPOMAP_PG_PASSWORD"
+
+[[graphs]]
+id = "repo-map"
+name = "RepoMap"
+root_path = "/placeholder/repo-map"
+repository_name = "repo-map"
+privacy = "public-dev"
+enabled = true
+mcp_visible = true
+extractor_profile = "default"
+refresh_policy = "manual"
+
+[server_memory]
+enabled = false
+path = "~/.codex/codex-vc/mcp/server-memory"
+mode = "read_only"
+""",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with patch("repomap_kg.cli.refresh_graph") as refresh_one:
+                refresh_one.return_value = OpsRefreshGraphResult(
+                    graph_id="repo-map",
+                    repository_name="repo-map",
+                    privacy="public-dev",
+                    enabled=True,
+                    mcp_visible=True,
+                    root_path_display="/placeholder/repo-map",
+                    root_path_expanded="/placeholder/repo-map",
+                    result="success",
+                    repository_id=1,
+                    run_id=2,
+                    files=1,
+                    observations=3,
+                )
+                with redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            "ops",
+                            "refresh-graph",
+                            "--config",
+                            str(config_path),
+                            "--graph",
+                            "repo-map",
+                            "--json",
+                        ]
+                    )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["command"], "refresh-graph")
+        self.assertEqual(payload["result"], "success")
+        self.assertEqual(payload["graphs"][0]["run_id"], 2)
+        self.assertFalse(payload["safety"]["source_trees_mutated"])
+        refresh_one.assert_called_once()
+
+    def test_ops_refresh_enabled_prints_table_result(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "repomap.local.toml"
+            config_path.write_text(
+                """\
+schema_version = 1
+
+[service]
+mode = "local"
+mcp_transport = "stdio"
+log_level = "info"
+
+[postgres]
+host = "127.0.0.1"
+port = 5432
+database = "repomap"
+user = "admin"
+password_env = "REPOMAP_PG_PASSWORD"
+
+[[graphs]]
+id = "repo-map"
+name = "RepoMap"
+root_path = "/placeholder/repo-map"
+repository_name = "repo-map"
+privacy = "public-dev"
+enabled = true
+mcp_visible = true
+extractor_profile = "default"
+refresh_policy = "manual"
+
+[server_memory]
+enabled = false
+path = "~/.codex/codex-vc/mcp/server-memory"
+mode = "read_only"
+""",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with patch("repomap_kg.cli.refresh_enabled_graphs") as refresh_enabled:
+                refresh_enabled.return_value = (
+                    OpsRefreshGraphResult(
+                        graph_id="repo-map",
+                        repository_name="repo-map",
+                        privacy="public-dev",
+                        enabled=True,
+                        mcp_visible=True,
+                        root_path_display="/placeholder/repo-map",
+                        root_path_expanded="/placeholder/repo-map",
+                        result="success",
+                        repository_id=1,
+                        run_id=2,
+                        files=1,
+                        observations=3,
+                    ),
+                )
+                with redirect_stdout(stdout):
+                    exit_code = main(
+                        ["ops", "refresh-enabled", "--config", str(config_path)]
+                    )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("RepoMap ops refresh result", stdout.getvalue())
+        self.assertIn("repo-map | repo-map | public-dev | success", stdout.getvalue())
+        self.assertIn("destructive_db_actions=false", stdout.getvalue())
+        refresh_enabled.assert_called_once()
+
+    def test_ops_refresh_status_prints_json_without_root_reads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "repomap.local.toml"
+            config_path.write_text(
+                """\
+schema_version = 1
+
+[service]
+mode = "local"
+mcp_transport = "stdio"
+log_level = "info"
+
+[postgres]
+host = "127.0.0.1"
+port = 5432
+database = "repomap"
+user = "admin"
+password_env = "REPOMAP_PG_PASSWORD"
+
+[[graphs]]
+id = "repo-map"
+name = "RepoMap"
+root_path = "/placeholder/repo-map"
+repository_name = "repo-map"
+privacy = "public-dev"
+enabled = true
+mcp_visible = true
+extractor_profile = "default"
+refresh_policy = "manual"
+
+[server_memory]
+enabled = false
+path = "~/.codex/codex-vc/mcp/server-memory"
+mode = "read_only"
+""",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with (
+                patch("repomap_kg.cli.query_refresh_status") as refresh_status,
+                patch("pathlib.Path.exists", side_effect=AssertionError("root read")),
+            ):
+                refresh_status.return_value = {
+                    "repo-map": OpsRefreshGraphStatus(
+                        graph_id="repo-map",
+                        repository_name="repo-map",
+                        privacy="public-dev",
+                        enabled=True,
+                        mcp_visible=True,
+                        refresh_policy="manual",
+                        root_path_display="/placeholder/repo-map",
+                        root_path_expanded="/placeholder/repo-map",
+                        db_checked=True,
+                        repository_exists=True,
+                        latest_run_id=2,
+                        latest_run_status="complete",
+                        raw_observations=3,
+                        canonical_nodes=2,
+                        canonical_edges=1,
+                    )
+                }
+                with redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            "ops",
+                            "refresh-status",
+                            "--config",
+                            str(config_path),
+                            "--json",
+                        ]
+                    )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["graphs"][0]["latest_run_id"], 2)
+        self.assertFalse(payload["graphs"][0]["root_path_checked"])
+        self.assertFalse(payload["safety"]["source_trees_mutated"])
+        refresh_status.assert_called_once()
 
     def test_help_mentions_identity_command_and_project_purpose(self):
         help_text = build_parser().format_help()

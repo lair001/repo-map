@@ -309,6 +309,393 @@ mode = "read_only"
         self.assertNotIn("DROP", stdout.upper())
         self.assertEqual(stderr, "")
 
+    def test_ops_refresh_graph_cli_loads_graph_and_reports_status(self):
+        require_postgres_binaries()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "repomap.local.toml"
+            graph_root = Path(tmpdir) / "repo-map"
+            graph_root.mkdir()
+            (graph_root / "README.md").write_text("# Fixture\n", encoding="utf-8")
+            before_files = sorted(path.name for path in graph_root.iterdir())
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                config_path.write_text(
+                    f"""\
+schema_version = 1
+
+[service]
+mode = "local"
+mcp_transport = "stdio"
+log_level = "info"
+
+[postgres]
+host = "{postgres.socket_dir}"
+port = {postgres.port}
+database = "postgres"
+user = "{postgres.user}"
+password_env = "REPOMAP_PG_PASSWORD"
+
+[[graphs]]
+id = "repo-map"
+name = "RepoMap"
+root_path = "{graph_root}"
+repository_name = "repo-map"
+privacy = "public-dev"
+enabled = true
+mcp_visible = true
+extractor_profile = "default"
+refresh_policy = "manual"
+
+[server_memory]
+enabled = false
+path = "~/.codex/codex-vc/mcp/server-memory"
+mode = "read_only"
+""",
+                    encoding="utf-8",
+                )
+
+                exit_code, stdout, stderr = run_repo_map_in_process(
+                    "ops",
+                    "refresh-graph",
+                    "--config",
+                    str(config_path),
+                    "--graph",
+                    "repo-map",
+                    "--psql-command",
+                    postgres.psql_command,
+                    "--json",
+                )
+                status_exit_code, status_stdout, status_stderr = run_repo_map_in_process(
+                    "ops",
+                    "refresh-status",
+                    "--config",
+                    str(config_path),
+                    "--psql-command",
+                    postgres.psql_command,
+                    "--json",
+                )
+                table_status_exit_code, table_status_stdout, table_status_stderr = (
+                    run_repo_map_in_process(
+                        "ops",
+                        "refresh-status",
+                        "--config",
+                        str(config_path),
+                        "--psql-command",
+                        postgres.psql_command,
+                    )
+                )
+                repository_count = postgres.psql_scalar(
+                    "SELECT count(*) FROM repositories;"
+                )
+                raw_count = postgres.psql_scalar(
+                    "SELECT count(*) FROM raw_observations;"
+                )
+            after_files = sorted(path.name for path in graph_root.iterdir())
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["result"], "success")
+        self.assertEqual(payload["refreshed_graph_count"], 1)
+        self.assertEqual(payload["graphs"][0]["graph_id"], "repo-map")
+        self.assertGreater(payload["graphs"][0]["observations"], 0)
+        self.assertFalse(payload["safety"]["destructive_db_actions"])
+        self.assertEqual(status_exit_code, 0, status_stderr)
+        status_payload = json.loads(status_stdout)
+        self.assertTrue(status_payload["db_checked"])
+        self.assertEqual(
+            status_payload["graphs"][0]["latest_run_id"],
+            payload["graphs"][0]["run_id"],
+        )
+        self.assertEqual(status_payload["graphs"][0]["latest_run_status"], "complete")
+        self.assertGreater(status_payload["graphs"][0]["raw_observations"], 0)
+        self.assertEqual(table_status_exit_code, 0, table_status_stderr)
+        self.assertIn("RepoMap ops refresh status", table_status_stdout)
+        self.assertIn("repo-map | repo-map | public-dev | complete", table_status_stdout)
+        self.assertEqual(repository_count, "1")
+        self.assertGreater(int(raw_count), 0)
+        self.assertEqual(before_files, after_files)
+        self.assertEqual(stderr, "")
+        self.assertEqual(status_stderr, "")
+        self.assertEqual(table_status_stderr, "")
+
+    def test_ops_refresh_enabled_skips_disabled_private_placeholders(self):
+        require_postgres_binaries()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "repomap.local.toml"
+            graph_root = Path(tmpdir) / "repo-map"
+            graph_root.mkdir()
+            (graph_root / "README.md").write_text("# Fixture\n", encoding="utf-8")
+            disabled_private_root = Path(tmpdir) / "missing-private-root"
+            with temporary_postgres() as postgres:
+                apply_migrations(
+                    default_rdbms_root(),
+                    postgres.psql_args,
+                    psql_command=postgres.psql_command,
+                )
+                config_path.write_text(
+                    f"""\
+schema_version = 1
+
+[service]
+mode = "local"
+mcp_transport = "stdio"
+log_level = "info"
+
+[postgres]
+host = "{postgres.socket_dir}"
+port = {postgres.port}
+database = "postgres"
+user = "{postgres.user}"
+password_env = "REPOMAP_PG_PASSWORD"
+
+[[graphs]]
+id = "repo-map"
+name = "RepoMap"
+root_path = "{graph_root}"
+repository_name = "repo-map"
+privacy = "public-dev"
+enabled = true
+mcp_visible = true
+extractor_profile = "default"
+refresh_policy = "manual"
+
+[[graphs]]
+id = "codex-vc"
+name = "Codex VC"
+root_path = "{disabled_private_root}"
+repository_name = "codex-vc"
+privacy = "private-ops"
+enabled = false
+mcp_visible = false
+extractor_profile = "private-ops"
+refresh_policy = "manual"
+
+[server_memory]
+enabled = false
+path = "~/.codex/codex-vc/mcp/server-memory"
+mode = "read_only"
+""",
+                    encoding="utf-8",
+                )
+
+                exit_code, stdout, stderr = run_repo_map_in_process(
+                    "ops",
+                    "refresh-enabled",
+                    "--config",
+                    str(config_path),
+                    "--psql-command",
+                    postgres.psql_command,
+                    "--json",
+                )
+                table_exit_code, table_stdout, table_stderr = run_repo_map_in_process(
+                    "ops",
+                    "refresh-enabled",
+                    "--config",
+                    str(config_path),
+                    "--psql-command",
+                    postgres.psql_command,
+                )
+                repository_names = postgres.psql_scalar(
+                    "SELECT string_agg(name, ',' ORDER BY name) FROM repositories;"
+                )
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["result"], "success")
+        self.assertEqual(payload["graph_count"], 1)
+        self.assertEqual(payload["graphs"][0]["graph_id"], "repo-map")
+        self.assertNotIn("codex-vc", stdout)
+        self.assertEqual(table_exit_code, 0, table_stderr)
+        self.assertIn("RepoMap ops refresh result", table_stdout)
+        self.assertIn("repo-map | repo-map | public-dev | success", table_stdout)
+        self.assertNotIn("codex-vc", table_stdout)
+        self.assertEqual(repository_names, "repo-map")
+        self.assertEqual(stderr, "")
+        self.assertEqual(table_stderr, "")
+
+    def test_ops_refresh_graph_cli_reports_storage_load_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "repomap.local.toml"
+            graph_root = Path(tmpdir) / "repo-map"
+            graph_root.mkdir()
+            (graph_root / "README.md").write_text("# Fixture\n", encoding="utf-8")
+            config_path.write_text(
+                f"""\
+schema_version = 1
+
+[service]
+mode = "local"
+mcp_transport = "stdio"
+log_level = "info"
+
+[postgres]
+host = "127.0.0.1"
+port = 5432
+database = "repomap"
+user = "admin"
+password_env = "REPOMAP_PG_PASSWORD"
+
+[[graphs]]
+id = "repo-map"
+name = "RepoMap"
+root_path = "{graph_root}"
+repository_name = "repo-map"
+privacy = "private-ops"
+enabled = true
+mcp_visible = true
+extractor_profile = "default"
+refresh_policy = "manual"
+
+[server_memory]
+enabled = false
+path = "~/.codex/codex-vc/mcp/server-memory"
+mode = "read_only"
+""",
+                encoding="utf-8",
+            )
+
+            exit_code, stdout, stderr = run_repo_map_in_process(
+                "ops",
+                "refresh-graph",
+                "--config",
+                str(config_path),
+                "--graph",
+                "repo-map",
+                "--psql-command",
+                "/bin/false",
+                "--json",
+            )
+
+        self.assertEqual(exit_code, 1)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["result"], "failed")
+        self.assertEqual(payload["graphs"][0]["result"], "failure")
+        self.assertEqual(
+            payload["graphs"][0]["warnings"][0]["code"],
+            "private-graph-refresh",
+        )
+        self.assertFalse(payload["safety"]["destructive_db_actions"])
+        self.assertEqual(stderr, "")
+
+    def test_ops_refresh_graph_cli_rejects_disabled_graph_before_root_read(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "repomap.local.toml"
+            disabled_root = Path(tmpdir) / "missing"
+            config_path.write_text(
+                f"""\
+schema_version = 1
+
+[service]
+mode = "local"
+mcp_transport = "stdio"
+log_level = "info"
+
+[postgres]
+host = "127.0.0.1"
+port = 5432
+database = "repomap"
+user = "admin"
+password_env = "REPOMAP_PG_PASSWORD"
+
+[[graphs]]
+id = "codex-vc"
+name = "Codex VC"
+root_path = "{disabled_root}"
+repository_name = "codex-vc"
+privacy = "private-ops"
+enabled = false
+mcp_visible = false
+extractor_profile = "private-ops"
+refresh_policy = "manual"
+
+[server_memory]
+enabled = false
+path = "~/.codex/codex-vc/mcp/server-memory"
+mode = "read_only"
+""",
+                encoding="utf-8",
+            )
+
+            exit_code, stdout, stderr = run_repo_map_in_process(
+                "ops",
+                "refresh-graph",
+                "--config",
+                str(config_path),
+                "--graph",
+                "codex-vc",
+                "--json",
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("disabled", stderr)
+
+    def test_ops_refresh_status_cli_reports_missing_schema_read_only(self):
+        require_postgres_binaries()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "repomap.local.toml"
+            graph_root = Path(tmpdir) / "repo-map"
+            with temporary_postgres() as postgres:
+                config_path.write_text(
+                    f"""\
+schema_version = 1
+
+[service]
+mode = "local"
+mcp_transport = "stdio"
+log_level = "info"
+
+[postgres]
+host = "{postgres.socket_dir}"
+port = {postgres.port}
+database = "postgres"
+user = "{postgres.user}"
+password_env = "REPOMAP_PG_PASSWORD"
+
+[[graphs]]
+id = "repo-map"
+name = "RepoMap"
+root_path = "{graph_root}"
+repository_name = "repo-map"
+privacy = "public-dev"
+enabled = true
+mcp_visible = true
+extractor_profile = "default"
+refresh_policy = "manual"
+
+[server_memory]
+enabled = false
+path = "~/.codex/codex-vc/mcp/server-memory"
+mode = "read_only"
+""",
+                    encoding="utf-8",
+                )
+
+                exit_code, stdout, stderr = run_repo_map_in_process(
+                    "ops",
+                    "refresh-status",
+                    "--config",
+                    str(config_path),
+                    "--psql-command",
+                    postgres.psql_command,
+                    "--json",
+                )
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertTrue(payload["db_checked"])
+        self.assertFalse(payload["graphs"][0]["root_path_checked"])
+        self.assertIn("storage schema is unavailable", payload["graphs"][0]["error"])
+        self.assertFalse(payload["safety"]["destructive_db_actions"])
+        self.assertEqual(stderr, "")
+
     def test_raw_observation_upsert_is_idempotent_for_same_payload_hash(self):
         require_postgres_binaries()
         observation = RawObservation(

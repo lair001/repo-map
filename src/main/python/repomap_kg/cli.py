@@ -64,6 +64,16 @@ from repomap_kg.ops_config import (
     ops_graph_registry_status_to_jsonable,
     ops_config_status_to_jsonable,
 )
+from repomap_kg.ops_refresh import (
+    OpsRefreshError,
+    format_refresh_result_table,
+    format_refresh_status_table,
+    query_refresh_status,
+    refresh_enabled_graphs,
+    refresh_graph,
+    refresh_result_to_jsonable,
+    refresh_status_to_jsonable,
+)
 from repomap_kg.profiles import ProfileValidationError, load_profile
 from repomap_kg.project_identity import PROJECT_IDENTITY
 from repomap_kg.source_ingestion import (
@@ -513,6 +523,68 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit configured graph registry status as JSON",
+    )
+    refresh_graph_command = ops_subcommands.add_parser(
+        "refresh-graph",
+        help="refresh one enabled configured graph from its local root",
+    )
+    refresh_graph_command.add_argument(
+        "--config",
+        required=True,
+        help="path to repomap.local.toml or another operations config",
+    )
+    refresh_graph_command.add_argument(
+        "--graph",
+        required=True,
+        help="configured graph id to refresh",
+    )
+    refresh_graph_command.add_argument(
+        "--psql-command",
+        default="psql",
+        help="psql executable to use for loading storage",
+    )
+    refresh_graph_command.add_argument(
+        "--json",
+        action="store_true",
+        help="emit graph refresh result as JSON",
+    )
+    refresh_enabled = ops_subcommands.add_parser(
+        "refresh-enabled",
+        help="refresh all enabled configured graphs in config order",
+    )
+    refresh_enabled.add_argument(
+        "--config",
+        required=True,
+        help="path to repomap.local.toml or another operations config",
+    )
+    refresh_enabled.add_argument(
+        "--psql-command",
+        default="psql",
+        help="psql executable to use for loading storage",
+    )
+    refresh_enabled.add_argument(
+        "--json",
+        action="store_true",
+        help="emit enabled graph refresh result as JSON",
+    )
+    refresh_status = ops_subcommands.add_parser(
+        "refresh-status",
+        help="read stored refresh status for configured graphs",
+    )
+    refresh_status.add_argument(
+        "--config",
+        required=True,
+        help="path to repomap.local.toml or another operations config",
+    )
+    refresh_status.add_argument(
+        "--psql-command",
+        default="psql",
+        help="psql executable to use for read-only storage status",
+    )
+    refresh_status.add_argument(
+        "--json",
+        action="store_true",
+        help="emit graph refresh status as JSON",
     )
 
     storage = subparsers.add_parser(
@@ -1458,6 +1530,76 @@ def main(argv: list[str] | None = None) -> int:
                     graph_storage_status=graph_storage_status,
                 )
             )
+        return 0
+
+    if args.command == "ops" and args.ops_command == "refresh-graph":
+        try:
+            config = load_ops_config(args.config)
+            result = refresh_graph(
+                config,
+                args.graph,
+                psql_command=args.psql_command,
+            )
+        except (OpsConfigError, OpsRefreshError) as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        payload = refresh_result_to_jsonable(
+            config,
+            [result],
+            command="refresh-graph",
+        )
+        if args.json:
+            print(json.dumps(payload, sort_keys=True))
+        else:
+            print(format_refresh_result_table(config, [result], command="refresh-graph"))
+        return 0 if payload["result"] == "success" else 1
+
+    if args.command == "ops" and args.ops_command == "refresh-enabled":
+        try:
+            config = load_ops_config(args.config)
+            results = refresh_enabled_graphs(
+                config,
+                psql_command=args.psql_command,
+            )
+        except OpsConfigError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        payload = refresh_result_to_jsonable(
+            config,
+            results,
+            command="refresh-enabled",
+        )
+        if args.json:
+            print(json.dumps(payload, sort_keys=True))
+        else:
+            print(
+                format_refresh_result_table(
+                    config,
+                    results,
+                    command="refresh-enabled",
+                )
+            )
+        return 0 if payload["result"] == "success" else 1
+
+    if args.command == "ops" and args.ops_command == "refresh-status":
+        try:
+            config = load_ops_config(args.config)
+            statuses = query_refresh_status(
+                config,
+                psql_command=args.psql_command,
+            )
+        except OpsConfigError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(
+                json.dumps(
+                    refresh_status_to_jsonable(config, statuses),
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(format_refresh_status_table(config, statuses))
         return 0
 
     if args.command == "storage" and args.storage_command == "load-files":
